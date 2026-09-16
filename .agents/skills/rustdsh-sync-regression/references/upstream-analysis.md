@@ -4,7 +4,7 @@
 > **当前同步点：dsh-v0.1.6-alpha.1（0d1f50007f）**——2026-09-16 同步（发布点=master HEAD）。此前 fb2c4b9e69（0.1.5-rc.2，2026-09-11 同步）。
 > 0.1.5-alpha.1 主面：**会话格式 v3**（system prompt 晋升 system/message 行 + request/header 去 system + PTC 改名 + canonical 信封）、composer 统计行改双图标 pill + 互斥统计对话框、SystemPromptRow（系统提示词折叠行）；Sidebar 工作区文件树/dockkit/textpreview/remotes 全链面外。
 > **最近检查：2026-09-14（文件浏览器面重判 + 实施轮）**——上游无需新拉（本地 master c291e7961a 已含 ui-sidebar-files/documentpreview 全链；网络面 GitHub SSH/HTTPS 双断、系统代理 7897 出口坏，SSH443 握手可成但传输被掐，改用本地既有树分析）； **最近检查：2026-09-11（定时轮 #7，零更新轮）**——上游 pull 经仓库局部代理（http.proxy=127.0.0.1:7897，SSH/HTTPS 直连被墙后的固定修复）成功，Already up to date（HEAD=master=rc.2 发布点 fb2c4b9e69），五段零差异，无动作。上轮 #6 同步结论不变。
-> **最近检查：2026-09-16（定时轮 #9，同步轮）**——上游发布 0.1.6-alpha.1（833 文件 +25354/-14977，存储零变更），面内一项实施（时长格式化小时段）；面内零增补外全为面外（browser-use/boot 桌面打包/terminal controller/Mermaid docs viewer）。
+> **最近检查：2026-09-18（定时轮 #10，零更新轮）**——上游 pull 重试策略首次生效（第 5 次成功，前 4 次 SSH 通道拒绝），HEAD 仍 0d1f50007f（= master = 0.1.6-alpha.1 发布点），零功能更新，无代码动作。
 
 ## 1. 一键差异分析
 

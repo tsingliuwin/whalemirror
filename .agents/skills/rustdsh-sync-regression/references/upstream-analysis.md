@@ -1,10 +1,10 @@
 # 上游更新分析法（模式 A 详细步骤）
 
 上游仓库：`E:\aiproject\deepseek-harness`（git）。rustdsh 是其 **web 前端（packages/client/*）+ 存储行为（storage/session）+ llm-deepseek 适配层** 的 Rust/GPUI 1:1 复刻。
-> **当前同步点：dsh-v0.1.6-alpha.1（0d1f50007f）**——2026-09-16 同步（发布点=master HEAD）。此前 fb2c4b9e69（0.1.5-rc.2，2026-09-11 同步）。
+> **当前同步点：dsh-v0.1.6-alpha.2（ddefc45fbc）**——2026-09-18 同步（发布点=master HEAD，无增量）。此前 0d1f50007f（0.1.6-alpha.1，2026-09-16 同步）。
 > 0.1.5-alpha.1 主面：**会话格式 v3**（system prompt 晋升 system/message 行 + request/header 去 system + PTC 改名 + canonical 信封）、composer 统计行改双图标 pill + 互斥统计对话框、SystemPromptRow（系统提示词折叠行）；Sidebar 工作区文件树/dockkit/textpreview/remotes 全链面外。
 > **最近检查：2026-09-14（文件浏览器面重判 + 实施轮）**——上游无需新拉（本地 master c291e7961a 已含 ui-sidebar-files/documentpreview 全链；网络面 GitHub SSH/HTTPS 双断、系统代理 7897 出口坏，SSH443 握手可成但传输被掐，改用本地既有树分析）； **最近检查：2026-09-11（定时轮 #7，零更新轮）**——上游 pull 经仓库局部代理（http.proxy=127.0.0.1:7897，SSH/HTTPS 直连被墙后的固定修复）成功，Already up to date（HEAD=master=rc.2 发布点 fb2c4b9e69），五段零差异，无动作。上轮 #6 同步结论不变。
-> **最近检查：2026-09-18（定时轮 #10，零更新轮）**——上游 pull 重试策略首次生效（第 5 次成功，前 4 次 SSH 通道拒绝），HEAD 仍 0d1f50007f（= master = 0.1.6-alpha.1 发布点），零功能更新，无代码动作。
+> **最近检查：2026-09-18（定时轮 #11，同步轮）**——上游发布 0.1.6-alpha.2（809 文件 +33345/-7511，存储零变更），**无面内实施**：主面 Sidebar Browser/plan 卡片/subagent 侧栏聊天/desktop 打包全部面外；词汇新增（error.sessionInUse、terminal.noExitCode、presented/changes/review 系列）全部属面外面；context usage 进 composer stats 一笔为 pill 布局 css 微调（rustdsh 自绘布局行为等价）。changes/review 轮改动审阅卡与已实装的文件树联动，待用户定交互形态后单独立项（见偏差表）。
 
 ## 1. 一键差异分析
 
@@ -70,6 +70,12 @@
 | Think/compaction 头滚动吸顶（67271a921b）| 面外 | 聊天流无 sticky 渲染机制（与轨迹吸顶的固定行高模型不同构）|
 | browser-use 实验后端/MCP、boot 桌面打包（pkg/asar/runtime）、terminal-controller 新包 + 终端 launcher/shell 记忆、guide 终端菜单、draft editor 隔离、session-log 上传、Mermaid docs viewer | 面外 | 各无对应面（browser-use 工具集无/Node 打包层/终端与 guide 面/docs 站 viewer）|
 | markdown 表格 hover 高度稳定（55a17d2e57）| 面外 | vendor TextView 表格渲染面 |
+| Sidebar Browser（9fed351d3d 等一批：聊天链接改侧栏内嵌浏览器打开/导航/安全文档）| 面外 | GPUI 无 webview 组件；rustdsh 链接维持系统浏览器打开（7f0a613 守卫）|
+| plan 卡片系列（提交/审阅/预览/artifact 卡/自动打开）| 面外 | rustdsh 无 plan 审阅面（既有判定）|
+| subagent 侧栏聊天（e62587c163）/ d9a55c7c0d desktop 系列（asar 更新/DPAPI/插件管理器移除）| 面外 | subagent 无 UI 面（既有判定）/ Node 桌面打包层 |
+| b6726fe79d move context usage into composer stats | 面外（行为等价）| 实质为 pill 容器 css 宽度约束微调 + 注释清理；rustdsh 自绘 strip 布局行为已等价 |
+| error.sessionInUse（其他 DSH 实例占用会话报错）| 面外 | lease 检测既有判定：rustdsh 单写者约定 + 仅容忍 session.lock |
+| changes.*/review.* 轮改动审阅卡大批词汇（已编辑 N 文件/±计数/侧栏查看/split-unified diff）| 面外（待定向）| 依赖 workspace-files 的 turn 改动收集与 diff 数据面 + review 卡 UI；与 09-14/09-15 实装的文件树 dock 联动，交互形态待用户定夺后单独立项 |
 | category.service-stability 文案改「稳定性和速度」/ guide.description | 面外 | feedback 分类与 sidebar guide 面无镜像 |
 | CodeBlock contentRef/display:contents、TurnTailNodeView actions margin-top 4px | 面外 | web DOM 缝（ref/滚动端口挂载）与 DOM 流间距补偿，vendor TextView 布局模型无对应结构 |
 | sidebar guide 起始页/documentpreview 精修/preview scrollports | 面外 | Sidebar 全链面外（既有判定）|

@@ -19,6 +19,9 @@
 
 ## 2. 同步面判定表
 
+> **面外处置原则（2026-09-18 起）**：判「面外」= 登记进 `feature-backlog.md` 差距清单并排批次，
+> 不再以「不处理」终结。上游无更新的轮次按 backlog 补缺。硬约束项标观察并定期重估。
+
 | 上游改动 | 判定 | 理由 |
 |----------|------|------|
 | packages/client/ui-*（chat/conversation/settings*/sidebar/primitives/theme/tool）| **面内** | UI 1:1 镜像 |

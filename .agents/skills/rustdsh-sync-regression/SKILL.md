@@ -21,8 +21,10 @@ rustdsh-fetch-models-feature）。
    判读五段输出，**先判定发布树是否零功能变更**（只见 package.json = 版本号 bump），
    再看 master HEAD 相对发布标签的增量。详细判定表与实施顺序：
    读 `references/upstream-analysis.md`。
-2. **同步面判定**：按判定表把每 组变更归为 面内（必须同步）/ 面外（记录原因，勿动手）。
-   feat→revert 对先算净态（以 HEAD 为准），别同步一个已被撤销的功能。
+2. **同步面判定**：按判定表把每 组变更归为 面内（必须同步）/ 面外。feat→revert 对先算净态（以 HEAD 为准），
+   别同步一个已被撤销的功能。**面外处置（原则变更 2026-09-18）**：不再以「不处理」终结——一律登记/更新
+   `references/feature-backlog.md` 差距清单（缺口、引入点、依赖约束、批次），逐步向 web 端靠齐；
+   硬约束项标「观察」，确认永不做的标「不适用」附因。
 3. **实施**：词汇表 → UI 数值 → 存储行为 → llm-deepseek，每块完成即 `cargo test --workspace`。
    存储变更必须先读上游对应 `*.spec.ts` 确认语义。
 4. **回归**：跑模式 B 的 A 层（`scripts/regression-core.sh`）；UI 相关变更加跑受影响的
@@ -36,6 +38,9 @@ rustdsh-fetch-models-feature）。
    `bash .agents/skills/rustdsh-sync-regression/scripts/regression-core.sh`
    —— workspace 单测 + 真实 ~/.dsh 语料加载 + projcache 标题互通。失败先修这里。
 2. **B-H 层功能点遍历**：打开 `references/feature-checklist.md`，按清单逐项走。
+2.5 **补缺轮**：上游无面内更新的轮次，打开 `references/feature-backlog.md` 按批次/优先级取一项推进——
+   大项拆子批、每轮一个可验证切片；实施前读上游 spec 确认语义；新交互形态用户未定夺的先标注待定向。
+   每轮结尾维护 backlog（登记新缺口/更新状态/按「好用的 agent 工具」目标调优先级）。
    UI 项的实机操作套路（静默桌面/坐标换算/点击输入/截图判读）与已知坑：
    读 `references/ui-automation.md`。UI 验证前先 `bash scripts/restart-host.sh`
    确保宿主是最新构建。

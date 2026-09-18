@@ -278,8 +278,26 @@ impl Tool for FsTool {
             }
             "write" => {
                 let content = input.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                // before 捕获（上游 DiffResultView.FileDiff：oldText null = 新文件/无先前内容；
+                // 非文本旧内容同样按 null——UI 元数据只服务文本 diff）
+                let before = std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
                 match std::fs::write(path, content) {
-                    Ok(()) => ToolExecutionResult::text(format!("wrote {} bytes", content.len())),
+                    Ok(()) => {
+                        let presentation = serde_json::json!({
+                            "card": "diff",
+                            "diffs": [{
+                                "path": path.display().to_string(),
+                                "oldText": before,
+                                "newText": content,
+                            }],
+                        });
+                        ToolExecutionResult {
+                            presentation: Some(presentation),
+                            ..ToolExecutionResult::text(format!("wrote {} bytes", content.len()))
+                        }
+                    }
                     Err(e) => ToolExecutionResult::error(format!("write failed: {e}")),
                 }
             }
@@ -396,5 +414,51 @@ mod mode_tests {
         );
         assert_eq!(FsMode::from_web("nope"), None);
         assert_eq!(FsMode::WorkspaceWrite.as_web(), "workspace-write");
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    use dsh_tools::{Tool, ToolExecutionInput};
+
+    fn input(args: &str) -> ToolExecutionInput {
+        ToolExecutionInput::with_raw_arguments(
+            dsh_llm::CallId("c1".to_string()),
+            "fs".to_string(),
+            args.to_string(),
+        )
+    }
+
+    /// write 的 presentation 缝：FileDiff（oldText=先前内容/新文件 null），
+    /// 模型可见文本保持 "wrote N bytes"。
+    #[tokio::test]
+    async fn write_carries_file_diff_presentation() {
+        let dir = std::env::temp_dir().join(format!("dsh-fs-pres-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = FsTool::new(std::sync::Arc::new(AllowAllPolicy));
+        let path = dir.join("a.txt");
+        let write_args = |content: &str| {
+            serde_json::json!({"op": "write", "path": path.display().to_string(), "content": content})
+                .to_string()
+        };
+
+        // 新文件：oldText = null
+        let r = tool.execute(&input(&write_args("hi"))).await;
+        assert!(!r.is_error);
+        let meta = r.presentation.clone().unwrap();
+        assert_eq!(meta["card"], "diff");
+        assert_eq!(meta["diffs"][0]["oldText"], serde_json::Value::Null);
+        assert_eq!(meta["diffs"][0]["newText"], "hi");
+        assert!(
+            matches!(&r.content[0], dsh_llm::ContentBlock::Text { text } if text.starts_with("wrote "))
+        );
+
+        // 覆盖：oldText = 先前内容
+        let r = tool.execute(&input(&write_args("bye"))).await;
+        let meta = r.presentation.unwrap();
+        assert_eq!(meta["diffs"][0]["oldText"], "hi");
+        assert_eq!(meta["diffs"][0]["newText"], "bye");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

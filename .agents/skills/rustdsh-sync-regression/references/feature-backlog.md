@@ -12,7 +12,7 @@
 
 | # | 缺口 | 引入点 | 缺口描述 | 依赖/约束 | 状态 |
 |---|---|---|---|---|---|
-| 1 | 轮改动审阅卡 + diff 数据面 | 0.1.6-alpha.2 | changes/review 系列词汇：本轮「已编辑 N 个文件」卡（±行数、二进制标记）、点开单文件 diff、split/unified 切换、wrap 开关、「在侧边栏打开整个文件」联动文件树 dock。数据面需 Host 端 turn 改动收集 + diff 计算（上游 workspace-files/changes 语义，需读上游 spec 确认 diff 基准：编辑器快照还是 fs 扫描） | 与 09-15 实装的文件树 dock 联动；diff 数据面要先读上游 `workspace-files`/`changes.ts` spec | 待办（用户定交互形态后优先做） |
+| 1 | 轮改动审阅卡 + diff 数据面 | 0.1.6-alpha.2 | changes/review 系列词汇：本轮「已编辑 N 个文件」卡（±行数、二进制标记）、点开单文件 diff、split/unified 切换、wrap 开关、「在侧边栏打开整个文件」联动文件树 dock。**数据面切片已落（09-19）**：dsh-tools 增 presentation 元数据缝（上游 output.presentationMeta 投影等价）+ 行 diff 纯函数（LCS hunk、±3 行上下文、上下文不计统计——上游 DiffBlock 同语义）+ dsh-fs write 捕获 before（FileDiff oldText/newText）+ tool/result 落盘读回往返（presentation 落 data 内，上游 merge-extensible 宽容）；剩 UI 层（review 卡/文件树 dock diff tab）**待用户定交互形态** | 上游 spec 已读：changes=fs/observed 观测流（version token，非 diff 内容）；diff=工具结果 presentationMeta（FileDiff oldText/newText，presentation.ts） | 进行中（UI 待定向） |
 | 2 | plan 审阅面 | 0.1.6-alpha.2 多笔 | plan 卡片（提交/审阅状态点/预览 tab + plan icon/artifact 卡自动打开/narrow 屏自动预览/审阅摘要卡）；上游 plan 生命周期（提交→审阅→采纳）在会话流的呈现 | plan 数据经 session-reference/事件流承载，需先读上游 plan 相关事件与 spec | 待办 |
 | 3 | 图片输入全链 | 0.1.3-alpha.1 起累积 | composer 图片捕获/粘贴/拖放 + 规范化流水线（上游 image offload：resize/编码）；vision 模型的图片发送（DeepSeekAdapter 请求侧 image block——V41 Flash/V4 Flash Vision Exp 已在目录）；durable image offload（0.1.6-alpha.1 note：附件落盘与消息引用） | adapter 请求侧需支持 ContentBlock::Image → API 字段；composer 需粘贴/拖放事件面 | 待办（拆 3-4 个子批） |
 | 4 | subagent 侧栏聊天 | 0.1.6-alpha.2 | 子 agent 会话在侧栏 tab 打开、实时查看子任务过程、settlement notice 文本化呈现（b86b89da94/29debb8b24 的 notice 语义） | dsh-subagent 已有驱动；缺 UI 承载（dock tab 或独立面板）+ 子会话日志读取面 | 待办 |

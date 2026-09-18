@@ -77,15 +77,20 @@ pub struct ToolExecutionResult {
     /// When true, the turn concludes after this step (the model is not asked
     /// for another step).
     pub concludes_turn: bool,
+    /// UI 元数据缝（上游工具 `output.presentationMeta` 投影等价）：随 tool/result
+    /// 持久化、不进模型可见文本；形态由各工具自定（如 diff 卡的
+    /// `{card:"diff", diffs:[{path, oldText, newText}]}`，FileDiff 照上游
+    /// presentation.ts——oldText 为 null 表示新文件/无先前内容）。
+    pub presentation: Option<serde_json::Value>,
 }
 
 impl ToolExecutionResult {
     pub fn text(text: impl Into<String>) -> Self {
-        Self { content: vec![ContentBlock::text(text)], is_error: false, concludes_turn: false }
+        Self { content: vec![ContentBlock::text(text)], is_error: false, concludes_turn: false, presentation: None }
     }
 
     pub fn error(text: impl Into<String>) -> Self {
-        Self { content: vec![ContentBlock::text(text)], is_error: true, concludes_turn: false }
+        Self { content: vec![ContentBlock::text(text)], is_error: true, concludes_turn: false, presentation: None }
     }
 }
 
@@ -172,5 +177,181 @@ impl ToolRegistry {
     pub async fn execute(&self, input: &ToolExecutionInput) -> Option<ToolExecutionResult> {
         let tool = self.get(&input.name)?;
         Some(tool.execute(input).await)
+    }
+}
+// ---- 行 diff（上游 DiffBlock 语义的纯函数面）----
+
+/// 一行补丁的种类。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffLineKind {
+    /// 上下文行（中性显示，不计入增删统计——上游 review 修正语义）。
+    Context,
+    /// 删除行（旧文件独有）。
+    Del,
+    /// 新增行（新文件独有）。
+    Add,
+}
+
+/// 一行补丁：种类与文本（不含行尾换行）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub text: String,
+}
+
+/// 一个 hunk：一处改动及其两侧最多 3 行上下文；远距改动分成多个 hunk。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffHunk {
+    pub lines: Vec<DiffLine>,
+}
+
+/// 增删统计（上下文行不计入——上游 diffTotals 同语义）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct DiffTotals {
+    pub added: u64,
+    pub deleted: u64,
+}
+
+/// 旧文本按行切分（末尾换行为终止符——与上游一致：仅末尾换行有无不同不展示）。
+fn split_lines(text: &str) -> Vec<&str> {
+    let trimmed = text.strip_suffix('\n').unwrap_or(text);
+    if trimmed.is_empty() { Vec::new() } else { trimmed.split('\n').collect() }
+}
+
+/// 行 LCS DP 表（O(n·m)；上游 note 接受大替换的同步计算成本）。
+fn lcs_table(a: &[&str], b: &[&str]) -> Vec<Vec<u32>> {
+    let mut t = vec![vec![0u32; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            t[i][j] = if a[i] == b[j] { t[i + 1][j + 1] + 1 } else { t[i + 1][j].max(t[i][j + 1]) };
+        }
+    }
+    t
+}
+
+fn op_lines(kind: DiffLineKind, lines: &[&str], out: &mut Vec<DiffLine>) {
+    out.extend(lines.iter().map(|l| DiffLine { kind, text: (*l).to_string() }));
+}
+
+/// 生成行补丁：LCS 对齐后，把相邻的改动行聚为一个 hunk，两侧保留至多
+/// [`CONTEXT_LINES`] 行上下文；相距超过 `2 * CONTEXT_LINES` 的改动分属不同 hunk。
+pub fn line_patch(old: &str, new: &str) -> Vec<DiffHunk> {
+    pub const CONTEXT_LINES: usize = 3;
+    let a = split_lines(old);
+    let b = split_lines(new);
+    let t = lcs_table(&a, &b);
+    // 走 LCS 得到全量操作序列（context/del/add）
+    let mut ops: Vec<DiffLine> = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            op_lines(DiffLineKind::Context, &a[i..i + 1], &mut ops);
+            i += 1;
+            j += 1;
+        } else if t[i + 1][j] >= t[i][j + 1] {
+            op_lines(DiffLineKind::Del, &a[i..i + 1], &mut ops);
+            i += 1;
+        } else {
+            op_lines(DiffLineKind::Add, &b[j..j + 1], &mut ops);
+            j += 1;
+        }
+    }
+    op_lines(DiffLineKind::Del, &a[i..], &mut ops);
+    op_lines(DiffLineKind::Add, &b[j..], &mut ops);
+
+    // 聚 hunk：改动为中心，两侧扩 CONTEXT_LINES 上下文；相邻改动区重叠则并 hunk
+    let is_change = |l: &DiffLine| l.kind != DiffLineKind::Context;
+    let n = ops.len();
+    let mut marked = vec![false; n];
+    for k in 0..n {
+        if is_change(&ops[k]) {
+            for m in k.saturating_sub(CONTEXT_LINES)..=(k + CONTEXT_LINES).min(n - 1) {
+                marked[m] = true;
+            }
+        }
+    }
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+    let mut k = 0usize;
+    while k < n {
+        if !marked[k] {
+            k += 1;
+            continue;
+        }
+        let start = k;
+        while k < n && (marked[k] || (k + 1 < n && marked[k + 1] && is_change(&ops[k + 1])))
+        {
+            // 连续标记区吞并；紧邻下一行是改动且已标记也吞并
+            k += 1;
+        }
+        hunks.push(DiffHunk { lines: ops[start..k].to_vec() });
+    }
+    hunks
+}
+
+/// 增删统计：非上下文行计数（上游 diffTotals 同语义）。
+pub fn diff_totals(old: &str, new: &str) -> DiffTotals {
+    let a = split_lines(old);
+    let b = split_lines(new);
+    let t = lcs_table(&a, &b);
+    let lcs = t[0][0] as u64;
+    DiffTotals {
+        deleted: a.len() as u64 - lcs,
+        added: b.len() as u64 - lcs,
+    }
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    #[test]
+    fn insertion_deletion_replacement_totals() {
+        assert_eq!(diff_totals("", "a
+b"), DiffTotals { added: 2, deleted: 0 });
+        assert_eq!(diff_totals("a
+b", ""), DiffTotals { added: 0, deleted: 2 });
+        assert_eq!(diff_totals("a
+b", "a
+c"), DiffTotals { added: 1, deleted: 1 });
+        assert_eq!(diff_totals("a
+b", "a
+b"), DiffTotals::default());
+        // 仅末尾换行有无不同不展示（上游 content-line 规则）
+        assert_eq!(diff_totals("a
+", "a"), DiffTotals::default());
+    }
+
+    #[test]
+    fn hunks_carry_context_and_split_at_distance() {
+        // 上下文 3 行：改动两侧保留 ≤3 行中性上下文
+        let old = (1..=10).map(|i| format!("l{i}")).collect::<Vec<_>>().join("
+");
+        let new = old.replacen("l5", "L5", 1);
+        let hunks = line_patch(&old, &new);
+        assert_eq!(hunks.len(), 1, "close change: single hunk");
+        let (ctx, del, add) = hunks[0]
+            .lines
+            .iter()
+            .fold((0usize, 0usize, 0usize), |(c, d, a), l| match l.kind {
+                DiffLineKind::Context => (c + 1, d, a),
+                DiffLineKind::Del => (c, d + 1, a),
+                DiffLineKind::Add => (c, d, a + 1),
+            });
+        assert_eq!((ctx, del, add), (6, 1, 1), "3 context on each side + del/add pair");
+        // 相距 >6 行的两处改动 → 两个 hunk
+        let old2 = (1..=20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("
+");
+        let new2 = old2.replacen("l2", "L2", 1).replacen("l18", "L18", 1);
+        let hunks2 = line_patch(&old2, &new2);
+        assert_eq!(hunks2.len(), 2, "distant changes split");
+        // 上下文行不计入统计
+        assert_eq!(diff_totals(&old, &new), DiffTotals { added: 1, deleted: 1 });
+    }
+
+    #[test]
+    fn new_file_whole_content_is_added() {
+        let hunks = line_patch("", "x
+y");
+        assert!(hunks[0].lines.iter().all(|l| l.kind == DiffLineKind::Add));
     }
 }

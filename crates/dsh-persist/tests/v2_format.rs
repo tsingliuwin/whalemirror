@@ -242,7 +242,7 @@ fn v2_tool_result_and_compaction_shapes() {
         vec![ContentBlock::text("r")],
         false,
     );
-    rec.append(&id, "/tmp/ws", &SessionEvent::ToolResult { turn: 1, step: 1, message: msg, time_ms: None })
+    rec.append(&id, "/tmp/ws", &SessionEvent::ToolResult { turn: 1, step: 1, message: msg, time_ms: None, presentation: None })
         .unwrap();
     rec.append(
         &id,
@@ -576,5 +576,75 @@ fn user_message_file_block_round_trips() {
         }
         other => panic!("expected file block, got {other:?}"),
     }
+    std::fs::remove_dir_all(&dir).ok();
+
+}
+
+#[test]
+fn tool_result_presentation_round_trips() {
+    // UI 元数据缝（上游 output.presentationMeta 投影等价）：随 tool/result
+    // 落盘（信封顶层字段）并读回；None 时不落字段（web 读侧宽容）
+    let dir = temp_dir("tool-pres");
+    let rec = SessionRecorder::new(dir.join("sessions"));
+    let id = SessionId::new("session-pres");
+    rec.create(&id, "/tmp/ws", "standard").unwrap();
+    let meta = serde_json::json!({
+        "card": "diff",
+        "diffs": [{"path": "a.txt", "oldText": null, "newText": "hi"}],
+    });
+    rec.append(
+        &id,
+        "/tmp/ws",
+        &SessionEvent::ToolResult {
+            turn: 1,
+            step: 1,
+            message: Message::user_text("r"),
+            time_ms: None,
+            presentation: Some(meta.clone()),
+        },
+    )
+    .unwrap();
+    rec.append(
+        &id,
+        "/tmp/ws",
+        &SessionEvent::ToolResult {
+            turn: 1,
+            step: 2,
+            message: Message::user_text("r2"),
+            time_ms: None,
+            presentation: None,
+        },
+    )
+    .unwrap();
+
+    // 盘上：第一条带 presentation、第二条无该字段
+    let file = dir
+        .join("sessions")
+        .join(dsh_persist::project_key("/tmp/ws"))
+        .join(id.as_str())
+        .join("session.v3.jsonl.zstd");
+    let rows = read_rows(&file);
+    let with_meta = rows
+        .iter()
+        .find(|r| r["type"] == "tool/result" && r["data"].get("presentation").is_some())
+        .unwrap();
+    assert_eq!(with_meta["data"]["presentation"], meta);
+    let without = rows
+        .iter()
+        .find(|r| r["type"] == "tool/result" && r["data"]["turn"] == 1 && r["data"]["step"] == 2)
+        .unwrap();
+    assert!(without["data"].get("presentation").is_none());
+
+    // 读回：typed 事件还原 presentation
+    let (session, _) = rec.load(&id, Some("/tmp/ws")).unwrap();
+    let restored: Vec<Option<serde_json::Value>> = session
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::ToolResult { presentation, .. } => Some(presentation.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(restored, vec![Some(meta), None]);
     std::fs::remove_dir_all(&dir).ok();
 }

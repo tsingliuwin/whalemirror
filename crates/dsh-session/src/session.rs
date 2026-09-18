@@ -110,6 +110,10 @@ pub enum SessionEvent {
         /// 信封 time（epoch ms）的回传承载；写侧缺省用落盘时刻。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         time_ms: Option<u64>,
+        /// UI 元数据缝（上游工具 output.presentationMeta 投影等价，如 diff 卡
+        /// FileDiff 形）；log-only，不进模型面。None = 工具未附带。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<serde_json::Value>,
     },
     RequestHeader {
         header: EpochHeader,
@@ -442,7 +446,7 @@ mod tests {
             vec![ContentBlock::text("42")],
             false,
         );
-        s.append(SessionEvent::ToolResult { turn: 1, step: 1, message: result_msg, time_ms: None });
+        s.append(SessionEvent::ToolResult { turn: 1, step: 1, message: result_msg, time_ms: None, presentation: None });
         let msgs = s.derive_messages();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::User);

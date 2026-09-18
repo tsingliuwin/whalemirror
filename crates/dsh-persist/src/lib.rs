@@ -1094,11 +1094,13 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                         call_id: CallId(call.to_string()),
                     },
                 };
+                let presentation = data.as_ref().and_then(|d| d.get("presentation")).cloned();
                 return Some(SessionEvent::ToolResult {
                     turn: num(data, "turn"),
                     step: num(data, "step"),
                     message: msg,
                     time_ms: env_time,
+                    presentation,
                 });
             }
             // legacy 平铺形（rustdsh 旧写形）：{toolCallId, content, isError}
@@ -1125,6 +1127,7 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 step: 0,
                 message: msg,
                 time_ms: env_time,
+                presentation: None,
             })
         }
         // 我们自己的压缩/步末事件（step/end 落盘保证 seq 1:1 对齐，
@@ -1539,16 +1542,19 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
         }
         // v2：chunk 不再是事件（缓冲后内嵌结算行）
         SessionEvent::AssistantChunk { .. } => None,
-        SessionEvent::ToolResult { turn, step, message, .. } => {
-            // v2 形：{turn, step, message:{id, role:'user', content, source}}
-            Some(row(
-                "tool/result",
-                serde_json::json!({
-                    "turn": turn,
-                    "step": step,
-                    "message": serde_json::to_value(message).unwrap_or(serde_json::Value::Null),
-                }),
-            ))
+        SessionEvent::ToolResult { turn, step, message, presentation, .. } => {
+            // v2 形：{turn, step, message:{id, role:'user', content, source}}；
+            // presentation（UI 元数据缝）Some 时落信封外顶层字段（web 读侧对
+            // tool/result 未知字段宽容，不破坏互通）
+            let mut envelope = serde_json::json!({
+                "turn": turn,
+                "step": step,
+                "message": serde_json::to_value(message).unwrap_or(serde_json::Value::Null),
+            });
+            if let Some(meta) = presentation {
+                envelope["presentation"] = meta.clone();
+            }
+            Some(row("tool/result", envelope))
         }
         SessionEvent::StepEnd { turn, step } => Some(row(
             "step/end",

@@ -857,7 +857,15 @@ impl ReactLoopAgent {
             concluded |= result.concludes_turn;
 
             let msg = Message::tool_result(id.clone(), result.content.clone(), result.is_error);
-            self.append_event(SessionEvent::ToolResult { turn, step, message: msg, time_ms: None });
+            // 工具的 UI 元数据缝（上游 output.presentationMeta 投影等价）随
+            // tool/result 落盘，历史回放的 diff 卡等从这里恢复
+            self.append_event(SessionEvent::ToolResult {
+                turn,
+                step,
+                message: msg,
+                time_ms: None,
+                presentation: result.presentation.clone(),
+            });
             self.emit_ui(AgentEvent::ToolResult {
                 tool_call_id: id.clone(),
                 is_error: result.is_error,

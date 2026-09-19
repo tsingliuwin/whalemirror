@@ -36,6 +36,7 @@ repository = "https://github.com/tsingliuwin/rust-deepseek-harness"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+base64 = "0.22"
 serde_json = { version = "1", features = ["preserve_order"] }
 futures = "0.3"
 async-trait = "0.1"

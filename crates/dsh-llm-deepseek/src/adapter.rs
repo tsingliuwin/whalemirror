@@ -7,7 +7,7 @@ use dsh_llm::{
     AbortSignal, BoxStream, CallId, ContentBlock, ContentBlockType, FinishReason, GenerateOptions,
     LlmAdapter, LlmError, LlmFailure, LlmProviderInfo, Role, StreamChunk, TokenUsage,
 };
-use dsh_llm::Message;
+use dsh_llm::{ImageAttachmentRef, Message};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -24,12 +24,24 @@ pub struct DeepSeekAdapter {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// 图片字节反查（上游 request-files 的 durable 解析等价）：按附件引用取
+    /// 原始字节；None/返回 None 时该图降级为占位文本。宿主注入（attachments 存储）。
+    image_fetcher: Option<std::sync::Arc<dyn Fn(&ImageAttachmentRef) -> Option<Vec<u8>> + Send + Sync>>,
 }
 
 impl DeepSeekAdapter {
     /// Build an adapter for a fixed API key and optional base URL override.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self::with_base_url(api_key, DEFAULT_BASE_URL)
+    }
+
+    /// 注入图片字节反查（vision 请求切片；不注入则 Image 块降级占位文本）。
+    pub fn with_image_fetcher(
+        mut self,
+        fetcher: std::sync::Arc<dyn Fn(&ImageAttachmentRef) -> Option<Vec<u8>> + Send + Sync>,
+    ) -> Self {
+        self.image_fetcher = Some(fetcher);
+        self
     }
 
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
@@ -42,6 +54,7 @@ impl DeepSeekAdapter {
             .build()
             .expect("reqwest client");
         Self {
+            image_fetcher: None,
             client,
             base_url: base_url.into(),
             api_key: api_key.into(),
@@ -71,7 +84,7 @@ impl DeepSeekAdapter {
             messages.push(json!({ "role": "system", "content": system }));
         }
         for m in &options.messages {
-            messages.push(Self::map_message(m));
+            messages.push(self.map_message(m));
         }
 
         let mut body = json!({
@@ -110,7 +123,7 @@ impl DeepSeekAdapter {
     }
 
     /// Map one provider-neutral [`Message`] onto DeepSeek's wire message.
-    fn map_message(m: &Message) -> Value {
+    fn map_message(&self, m: &Message) -> Value {
         match m.role {
             Role::System => json!({ "role": "system", "content": Self::blocks_to_text(&m.content) }),
             Role::User => {
@@ -120,6 +133,50 @@ impl DeepSeekAdapter {
                         "tool_call_id": tool_call_id.as_str(),
                         "content": Self::blocks_to_text(content),
                     })
+                } else if m.content.iter().any(|b| matches!(b, ContentBlock::Image { .. })) {
+                    // vision 请求切片（上游 serialize.ts base64 路径）：content 变
+                    // parts 数组，每个 Image 前有文本句柄 part，图转 data URL；
+                    // 字节反查失败降级占位文本。Files API file 通道未实现（偏差）。
+                    let mut parts: Vec<Value> = Vec::new();
+                    let mut n = 0usize;
+                    for block in &m.content {
+                        match block {
+                            ContentBlock::Text { text: t } if !t.is_empty() => {
+                                parts.push(json!({ "type": "text", "text": t }))
+                            }
+                            ContentBlock::Image { attachment } => {
+                                n += 1;
+                                parts.push(json!({
+                                    "type": "text",
+                                    "text": format!(
+                                        "{}Image {}; request preview {}x{}px. It may be resized or re-encoded; source dimensions, format, and byte size may differ.",
+                                        if parts.is_empty() { "" } else { "
+" },
+                                        attachment.attachment_id,
+                                        attachment.width,
+                                        attachment.height,
+                                    ),
+                                }));
+                                let bytes = self.image_fetcher.as_ref().and_then(|f| f(attachment));
+                                match bytes {
+                                    Some(data) => {
+                                        use base64::Engine as _;
+                                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                                        parts.push(json!({
+                                            "type": "image_url",
+                                            "image_url": { "url": format!("data:{};base64,{}", attachment.media_type, b64) },
+                                        }))
+                                    }
+                                    None => parts.push(json!({
+                                        "type": "text",
+                                        "text": format!("[image {} unavailable]", attachment.attachment_id),
+                                    })),
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    json!({ "role": "user", "content": parts })
                 } else {
                     json!({ "role": "user", "content": Self::blocks_to_text(&m.content) })
                 }

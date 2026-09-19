@@ -1312,6 +1312,16 @@ fn format_tokens_exact(value: u64) -> String {
 }
 
 /// 用时（web formatRunDuration：分秒 `{m}分{ss}秒` / `{s}秒`）。
+
+/// 图片字节反查闭包（vision 请求切片）：attachments 存储按 sha256 id 读对象。
+fn image_fetcher_for(root: std::path::PathBuf) -> std::sync::Arc<dyn Fn(&dsh_llm::ImageAttachmentRef) -> Option<Vec<u8>> + Send + Sync> {
+    std::sync::Arc::new(move |ref_: &dsh_llm::ImageAttachmentRef| {
+        let hex = ref_.attachment_id.strip_prefix("sha256:")?;
+        if hex.len() < 2 { return None; }
+        std::fs::read(dsh_persist::AttachmentStore::new(root.clone()).object_path(hex)).ok()
+    })
+}
+
 fn format_run_duration(ms: u64) -> String {
     let total = ms / 1000;
     let hours = total / 3600;
@@ -3406,7 +3416,8 @@ impl AppView {
         if key.is_empty() {
             return;
         }
-        let adapter = DeepSeekAdapter::new(key.clone());
+        let adapter = DeepSeekAdapter::new(key.clone())
+            .with_image_fetcher(image_fetcher_for(sessions_dir().join("attachments/v1")));
         let _ = self.llm.register_adapter(&["deepseek".to_string()], Arc::new(adapter));
         self.set_route("deepseek", &self.desired_model.clone());
         self.llm_configured = true;
@@ -3493,7 +3504,8 @@ impl AppView {
 
     /// 注册一个自定义提供方的 adapter（OpenAI 兼容）。
     fn register_custom(&self, p: &CustomProvider) {
-        let adapter = DeepSeekAdapter::with_base_url(&p.api_key, &p.base_url);
+        let adapter = DeepSeekAdapter::with_base_url(&p.api_key, &p.base_url)
+            .with_image_fetcher(image_fetcher_for(sessions_dir().join("attachments/v1")));
         let _ = self.llm.register_adapter(&[p.id.clone()], Arc::new(adapter));
     }
 
@@ -3707,7 +3719,8 @@ impl AppView {
         let base = self.edit_base.read_with(cx, |s, _| s.value().trim().to_string());
         if id == "deepseek" {
             if !key.is_empty() {
-                let adapter = DeepSeekAdapter::new(&key);
+                let adapter = DeepSeekAdapter::new(&key)
+                    .with_image_fetcher(image_fetcher_for(sessions_dir().join("attachments/v1")));
                 let _ = self.llm.register_adapter(&["deepseek".to_string()], Arc::new(adapter));
                 self.llm_configured = true;
             }
@@ -6258,7 +6271,8 @@ fn main() {
         }
         None => {
             if !stored_deepseek_key.is_empty() {
-                let adapter = DeepSeekAdapter::new(stored_deepseek_key.clone());
+                let adapter = DeepSeekAdapter::new(stored_deepseek_key.clone())
+                    .with_image_fetcher(image_fetcher_for(sessions_dir().join("attachments/v1")));
                 let _h = llm.register_adapter(&["deepseek".to_string()], Arc::new(adapter))
                     .expect("register deepseek from credentials");
                 let model = std::env::var("DSH_MODEL")
@@ -6492,7 +6506,8 @@ fn main() {
         if base_url.is_empty() {
             continue;
         }
-        let adapter = DeepSeekAdapter::with_base_url(&p.api_key, base_url);
+        let adapter = DeepSeekAdapter::with_base_url(&p.api_key, base_url)
+            .with_image_fetcher(image_fetcher_for(sessions_dir().join("attachments/v1")));
         let _ = llm.register_adapter(&[p.id.clone()], Arc::new(adapter));
     }
     let initial_model = std::env::var("DSH_MODEL")

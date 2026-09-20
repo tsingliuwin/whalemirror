@@ -1391,6 +1391,8 @@ pub const KNOWN_SESSION_EVENT_TYPES: &[&str] = &[
 /// 存储层 chunk 打包记录类型（web `packChunkRuns` 写盘形态，上游读取时经
 /// `decodeStorageRecord` 解回 assistant/chunk——构建认识这些记录，不属于
 /// 「未知类型」守卫范围）。骨架没有 chunk 回放消费方，按已知跳过。
+pub use attachments::image_dimensions;
+
 pub const KNOWN_STORAGE_RECORD_TYPES: &[&str] =
     &["text-chunks", "reasoning-chunks", "tool-call-chunks"];
 

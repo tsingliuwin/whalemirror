@@ -292,3 +292,74 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// 图片像素尺寸（PNG IHDR / JPEG SOF 扫描）；不支持或损坏返回 None。
+/// 附件捕获面（composer 图片路径）用——上游图片规范化流水线的最小等价
+/// （只测尺寸，不做 resize/重编码）。
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() >= 24
+        && bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
+    {
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        return Some((w, h));
+    }
+    if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+        let mut i = 2usize;
+        while i + 9 <= bytes.len() {
+            if bytes[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = bytes[i + 1];
+            if (0xD0..=0xD9).contains(&marker) || marker == 0x01 {
+                i += 2;
+                continue;
+            }
+            let seg = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+            let is_sof = (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker);
+            if is_sof {
+                let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+                let w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32;
+                return Some((w, h));
+            }
+            i += 2 + seg;
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::*;
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v
+    }
+
+    #[test]
+    fn png_dimensions_read_from_ihdr() {
+        assert_eq!(image_dimensions(&png(640, 480)), Some((640, 480)));
+        assert_eq!(image_dimensions(&png(1, 1)), Some((1, 1)));
+    }
+
+    #[test]
+    fn jpeg_sof_scan() {
+        // 最小 JPEG：SOI + DQT(占位) + SOF0(高 480 宽 640) + EOI
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x04, 0x00, 0x00];
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x01, 0xE0, 0x02, 0x80, 0x03, 0x01, 0x11, 0x00]);
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(image_dimensions(&v), Some((640, 480)));
+    }
+
+    #[test]
+    fn unsupported_or_corrupt_returns_none() {
+        assert_eq!(image_dimensions(b"plain text"), None);
+        assert_eq!(image_dimensions(&[]), None);
+        assert_eq!(image_dimensions(&[0x89, b'P', b'N', b'G']), None);
+    }
+}

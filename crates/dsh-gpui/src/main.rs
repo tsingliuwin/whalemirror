@@ -88,6 +88,34 @@ struct DraftFile {
     name: String,
     bytes: u64,
     state: DraftUpload,
+    /// 图片草稿（PNG/JPEG 捕获面）：入存后的附件引用 + 像素尺寸；
+    /// None = 普通文件草稿（File 块）。
+    image: Option<dsh_llm::ImageAttachmentRef>,
+}
+
+/// 图片捕获面的扩展名判定（PNG/JPEG——尺寸头解析可靠的两类；gif/webp
+/// 暂按普通文件走 File 块，偏差表记录）。
+pub(crate) fn is_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png") | Some("jpg") | Some("jpeg")
+    )
+}
+
+/// 扩展名 → MIME（图片路径专用；未知回落 image/png——上游按检测，简化）。
+pub(crate) fn image_media_type(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        _ => "image/png",
+    }
 }
 
 /// 附件大小文案（上游 ui-primitives file-size.ts：B/KB/MB/GB，<10 一位小数）
@@ -3026,12 +3054,14 @@ impl AppView {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
             let id = format!("draft-{nanos}-{}", self.attachments.len());
+            let image = if is_image_path(&path) { None } else { None }; // 完成后回填
             self.attachments.push(DraftFile {
                 id: id.clone(),
                 path: path.clone(),
                 name: name.clone(),
                 bytes: meta.len(),
                 state: DraftUpload::Uploading,
+                image,
             });
             let store = Arc::clone(&self.attachment_store);
             let display = name;
@@ -3042,18 +3072,37 @@ impl AppView {
                         std::fs::read(&path)
                             .map_err(|e| e.to_string())
                             .and_then(|bytes| {
-                                store
-                                    .save_file_verbatim(&bytes, Some(&display))
-                                    .map_err(|e| e.to_string())
+                                let reference =
+                                    store.save_file_verbatim(&bytes, Some(&display)).map_err(|e| e.to_string())?;
+                                // 图片捕获面：PNG/JPEG 测尺寸（不可测回落普通文件）
+                                let image = if is_image_path(&path) {
+                                    dsh_persist::image_dimensions(&bytes).map(|(width, height)| {
+                                        dsh_llm::ImageAttachmentRef {
+                                            attachment_id: reference.attachment_id.clone(),
+                                            name: Some(display.clone()),
+                                            media_type: image_media_type(&path).to_string(),
+                                            bytes: reference.bytes,
+                                            width,
+                                            height,
+                                            original_dimensions: None,
+                                        }
+                                    })
+                                } else {
+                                    None
+                                };
+                                Ok((reference, image))
                             })
                     })
                     .await;
                 let _ = this.update(cx, |v, cx| {
                     if let Some(d) = v.attachments.iter_mut().find(|d| d.id == id) {
-                        d.state = match result {
-                            Ok(reference) => DraftUpload::Ready { reference },
-                            Err(message) => DraftUpload::Failed { message },
-                        };
+                        match result {
+                            Ok((reference, image)) => {
+                                d.image = image;
+                                d.state = DraftUpload::Ready { reference };
+                            }
+                            Err(message) => d.state = DraftUpload::Failed { message },
+                        }
                     }
                     cx.notify();
                 });
@@ -3227,7 +3276,22 @@ impl AppView {
                             t_retry.update(cx, |v, cx| v.retry_attachment(&rid_retry, cx));
                         })
                     })
-                    .child(
+                    .child(if let Some(image) = &draft.image {
+                        // 图片草稿：缩略 tile（web composer 附件图片 tile 同位）
+                        let hex = image
+                            .attachment_id
+                            .strip_prefix("sha256:")
+                            .unwrap_or(&image.attachment_id);
+                        let tile = self
+                            .attachment_store
+                            .object_path(hex);
+                        div()
+                            .flex_none()
+                            .size(px(28.0))
+                            .overflow_hidden()
+                            .rounded(px(6.0))
+                            .child(gpui::img(tile).size_full())
+                    } else {
                         // 图标座 28×28（web FileTypeIcon：类色文件底 + 白 mark）
                         div()
                             .flex_none()
@@ -3235,8 +3299,8 @@ impl AppView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(crate::chat::file_type_icon(&draft.name)),
-                    )
+                            .child(crate::chat::file_type_icon(&draft.name))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -3312,11 +3376,19 @@ impl AppView {
         let mut cards: Vec<ChatAttachment> = Vec::new();
         for d in &self.attachments {
             if let DraftUpload::Ready { reference } = &d.state {
-                blocks.push(ContentBlock::File { attachment: reference.clone() });
-                cards.push(ChatAttachment::FileCard {
-                    name: reference.name.clone(),
-                    bytes: reference.bytes,
-                });
+                if let Some(image) = &d.image {
+                    blocks.push(ContentBlock::Image { attachment: image.clone() });
+                    let hex = image.attachment_id.strip_prefix("sha256:").unwrap_or(&image.attachment_id);
+                    cards.push(ChatAttachment::ImageTile {
+                        path: Some(self.attachment_store.object_path(hex)),
+                    });
+                } else {
+                    blocks.push(ContentBlock::File { attachment: reference.clone() });
+                    cards.push(ChatAttachment::FileCard {
+                        name: reference.name.clone(),
+                        bytes: reference.bytes,
+                    });
+                }
             }
         }
         let has_text = !text.is_empty();

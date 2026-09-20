@@ -122,7 +122,7 @@ fn render_chat_attachment(
 
 /// 图片附件对象路径：`attachments/v1/objects/<hex[0..2]>/<hex>`
 /// （web attachment-local 布局；attachments_root 不可用或 id 非法 → None）
-fn attachment_image_object_path(
+pub(crate) fn attachment_image_object_path(
     root: Option<&std::path::Path>,
     attachment_id: &str,
 ) -> Option<std::path::PathBuf> {

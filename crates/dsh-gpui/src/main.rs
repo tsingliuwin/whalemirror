@@ -6741,6 +6741,19 @@ fn main() {
                 // 不被逐事件 notify，侧栏等兄弟子视图的 element 缓存保持
                 // 有效；peek 中运行会话的事件不进视图（照常落盘）。
                 let view = app.clone();
+                // [dsh] 聊天流文件路径点击 → dock 文件预览路由
+                //（上游 Sidebar Browser 的等价承接：GPUI 无 webview，
+                // 真实路径改在侧栏 dock 打开而非系统默认程序）
+                gpui_component::text::set_relative_file_opener(Some(
+                    std::sync::Arc::new({
+                        let view = view.clone();
+                        move |path: &str, cx: &mut gpui::App| {
+                            view.update(cx, |v: &mut AppView, cx| {
+                                v.open_file_preview(path.to_string(), cx);
+                            });
+                        }
+                    }),
+                ));
                 cx.spawn(move |cx: &mut AsyncApp| {
                     let mut cx = cx.clone();
                     async move {

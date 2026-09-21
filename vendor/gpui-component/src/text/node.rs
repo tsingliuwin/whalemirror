@@ -631,6 +631,13 @@ impl Paragraph {
                                     {
                                         return;
                                     }
+                                    // [dsh] 无 scheme 的真实路径优先路由进宿主侧栏预览
+                                    if !u.contains("://")
+                                        && !u.starts_with("mailto:")
+                                        && super::inline::try_relative_file_opener(u, cx)
+                                    {
+                                        return;
+                                    }
                                     cx.open_url(&link.url);
                                 })
                         })

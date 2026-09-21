@@ -1,8 +1,36 @@
 use std::{
+
     ops::Range,
     rc::Rc,
     sync::{Arc, Mutex},
 };
+
+// [dsh] 相对/绝对文件路径的点击打开钩子：宿主（桌面壳）注入，把聊天流里
+// 指向真实文件的路径路由进侧栏文件预览，而非系统默认程序。仅对无 scheme
+// 的路径生效；http(s)/mailto 等仍走系统打开。None = 回落系统打开。
+static RELATIVE_FILE_OPENER: std::sync::RwLock<Option<std::sync::Arc<dyn Fn(&str, &mut gpui::App) + Send + Sync>>> =
+    std::sync::RwLock::new(None);
+
+#[allow(dead_code)]
+pub fn set_relative_file_opener(
+    opener: Option<std::sync::Arc<dyn Fn(&str, &mut gpui::App) + Send + Sync>>,
+) {
+    *RELATIVE_FILE_OPENER.write().unwrap() = opener;
+}
+
+pub fn try_relative_file_opener(url: &str, cx: &mut gpui::App) -> bool {
+    let is_path = !url.is_empty()
+        && !url.contains("://")
+        && !url.starts_with("mailto:")
+        && std::path::Path::new(url).exists();
+    if is_path {
+        if let Some(opener) = RELATIVE_FILE_OPENER.read().unwrap().as_ref() {
+            opener(url, cx);
+            return true;
+        }
+    }
+    false
+}
 
 use gpui::{
     point, px, quad, App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId,
@@ -371,6 +399,13 @@ impl Element for Inline {
                     {
                         cx.stop_propagation();
                         if !dsh_openable(&link.url) {
+                            return;
+                        }
+                        // [dsh] 无 scheme 的真实路径优先路由进宿主侧栏预览
+                        if !link.url.contains("://")
+                            && !link.url.starts_with("mailto:")
+                            && try_relative_file_opener(&link.url, cx)
+                        {
                             return;
                         }
                         cx.open_url(&link.url);

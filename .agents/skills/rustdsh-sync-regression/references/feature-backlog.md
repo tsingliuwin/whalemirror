@@ -36,7 +36,7 @@
 | 12 | Think/compaction 头滚动吸顶 | 0.1.6-alpha.1 | 聊天流无 sticky 机制；轨迹页的固定行高模型不同构。低频体验项 | 观察 |
 | 13 | markdown 表格 hover 高度稳定 | 0.1.6-alpha.1 | vendor TextView 表格面 | 观察 |
 | 14 | 终端面（terminal-controller：launcher/shell 记忆/主题/PTY 会话） | 0.1.6-alpha.1 | GPUI 无终端模拟器组件；上游 PTY 也曾推迟。等 GPUI 生态或自绘 xterm 级成本评估 | 观察（硬约束） |
-| 15 | Sidebar Browser（内嵌 webview） | 0.1.6-alpha.2 | GPUI 无 webview；链接维持系统浏览器。若 GPUI 出 webview 组件再评估 | 观察（硬约束） |
+| 15 | Sidebar Browser（内嵌 webview） | 0.1.6-alpha.2 | GPUI 无 webview，完整内嵌浏览器不可行；**等价承接已落（09-22）**：聊天流 markdown 文件路径链接点击 → 侧栏 dock 文件预览路由（vendor gpui-component 相对文件打开器钩子 set_relative_file_opener，宿主注入 AppView.open_file_preview；inline/node 两点击点，http(s)/mailto 照常系统打开）；富渲染器（语法高亮/图片/pdf）仍待 #7 | 进行中（富渲染面留 #7） |
 | 16 | guide 起始页/多 tab | 0.1.6-alpha.1 | 依赖 dock 多 tab 引擎 | 观察 |
 | 17 | session-log 上传遥测 / OTel | 0.1.6-alpha.1 | 本地工具不上传遥测（目标定位不符） | 不适用 |
 | 18 | browser-use 实验浏览器后端 | 0.1.6-alpha.1 | 上游自身实验性；观察其稳定度 | 观察 |

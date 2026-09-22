@@ -518,3 +518,216 @@ pub fn read_text_page(
     }
     Ok(TextPage { text: joined, lines: page_lines.len(), eof: end >= lines.len() })
 }
+
+
+// ---- 过程组活动标题（上游 step-process.ts / process-activity.ts 同语义）----
+
+/// 过程活动类目（上游 ProcessActivity）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProcessActivity {
+    Read,
+    Search,
+    Edit,
+    Commands,
+    Code,
+    WebSearch,
+    WebFetch,
+    Subagents,
+    Plan,
+    Questions,
+    Tools,
+}
+
+impl ProcessActivity {
+    /// 闭合形态的 zh 文案（上游 message.stepProcess.done.*）。
+    pub fn done_label(self) -> &'static str {
+        match self {
+            ProcessActivity::Read => "已读取文件",
+            ProcessActivity::Search => "已搜索代码",
+            ProcessActivity::Edit => "修改了文件",
+            ProcessActivity::Commands => "执行了命令",
+            ProcessActivity::Code => "运行了代码",
+            ProcessActivity::WebSearch => "已搜索网页",
+            ProcessActivity::WebFetch => "已访问网页",
+            ProcessActivity::Subagents => "已协调子任务",
+            ProcessActivity::Plan => "更新了计划",
+            ProcessActivity::Questions => "向用户提出了问题",
+            ProcessActivity::Tools => "已调用工具",
+        }
+    }
+}
+
+/// 工具名/参数 → 活动类目（上游 activity()；rustdsh 工具名适配——fs 为
+/// 单工具多 op，按 arguments 的 op 字段细分 read→read / write→edit）。
+pub fn process_activity(name: &str, arguments: &str) -> ProcessActivity {
+    let op = |key: &str| -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|v| {
+                v.get(key)
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+            })
+    };
+    match name {
+        "fs" => match op("op").as_deref() {
+            Some("read") | Some("list") => ProcessActivity::Read,
+            Some("write") => ProcessActivity::Edit,
+            _ => ProcessActivity::Tools,
+        },
+        "grep" | "glob" => ProcessActivity::Search,
+        "shell" | "bash" | "pwsh" => ProcessActivity::Commands,
+        "web_search" => ProcessActivity::WebSearch,
+        "web_fetch" => ProcessActivity::WebFetch,
+        "subagent" => ProcessActivity::Subagents,
+        "todo_write" => ProcessActivity::Plan,
+        _ => ProcessActivity::Tools,
+    }
+}
+
+/// 闭合过程组的本地化标题：类目按 distinct call 计数排序（平局按首现），
+/// 取前 3 类 done 文案组合——1 类直出；2 类 sharedPrefix「已」去重后用
+/// 「并」连接；3 类「，」连接；超过 3 类缀「等」；空类目回落「已完成分析」。
+pub fn process_title(activities: &[(ProcessActivity, usize)]) -> String {
+    let labels: Vec<&str> = activities.iter().map(|(k, _)| k.done_label()).collect();
+    let first = match labels.first() {
+        Some(f) => *f,
+        None => return "已完成分析".to_string(),
+    };
+    let continuation = |label: &str| -> String {
+        let mut c = label.chars();
+        match c.next() {
+            Some(ch) => ch.to_lowercase().collect::<String>() + c.as_str(),
+            None => String::new(),
+        }
+    };
+    match labels.len() {
+        1 => first.to_string(),
+        2 => {
+            let shared = "已";
+            let second = &labels[1];
+            let shared_second: String =
+                if first.starts_with(shared) && second.starts_with(shared) {
+                    continuation(&second[shared.len()..])
+                } else {
+                    second.to_string()
+                };
+            format!("{first}并{shared_second}")
+        }
+        _ => {
+            let title = format!(
+                "{}，{}",
+                labels[0],
+                labels[1..]
+                    .iter()
+                    .map(|l| continuation(l))
+                    .collect::<Vec<_>>()
+                    .join("，")
+            );
+            if labels.len() > 3 {
+                format!("{title}等")
+            } else {
+                title
+            }
+        }
+    }
+}
+
+/// 从工具调用序列推导类目计数（上游 processActivity：distinct call 去重、
+/// 平局按首现、count 降序）。
+pub fn process_activity_counts(
+    calls: impl IntoIterator<Item = (String, String, String)>,
+) -> Vec<(ProcessActivity, usize)> {
+    let mut order: Vec<ProcessActivity> = Vec::new();
+    let mut counts: std::collections::HashMap<ProcessActivity, usize> = Default::default();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for (call_id, name, arguments) in calls {
+        if seen.contains(&call_id) {
+            continue;
+        }
+        seen.insert(call_id);
+        let kind = process_activity(&name, &arguments);
+        let e = counts.entry(kind).or_insert(0);
+        *e += 1;
+        if !order.contains(&kind) {
+            order.push(kind);
+        }
+    }
+    let mut out: Vec<(ProcessActivity, usize)> = counts.into_iter().collect();
+    out.sort_by(|a, b| {
+        b.1.cmp(&a.1).then(
+            order
+                .iter()
+                .position(|k| k == &a.0)
+                .cmp(&order.iter().position(|k| k == &b.0)),
+        )
+    });
+    out
+}
+
+#[cfg(test)]
+mod process_title_tests {
+    use super::*;
+    use ProcessActivity as PA;
+
+    #[test]
+    fn single_category_and_empty_fallback() {
+        assert_eq!(process_title(&[]), "已完成分析");
+        assert_eq!(process_title(&[(PA::Read, 3)]), "已读取文件");
+    }
+
+    #[test]
+    fn two_categories_join_with_shared_prefix_dedup() {
+        assert_eq!(
+            process_title(&[(PA::Read, 1), (PA::Search, 2)]),
+            "已读取文件并搜索代码"
+        );
+        assert_eq!(
+            process_title(&[(PA::Commands, 1), (PA::Edit, 1)]),
+            "执行了命令并修改了文件"
+        );
+    }
+
+    #[test]
+    fn three_plus_categories_join_with_comma_and_more() {
+        assert_eq!(
+            process_title(&[(PA::Commands, 4), (PA::Read, 2), (PA::Edit, 1)]),
+            "执行了命令，已读取文件，修改了文件"
+        );
+        assert_eq!(
+            process_title(&[
+                (PA::Commands, 4),
+                (PA::Read, 2),
+                (PA::Edit, 1),
+                (PA::Search, 1)
+            ]),
+            "执行了命令，已读取文件，修改了文件，已搜索代码等"
+        );
+    }
+
+    #[test]
+    fn activity_categorizes_rustdsh_tool_names() {
+        assert_eq!(process_activity("fs", r#"{"op":"read","path":"a"}"#), PA::Read);
+        assert_eq!(process_activity("fs", r#"{"op":"write","path":"a"}"#), PA::Edit);
+        assert_eq!(process_activity("fs", "{}"), PA::Tools);
+        assert_eq!(process_activity("shell", "{}"), PA::Commands);
+        assert_eq!(process_activity("grep", "{}"), PA::Search);
+        assert_eq!(process_activity("glob", "{}"), PA::Search);
+        assert_eq!(process_activity("web_search", "{}"), PA::WebSearch);
+        assert_eq!(process_activity("web_fetch", "{}"), PA::WebFetch);
+        assert_eq!(process_activity("subagent", "{}"), PA::Subagents);
+        assert_eq!(process_activity("mystery", "{}"), PA::Tools);
+    }
+
+    #[test]
+    fn counts_dedupe_by_call_and_rank() {
+        let calls = vec![
+            ("c1".to_string(), "fs".to_string(), r#"{"op":"read"}"#.to_string()),
+            ("c1".to_string(), "fs".to_string(), r#"{"op":"read"}"#.to_string()),
+            ("c2".to_string(), "shell".to_string(), "{}".to_string()),
+            ("c3".to_string(), "shell".to_string(), "{}".to_string()),
+        ];
+        let out = process_activity_counts(calls);
+        assert_eq!(out, vec![(PA::Commands, 2), (PA::Read, 1)]);
+    }
+}

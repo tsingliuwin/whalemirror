@@ -1,10 +1,10 @@
 # 上游更新分析法（模式 A 详细步骤）
 
 上游仓库：`E:\aiproject\deepseek-harness`（git）。rustdsh 是其 **web 前端（packages/client/*）+ 存储行为（storage/session）+ llm-deepseek 适配层** 的 Rust/GPUI 1:1 复刻。
-> **当前同步点：dsh-v0.1.6-alpha.2（ddefc45fbc）**——2026-09-18 同步（发布点=master HEAD，无增量）。此前 0d1f50007f（0.1.6-alpha.1，2026-09-16 同步）。
+> **当前同步点：dsh-v0.1.7-alpha.1（c36a83ff6b）**——2026-09-22 同步（发布点=master HEAD，无增量；1695 文件 +79375/-30054）。此前 ddefc45fbc（0.1.6-alpha.2，2026-09-18 同步）。
 > 0.1.5-alpha.1 主面：**会话格式 v3**（system prompt 晋升 system/message 行 + request/header 去 system + PTC 改名 + canonical 信封）、composer 统计行改双图标 pill + 互斥统计对话框、SystemPromptRow（系统提示词折叠行）；Sidebar 工作区文件树/dockkit/textpreview/remotes 全链面外。
 > **最近检查：2026-09-14（文件浏览器面重判 + 实施轮）**——上游无需新拉（本地 master c291e7961a 已含 ui-sidebar-files/documentpreview 全链；网络面 GitHub SSH/HTTPS 双断、系统代理 7897 出口坏，SSH443 握手可成但传输被掐，改用本地既有树分析）； **最近检查：2026-09-11（定时轮 #7，零更新轮）**——上游 pull 经仓库局部代理（http.proxy=127.0.0.1:7897，SSH/HTTPS 直连被墙后的固定修复）成功，Already up to date（HEAD=master=rc.2 发布点 fb2c4b9e69），五段零差异，无动作。上轮 #6 同步结论不变。
-> **最近检查：2026-09-18（定时轮 #11，同步轮）**——上游发布 0.1.6-alpha.2（809 文件 +33345/-7511，存储零变更），**无面内实施**：主面 Sidebar Browser/plan 卡片/subagent 侧栏聊天/desktop 打包全部面外；词汇新增（error.sessionInUse、terminal.noExitCode、presented/changes/review 系列）全部属面外面；context usage 进 composer stats 一笔为 pill 布局 css 微调（rustdsh 自绘布局行为等价）。changes/review 轮改动审阅卡与已实装的文件树联动，待用户定交互形态后单独立项（见偏差表）。
+> **最近检查：2026-09-22（定时轮 #16，同步轮）**——上游发布 0.1.7-alpha.1，面内实施一项（stepProcess 过程组类目标题）；**存储版本已推进 v4**（session-format-v3-to-v4：缺失 turn/end 补齐 + subagent/catalog 新事件 + 消息源重写等 15 子模块）——rustdsh v4 升级为下轮主任务（互通阻断级：web 写 v4 后 rustdsh 读侧拒绝）。projcache 列表读面身份放宽（去 inheritedEventCount）——rustdsh 按文件名定位无对应缺口。
 
 ## 1. 一键差异分析
 
@@ -79,6 +79,13 @@
 | b6726fe79d move context usage into composer stats | 面外（行为等价）| 实质为 pill 容器 css 宽度约束微调 + 注释清理；rustdsh 自绘 strip 布局行为已等价 |
 | error.sessionInUse（其他 DSH 实例占用会话报错）| 面外 | lease 检测既有判定：rustdsh 单写者约定 + 仅容忍 session.lock |
 | changes.*/review.* 轮改动审阅卡大批词汇（已编辑 N 文件/±计数/侧栏查看/split-unified diff）| 面外（待定向）| 依赖 workspace-files 的 turn 改动收集与 diff 数据面 + review 卡 UI；与 09-14/09-15 实装的文件树 dock 联动，交互形态待用户定夺后单独立项 |
+| stepProcess 过程组类目标题（0.1.7-alpha.1：message.stepProcess.* 24 条，activity() 11 类分类、distinct call 去重排序、前 3 类 done 文案组合 joinTwo/sharedPrefix/comma/more）| **面内**（已实施）| process_activity/process_title/process_activity_counts 纯函数（dsh-gpui lib 5 测）+ TurnFold 计数改造 + 控制行 label 接线；rustdsh 工具名适配（fs 按 op 细分）|
+| 存储格式 v4（session-format-v3-to-v4：observeRestart 缺失 turn/end 补齐 reason=interrupted、subagent/catalog 新事件 + finish 目录补齐、消息源重写/内容迁移/retired syntax 等 15 子模块）| **面内**（下轮主任务）| 互通阻断级：web 已写 v4。rustdsh 需 SESSION_FORMAT_VERSION 4 + 读 v3/v4 + 迁移链 v0/v1→v2→v3→v4（observeRestart 的 turn/stepOpen/nextTurnSpliced 跟踪）|
+| projcache 列表读面身份放宽（去 inheritedEventCount，lifecycle identity）| 面外（无缺口）| rustdsh 标题读面本按文件名定位、不校验该字段，行为已等价 |
+| turn triggers（e17e1ac801 轮触发标注 + message.trigger.* 词汇）| 面外→backlog #21 | 轮头触发标注（收到执行请求/继续执行目标）——rustdsh 轮头有承载位 |
+| steering 系列修复（preserve steering order/cross-client pending order/retire confirmed echoes）| 面外→backlog #22 | rustdsh inbox 有 steer/send 双通道，顺序语义需对照上游核对 |
+| voice-input 语音输入插件 / account-controller 账号登录 / Team panel / shortcuts 快捷键系统（净态）/ CLI JSON Schema / tool-cordis inspect | 面外→backlog 登记 | 各无对应面或实验性（语音/账号/Team/快捷键为独立子系统）|
+| workspace 归档前停运行（cbae324bfa）/ XLSX 预览 / 文档缩放统一 / deliverables diff 行背景 | 面外→backlog 登记 | 归档接线小项；预览体系归 #7；diff 卡归 #1 |
 | category.service-stability 文案改「稳定性和速度」/ guide.description | 面外 | feedback 分类与 sidebar guide 面无镜像 |
 | CodeBlock contentRef/display:contents、TurnTailNodeView actions margin-top 4px | 面外 | web DOM 缝（ref/滚动端口挂载）与 DOM 流间距补偿，vendor TextView 布局模型无对应结构 |
 | sidebar guide 起始页/documentpreview 精修/preview scrollports | 面外 | Sidebar 全链面外（既有判定）|

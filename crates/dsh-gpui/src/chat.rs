@@ -38,13 +38,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// 单轮折叠派生（web turn-process 节点数据的对应物）。
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct TurnFold {
     first_process: usize,
     answer: usize,
     tools: usize,
     messages: usize,
     subagents: usize,
+    /// 过程活动类目计数（上游 processActivity：distinct call 去重、count 降序）。
+    activities: Vec<(dsh_gpui::ProcessActivity, usize)>,
 }
 
 /// 聊天消息内的单个附件（web .attachmentRow 成员）：
@@ -1342,6 +1344,7 @@ open: false,
                 continue;
             }
             let (mut tools, mut subagents, mut messages) = (0usize, 0usize, 0usize);
+            let mut calls: Vec<(String, String, String)> = Vec::new();
             for &i in &process {
                 let e = &self.entries[i];
                 let mut reply = false;
@@ -1354,6 +1357,11 @@ open: false,
                             } else {
                                 tools += 1;
                             }
+                            calls.push((
+                                tool.id.clone(),
+                                tool.name.clone(),
+                                tool.arguments.clone(),
+                            ));
                         }
                         MsgBlock::Text(x) if !x.trim().is_empty() => reply = true,
                         _ => {}
@@ -1363,7 +1371,8 @@ open: false,
                     messages += 1;
                 }
             }
-            out.insert(t, TurnFold { first_process: process[0], answer, tools, messages, subagents });
+            let activities = dsh_gpui::process_activity_counts(calls);
+            out.insert(t, TurnFold { first_process: process[0], answer, tools, messages, subagents, activities });
         }
         out
     }
@@ -3852,7 +3861,7 @@ impl Render for ChatView {
                             // 轮次过程折叠（web turn-process，compact 默认）：
                             // 过程组首条目的槽位渲染控制行；闭合时其余成员
                             // 零高隐藏；答案条目隐藏本步 reasoning 块
-                            if let Some(f) = folds.get(&e.turn).copied() {
+                            if let Some(f) = folds.get(&e.turn).cloned() {
                                 let expanded = v.turn_expanded.contains(&e.turn);
                                 let member = matches!(e.role, Role::Assistant | Role::Context)
                                     && f.first_process <= ix
@@ -3860,21 +3869,9 @@ impl Render for ChatView {
                                 if member {
                                     let t_ctl = this.clone();
                                     if ix == f.first_process {
-                                        let mut labels: Vec<String> = Vec::new();
-                                        if f.tools > 0 {
-                                            labels.push(format!("{} 次工具调用", f.tools));
-                                        }
-                                        if f.messages > 0 {
-                                            labels.push(format!("{} 条消息", f.messages));
-                                        }
-                                        if f.subagents > 0 {
-                                            labels.push(format!("{} 个 subagent", f.subagents));
-                                        }
-                                        let label = if labels.is_empty() {
-                                            "已思考".to_string()
-                                        } else {
-                                            labels.join(" · ")
-                                        };
+                                        // 0.1.7-alpha.1 stepProcess：类目计数标题
+                                        //（前 3 类 done 文案组合；空类目「已完成分析」）
+                                        let label = dsh_gpui::process_title(&f.activities);
                                         let control = widgets::turn_process_control(
                                             ix as u64,
                                             &label,

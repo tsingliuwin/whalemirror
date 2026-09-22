@@ -19,10 +19,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// 当前会话格式版本（web `SESSION_FORMAT_VERSION`）。0.1.5-alpha.1 起为 3：
-/// system prompt 从 request/header 晋升为 `system/message` 面节点、PTC 词汇
-/// 改名（code→ptc）、canonical 信封（replace 富形 startSeq/endSeq）。
-pub const SESSION_FORMAT_VERSION: u64 = 3;
+/// 当前会话格式版本（web `SESSION_FORMAT_VERSION`）。0.1.7-alpha.1 起为 4：
+/// tool/result 升一等 tool 角色消息（剥 wrapper、role:'tool' 平铺）、plugin
+/// source 转 producer kind（kind 即生产者名）、缺失 turn/end 补齐。
+/// 0.1.5-alpha.1 的 3：system prompt 晋升 system/message + PTC 改名。
+pub const SESSION_FORMAT_VERSION: u64 = 4;
 
 /// 从文件名解析代数：`session.jsonl.zstd` → 0，`session.vN.jsonl.zstd` → N。
 pub fn generation_of(file_name: &str) -> Option<u64> {
@@ -1129,4 +1130,271 @@ mod v3_tests {
         assert!(migrate_v2_to_v3(&source, &id).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+
+// ---- v3 → v4 迁移 ----
+
+/// 上游 producerKind（v3-to-v4 sources.ts 净态）：V4 起 plugin source 的
+/// kind 直接是生产者名，plugin 字段删除。
+fn producer_kind_v4(plugin: &str, role: Option<&str>) -> String {
+    if plugin == "@deepseek-ai/dsh-system-prompt" && role == Some("system") {
+        return "system-prompt".to_string();
+    }
+    match plugin {
+        "compact" => "compact-checkpoint".to_string(),
+        "tools-code-mode" | "tools-ptc" => "ptc-mode".to_string(),
+        "dsh-compaction-basic" => "compact-basic".to_string(),
+        "agent-instructions" | "session-reference" | "team-message" | "goal"
+        | "skill-invocation" | "skill-catalog" | "coordinator" | "subagent-report"
+        | "subagent-settled" | "webhook" | "agent-message" | "model-selection"
+        | "plan-mode" | "time-context" | "tmux-context" | "user-approval"
+        | "repeat-tool-reminder" | "tool-cordis" | "cordis-host-runner" | "tool-goal"
+        | "tool-jobs" | "hooks-codex" | "hooks-claude-code" | "schedule"
+        | "dsh-session-title-llm" => plugin.to_string(),
+        other => format!("plugin:{other}"),
+    }
+}
+
+const V4_KNOWN_BLOCK_TYPES: &[&str] = &[
+    "text", "reasoning", "image", "file", "tool-call", "tool-result",
+];
+
+/// 把 v3 日志迁移为 v4，发布到同目录 `session.v4.jsonl.zstd`。语义对齐上游
+/// `session-format-v3-to-v4`（0.1.7-alpha.1/2 净态）：头升 4；缺失 turn/end
+/// 补齐（observeRestart：turn 未闭合 + 无打开 step + 中间有 next-turn 注入
+/// + 开启下一 turn → 补 reason=interrupted）；tool/result 升一等 tool 角色
+/// （剥 user+wrapper 嵌套）；plugin source 转 producer kind（plugin 字段
+/// 删除）；内容块白名单外加 plugin: 前缀；seq 致密重映射；未知必读类型拒绝；
+/// 源文件字节永不改动。rustdsh 日志无 subagent/catalog 与 children 证据，
+/// finish 的目录补齐为空操作（上游需显式 children 声明）。
+pub fn migrate_v3_to_v4(source: &Path, id: &SessionId) -> io::Result<PathBuf> {
+    let bytes = crate::read_decompressed(source)?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let mut header: Option<serde_json::Value> = None;
+    let mut raw_rows: Vec<serde_json::Value> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| bad_log(format!("malformed line: {e}")))?;
+        if v.get("type").and_then(|t| t.as_str()) == Some("session") {
+            header = Some(v);
+        } else {
+            raw_rows.push(v);
+        }
+    }
+    let Some(mut header) = header else {
+        return Err(bad_log("no session header"));
+    };
+    if header_version(&header) != 3 {
+        return Err(bad_log("source is not v3"));
+    }
+    if let Some(obj) = header.as_object_mut() {
+        obj.insert("version".into(), serde_json::json!(4));
+    }
+
+    let mut staged: Vec<serde_json::Value> = Vec::new();
+    let mut old_to_new: HashMap<u64, u64> = Default::default();
+    let mut turn: Option<u64> = None;
+    let mut step_open = false;
+    let mut next_turn_spliced = false;
+
+    for row in raw_rows {
+        let ty = row
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let ignorable = row.get("ignorable").and_then(|i| i.as_bool()) == Some(true);
+        if !crate::is_migration_known_type(&ty) && !ignorable {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "session log contains event type \"{ty}\" unknown to this harness and not marked ignorable; refusing to migrate the log"
+                ),
+            ));
+        }
+        let source_seq = row.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+        let time = row.get("time").and_then(|v| v.as_u64()).unwrap_or(0);
+        let mut row = row;
+
+        // observeRestart：上一 turn 未闭合 + 无打开 step + 中间有 next-turn
+        // 注入，而本行开启下一 turn → 先补一条 interrupted turn/end
+        if ty == "turn/start" {
+            let next = row.pointer("/data/turn").and_then(|v| v.as_u64());
+            if let (Some(prev), Some(next)) = (turn, next) {
+                if next == prev + 1 && !step_open && next_turn_spliced {
+                    staged.push(serde_json::json!({
+                        "type": "turn/end", "seq": 0, "time": time,
+                        "data": {"turn": prev, "reason": {"kind": "interrupted"}},
+                    }));
+                }
+            }
+        }
+
+        // tool/result：剥 user+wrapper → 一等 tool 角色平铺（上游 liftToolResult）
+        if ty == "tool/result" {
+            let role = row.pointer("/data/message/role").and_then(|v| v.as_str());
+            if role == Some("user") {
+                let call_id = row
+                    .pointer("/data/message/source/callId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let msg_id = row
+                    .pointer("/data/message/id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let wrapper = row.pointer("/data/message/content/0").cloned();
+                let valid = matches!(&wrapper, Some(w) if w.get("type").and_then(|t| t.as_str()) == Some("tool-result")
+                    && w.get("toolCallId").and_then(|t| t.as_str()) == Some(call_id.as_str()));
+                if !call_id.is_empty() && !msg_id.is_empty() && valid {
+                    let wrapper = wrapper.unwrap();
+                    let is_error = wrapper.get("isError").cloned();
+                    let content = wrapper.get("content").cloned().unwrap_or(serde_json::json!([]));
+                    let mut msg = serde_json::json!({
+                        "id": msg_id,
+                        "role": "tool",
+                        "source": {"kind": "tool", "callId": call_id},
+                        "toolCallId": call_id,
+                        "content": content,
+                    });
+                    if let Some(err) = is_error {
+                        msg["isError"] = err;
+                    }
+                    row["data"]["message"] = msg;
+                }
+            }
+        }
+
+        // plugin source → producer kind（role 敏感映射）。覆盖两处词汇位：
+        // user/message 的 data.source 与 system/tool 系的 data.message.source
+        let sp = "/data/message/source".to_string();
+        let msg_role = row
+            .pointer("/data/message/role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user")
+            .to_string();
+        if let Some(source) = row.pointer_mut(&sp).and_then(|s| s.as_object_mut()) {
+            if source.get("kind").and_then(|k| k.as_str()) == Some("plugin") {
+                if let Some(plugin) = source.get("plugin").and_then(|p| p.as_str()) {
+                    let kind = producer_kind_v4(plugin, Some(msg_role.as_str()));
+                    let mut o = serde_json::Map::new();
+                    o.insert("kind".into(), serde_json::json!(kind));
+                    for (k, v) in source.iter() {
+                        if k != "kind" && k != "plugin" {
+                            o.insert(k.clone(), v.clone());
+                        }
+                    }
+                    *source = o;
+                }
+            }
+        }
+        let sp2 = "/data/source".to_string();
+        let user_role = row
+            .pointer("/data/role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user")
+            .to_string();
+        if let Some(source) = row.pointer_mut(&sp2).and_then(|s| s.as_object_mut()) {
+            if source.get("kind").and_then(|k| k.as_str()) == Some("plugin") {
+                if let Some(plugin) = source.get("plugin").and_then(|p| p.as_str()) {
+                    let kind = producer_kind_v4(plugin, Some(user_role.as_str()));
+                    let mut o = serde_json::Map::new();
+                    o.insert("kind".into(), serde_json::json!(kind));
+                    for (k, v) in source.iter() {
+                        if k != "kind" && k != "plugin" {
+                            o.insert(k.clone(), v.clone());
+                        }
+                    }
+                    *source = o;
+                }
+            }
+        }
+
+        // 内容块类型白名单外加 plugin: 前缀（上游 migrateBlock）
+        if let Some(blocks) = row.pointer_mut("/data/message/content").and_then(|c| c.as_array_mut()) {
+            for b in blocks.iter_mut() {
+                let t0 = b.get("type").and_then(|t| t.as_str()).map(|s| s.to_string());
+                if let Some(t) = t0 {
+                    if !V4_KNOWN_BLOCK_TYPES.contains(&t.as_str()) && !t.starts_with("plugin:") {
+                        b["type"] = serde_json::json!(format!("plugin:{t}"));
+                    }
+                }
+            }
+        }
+
+        // seq 重映射（引用只指向更早的源行）
+        remap_v3_row_refs(&mut row, &old_to_new);
+        let new_seq = staged.len() as u64;
+        old_to_new.insert(source_seq, new_seq);
+        // 状态机快照（push 前：row 将被 move）
+        let started_turn = if ty == "turn/start" {
+            row.pointer("/data/turn").and_then(|v| v.as_u64())
+        } else {
+            None
+        };
+        let is_splice = ty == "agent/inbox/spliced"
+            && row.pointer("/data/target").and_then(|v| v.as_str()) == Some("next-turn")
+            && row
+                .pointer("/data/inserted")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty());
+        staged.push(row);
+        // 状态机更新（push 后）——对齐上游 observeRestart：turn/start 只
+        // 更新 turn（step_open 不动），step/end 才清 step
+        match ty.as_str() {
+            "turn/start" => turn = started_turn,
+            "turn/end" => {
+                turn = None;
+                step_open = false;
+            }
+            "step/start" => step_open = true,
+            "step/end" => step_open = false,
+            "agent/inbox/spliced" => next_turn_spliced = is_splice,
+            _ => {}
+        }
+
+
+    }
+    // 致密化
+    for (index, row) in staged.iter_mut().enumerate() {
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert("seq".into(), serde_json::json!(index));
+        }
+    }
+
+    // 发布：临时文件 → rename（源文件与字节永不改动）
+    let parent = source
+        .parent()
+        .ok_or_else(|| bad_log("source has no parent dir"))?;
+    let target = parent.join("session.v4.jsonl.zstd");
+    if target.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "migration target session.v4.jsonl.zstd already exists",
+        ));
+    }
+    let mut payload =
+        serde_json::to_string(&header).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    payload.push('\n');
+    for row in &staged {
+        payload.push_str(
+            &serde_json::to_string(row).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        );
+        payload.push('\n');
+    }
+    let compressed = zstd::stream::encode_all(payload.as_bytes(), 0)?;
+    let tmp = tmp_path(parent);
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&compressed)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &target)?;
+    Ok(target)
 }

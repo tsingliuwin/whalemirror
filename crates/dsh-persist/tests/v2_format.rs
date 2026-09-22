@@ -8,7 +8,8 @@
 //!   源文件永不重写；未知必读类型 fail-closed；
 //! - projcache v7：stamp 7 + identity.formatVersion。
 
-use dsh_llm::{CallId, ContentBlock, Message, MessageSource, SessionId, StreamChunk};
+use dsh_llm::{CallId, ContentBlock, Message, MessageId, MessageSource, SessionId, StreamChunk};
+use dsh_persist::migrate_v3_to_v4;
 use dsh_session::SessionEvent;
 use dsh_persist::{SessionRecorder, PROJCACHE_DOMAIN_VERSION};
 use serde_json::{json, Value};
@@ -58,12 +59,12 @@ fn v2_new_session_header_and_filename() {
         .join("sessions")
         .join(dsh_persist::project_key("/tmp/ws"))
         .join(id.as_str())
-        .join("session.v3.jsonl.zstd");
+        .join("session.v4.jsonl.zstd");
     assert!(file.exists(), "v3 代文件名必须落盘");
 
     let rows = read_rows(&file);
     assert_eq!(rows[0]["type"], "session");
-    assert_eq!(rows[0]["version"], 3, "header version = 3");
+    assert_eq!(rows[0]["version"], 4, "header version = 4");
     assert_eq!(rows[0]["isSeeded"], false, "isSeeded 必填（rustdsh 恒 false）");
     assert!(rows[0].get("seedLength").is_none(), "seedLength 已退役");
 
@@ -117,7 +118,7 @@ fn v2_chunks_embed_into_settlement_stream() {
         .join("sessions")
         .join(dsh_persist::project_key("/tmp/ws"))
         .join(id.as_str())
-        .join("session.v3.jsonl.zstd");
+        .join("session.v4.jsonl.zstd");
     let rows = read_rows(&file);
     // 日志里没有 chunk 行
     assert!(
@@ -215,7 +216,7 @@ fn v2_failed_attempt_flushes_as_assistant_attempt() {
         .join("sessions")
         .join(dsh_persist::project_key("/tmp/ws"))
         .join(id.as_str())
-        .join("session.v3.jsonl.zstd");
+        .join("session.v4.jsonl.zstd");
     let rows = read_rows(&file);
     let attempt = rows.iter().find(|r| r["type"] == "assistant/attempt").expect("失败尝试必须落 assistant/attempt");
     assert_eq!(attempt["data"]["turn"], 1);
@@ -264,16 +265,18 @@ fn v2_tool_result_and_compaction_shapes() {
         .join("sessions")
         .join(dsh_persist::project_key("/tmp/ws"))
         .join(id.as_str())
-        .join("session.v3.jsonl.zstd");
+        .join("session.v4.jsonl.zstd");
     let rows = read_rows(&file);
     let tr = rows.iter().find(|r| r["type"] == "tool/result").unwrap();
     // v2 形：{turn, step, message:{id, role:'user', content, source}}
     assert_eq!(tr["data"]["turn"], 1);
     assert_eq!(tr["data"]["step"], 1);
-    assert_eq!(tr["data"]["message"]["role"], "user");
+    assert_eq!(tr["data"]["message"]["role"], "tool");
     assert_eq!(tr["data"]["message"]["source"]["kind"], "tool");
     assert_eq!(tr["data"]["message"]["source"]["callId"], "c1");
-    assert_eq!(tr["data"]["message"]["content"][0]["type"], "tool-result");
+    // V4 平铺形：content 为裸结果块（无 tool-result wrapper）
+    assert_eq!(tr["data"]["message"]["content"][0]["type"], "text");
+    assert!(tr["data"]["message"]["content"].as_array().unwrap().iter().all(|b| b["type"] != "tool-result"));
     assert!(!tr["data"]["message"]["id"].as_str().unwrap_or_default().is_empty());
 
     let cs = rows.iter().find(|r| r["type"] == "compaction/summary").unwrap();
@@ -319,7 +322,7 @@ fn migration_upgrades_legacy_rustdsh_log() {
 
     let v2_file = log.parent().unwrap().join("session.v2.jsonl.zstd");
     assert!(v2_file.exists(), "级联中间产物必须发布到 session.v2.jsonl.zstd");
-    assert!(log.parent().unwrap().join("session.v3.jsonl.zstd").exists(), "级联终产物必须发布到 session.v3.jsonl.zstd");
+    assert!(log.parent().unwrap().join("session.v4.jsonl.zstd").exists(), "级联终产物必须发布到 session.v3.jsonl.zstd");
     // 源文件字节原封不动（上游：source vN artifact remains unchanged）
     assert_eq!(
         std::fs::read(&log).unwrap(),
@@ -486,9 +489,9 @@ fn load_refuses_future_format_version() {
         .join(dsh_persist::project_key("/tmp/ws"))
         .join(id_str);
     write_log(
-        &bucket.join("session.v4.jsonl.zstd"),
+        &bucket.join("session.v5.jsonl.zstd"),
         &[
-            json!({"type": "session", "version": 4, "id": id_str, "createdAt": 1, "isSeeded": false}),
+            json!({"type": "session", "version": 5, "id": id_str, "createdAt": 1, "isSeeded": false}),
             json!({"type": "user/message", "seq": 0, "time": 1, "data": {"content": [], "source": {"kind": "user"}, "role": "user", "id": "m"}}),
         ],
     );
@@ -527,7 +530,7 @@ fn projcache_stamps_v7_with_format_version() {
     .unwrap();
     assert_eq!(doc["version"], PROJCACHE_DOMAIN_VERSION);
     assert_eq!(doc["version"], 7);
-    assert_eq!(doc["record"]["identity"]["formatVersion"], 3, "v3 语义：identity 携带会话格式版本");
+    assert_eq!(doc["record"]["identity"]["formatVersion"], 4, "v4 语义：identity 携带会话格式版本");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -555,7 +558,7 @@ fn user_message_file_block_round_trips() {
         .join("sessions")
         .join(dsh_persist::project_key("/tmp/ws"))
         .join(id.as_str())
-        .join("session.v3.jsonl.zstd");
+        .join("session.v4.jsonl.zstd");
     let rows = read_rows(&file);
     let um = rows.iter().find(|r| r["type"] == "user/message").unwrap();
     // 附件块在前、文本在后（上游 sendSession content 顺序）
@@ -622,7 +625,7 @@ fn tool_result_presentation_round_trips() {
         .join("sessions")
         .join(dsh_persist::project_key("/tmp/ws"))
         .join(id.as_str())
-        .join("session.v3.jsonl.zstd");
+        .join("session.v4.jsonl.zstd");
     let rows = read_rows(&file);
     let with_meta = rows
         .iter()
@@ -646,5 +649,125 @@ fn tool_result_presentation_round_trips() {
         })
         .collect();
     assert_eq!(restored, vec![Some(meta), None]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn v3_to_v4_lifts_tool_result_and_repairs_turn_ends() {
+    let dir = std::env::temp_dir().join(format!(
+        "dsh-v34-mig-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = serde_json::json!({
+        "type": "session", "version": 3, "id": "s1",
+        "createdAt": 1u64, "isSeeded": false,
+        "cwd": "/tmp/ws", "delegationDepth": 0,
+    });
+    let rows = vec![
+        serde_json::json!({"type":"turn/start","seq":0,"time":1,"data":{"turn":1}}),
+        serde_json::json!({"type":"step/start","seq":1,"time":2,"data":{"turn":1,"step":1}}),
+        serde_json::json!({"type":"user/message","seq":2,"time":3,"data":{"content":[{"type":"text","text":"hi"}],"source":{"kind":"user"},"role":"user","id":"m1"}}),
+        serde_json::json!({"type":"tool/result","seq":3,"time":4,"data":{"turn":1,"step":1,"message":{"id":"m2","role":"user","source":{"kind":"tool","callId":"c1"},"content":[{"type":"tool-result","toolCallId":"c1","content":[{"type":"text","text":"result"}],"isError":false}]}}}),
+        serde_json::json!({"type":"step/end","seq":4,"time":5,"data":{"turn":1,"step":1}}),
+        // 无 turn/end（重启打断）+ next-turn 注入 → 补 interrupted
+        serde_json::json!({"type":"agent/inbox/spliced","seq":5,"time":5,"data":{"target":"next-turn","inserted":[{"content":[{"type":"text","text":"go on"}]}]}}),
+        serde_json::json!({"type":"turn/start","seq":6,"time":6,"data":{"turn":2}}),
+        serde_json::json!({"type":"user/message","seq":7,"time":7,"data":{"content":[{"type":"text","text":"again"}],"source":{"kind":"plugin","plugin":"model-selection","form":"notice","summary":"x"},"role":"user","id":"m3"}}),
+    ];
+    let mut payload = serde_json::to_string(&header).unwrap() + "\n";
+    for row in &rows {
+        payload += &(serde_json::to_string(row).unwrap() + "\n");
+    }
+    let session_dir = dir.join("s1");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let source = session_dir.join("session.v3.jsonl.zstd");
+    std::fs::write(&source, zstd::stream::encode_all(payload.as_bytes(), 0).unwrap()).unwrap();
+    let before = std::fs::read(&source).unwrap();
+
+    let id = SessionId::new("s1");
+    let target = migrate_v3_to_v4(&source, &id).unwrap();
+
+    assert_eq!(target.file_name().unwrap(), "session.v4.jsonl.zstd");
+    assert_eq!(std::fs::read(&source).unwrap(), before, "source unchanged");
+    let out = read_rows(&target);
+    let header = &out[0];
+    assert_eq!(header["version"], 4);
+    // 行序：turn/start(0) → step/start(1) → user(2) → tool/result(3, 平铺) →
+    // step/end(4) → splice(5) → turn/end interrupted(6, 补齐) → turn/start(7)
+    // → user(8)
+    assert_eq!(out[1]["type"], "turn/start");
+    assert_eq!(out[2]["type"], "step/start");
+    assert_eq!(out[3]["type"], "user/message");
+    assert_eq!(out[4]["type"], "tool/result");
+    let msg = &out[4]["data"]["message"];
+    assert_eq!(msg["role"], "tool", "first-class tool role");
+    assert_eq!(msg["toolCallId"], "c1");
+    assert_eq!(msg["content"][0]["type"], "text", "wrapper stripped");
+    assert!(msg.get("content").unwrap()[0].get("toolCallId").is_none());
+    assert_eq!(out[5]["type"], "step/end");
+    assert_eq!(out[6]["type"], "agent/inbox/spliced");
+    assert_eq!(out[7]["type"], "turn/end");
+    assert_eq!(out[7]["data"]["reason"]["kind"], "interrupted");
+    assert_eq!(out[8]["type"], "turn/start");
+    // plugin source → producer kind（model-selection 同名保留）
+    assert_eq!(out[9]["data"]["source"]["kind"], "model-selection");
+    assert!(out[9]["data"]["source"].get("plugin").is_none());
+    // seq 致密
+    for (index, row) in out.iter().enumerate().skip(1) {
+        assert_eq!(row["seq"], index - 1);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn v4_write_shape_tool_result_flattened_and_read_back() {
+    let dir = temp_dir("v4-shape");
+    let rec = SessionRecorder::new(dir.join("sessions"));
+    let id = SessionId::new("session-v4-shape");
+    rec.create(&id, "/tmp/ws", "standard").unwrap();
+    let msg = Message {
+        id: MessageId::default(),
+        role: dsh_llm::Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: CallId("c9".into()),
+            content: vec![ContentBlock::text("ok")],
+            is_error: Some(false),
+        }],
+        source: MessageSource::Tool { call_id: CallId("c9".into()) },
+    };
+    rec.append(&id, "/tmp/ws", &SessionEvent::ToolResult { turn: 1, step: 1, message: msg.clone(), time_ms: None, presentation: None }).unwrap();
+
+    let file = dir
+        .join("sessions")
+        .join(dsh_persist::project_key("/tmp/ws"))
+        .join(id.as_str())
+        .join("session.v4.jsonl.zstd");
+    assert!(file.exists(), "v4 filename");
+    let rows = read_rows(&file);
+    assert_eq!(rows[0]["version"], 4);
+    let tr = rows.iter().find(|r| r["type"] == "tool/result").unwrap();
+    let m = &tr["data"]["message"];
+    assert_eq!(m["role"], "tool", "v4 first-class tool role on disk");
+    assert_eq!(m["toolCallId"], "c9");
+    assert_eq!(m["isError"], false);
+    // 无 wrapper 嵌套
+    assert!(m["content"].as_array().unwrap().iter().all(|b| b["type"] != "tool-result"));
+    // 读回：内存结构恢复 wrapper 形
+    let (session, _) = rec.load(&id, Some("/tmp/ws")).unwrap();
+    let restored = session.entries().iter().find_map(|e| match &e.event {
+        SessionEvent::ToolResult { message, .. } => Some(message.clone()),
+        _ => None,
+    }).unwrap();
+    match &restored.content[0] {
+        ContentBlock::ToolResult { tool_call_id, content, is_error } => {
+            assert_eq!(tool_call_id.0, "c9");
+            assert!(!is_error.unwrap());
+            assert_eq!(content.len(), 1);
+        }
+        other => panic!("wrapper expected, got {other:?}"),
+    }
     std::fs::remove_dir_all(&dir).ok();
 }

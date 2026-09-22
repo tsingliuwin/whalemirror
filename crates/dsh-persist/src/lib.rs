@@ -1,7 +1,7 @@
 //! dsh-persist — 与 web 版 dsh 完全共享的会话持久化。
 //!
 //! 磁盘布局（web `session-persistence-jsonl` 同款，0.1.3-alpha.1 起 v2）：
-//! `{root}/--{projectKey(cwd)}--/{session-id}/session.v3.jsonl.zstd`
+//! `{root}/--{projectKey(cwd)}--/{session-id}/session.v4.jsonl.zstd`
 //! - 首行 header：`{"type":"session","version":2,"id",…,"isSeeded","cwd","delegationDepth"}`
 //! - 事件行信封：`{"type":"<event>","seq":N,"time":ms,"data":{…}}`
 //!   （surfaceOp/sourceEventSeqs 是信封层成员；assistant 流内嵌在结算行
@@ -13,6 +13,7 @@
 
 mod attachments;
 mod v2;
+pub use v2::migrate_v3_to_v4;
 
 pub use attachments::{attachments_root_from_sessions_root, file_leaf_name, AttachmentStore};
 
@@ -477,7 +478,7 @@ impl SessionRecorder {
 
     /// 追加一个事件（v2 信封行）。
     ///
-    /// - 写打开旧代级联迁移（v0/v1→v2→v3）到 `session.v3.jsonl.zstd`（上游
+    /// - 写打开旧代级联迁移（v0/v1→v2→v3→v4）到 `session.v4.jsonl.zstd`（上游
     ///   `ensureCurrentLog` 语义）；迁移 fail-closed 时整个追加失败。
     /// - `assistant/chunk` 不再落行：缓冲进进行中的 attempt，结算
     ///   （`assistant/message`）时压缩嵌入 `data.stream`。
@@ -501,7 +502,10 @@ impl SessionRecorder {
                 if version < 2 {
                     file = v2::migrate_to_v2(&file, id)?;
                 }
-                file = v2::migrate_v2_to_v3(&file, id)?;
+                if version < 3 {
+                    file = v2::migrate_v2_to_v3(&file, id)?;
+                }
+                file = v2::migrate_v3_to_v4(&file, id)?;
                 self.resolved
                     .lock()
                     .unwrap()
@@ -919,6 +923,47 @@ fn blocks_from_web(arr: Option<&serde_json::Value>) -> Vec<ContentBlock> {
     out
 }
 
+
+/// 上游 producerKind（sources.ts 净态）：V4 起 plugin source 的 kind 直接是
+/// 生产者名，`plugin` 字段删除。
+fn producer_kind(plugin: &str, role: Option<&str>) -> String {
+    if plugin == "@deepseek-ai/dsh-system-prompt" && role == Some("system") {
+        return "system-prompt".to_string();
+    }
+    match plugin {
+        "compact" => "compact-checkpoint".to_string(),
+        "tools-code-mode" | "tools-ptc" => "ptc-mode".to_string(),
+        "dsh-compaction-basic" => "compact-basic".to_string(),
+        "agent-instructions" | "session-reference" | "team-message" | "goal"
+        | "skill-invocation" | "skill-catalog" | "coordinator" | "subagent-report"
+        | "subagent-settled" | "webhook" | "agent-message" | "model-selection"
+        | "plan-mode" | "time-context" | "tmux-context" | "user-approval"
+        | "repeat-tool-reminder" | "tool-cordis" | "cordis-host-runner" | "tool-goal"
+        | "tool-jobs" | "hooks-codex" | "hooks-claude-code" | "schedule"
+        | "dsh-session-title-llm" => plugin.to_string(),
+        other => format!("plugin:{other}"),
+    }
+}
+
+/// MessageSource::Plugin 的 V4 序列化（kind = producer 名，plugin 字段删除；
+/// form/summary 等附属字段原样保留）。
+fn plugin_source_v4(
+    plugin: &str,
+    form: &Option<String>,
+    summary: &Option<String>,
+    role: Option<&str>,
+) -> serde_json::Value {
+    let mut o = serde_json::Map::new();
+    o.insert("kind".into(), serde_json::json!(producer_kind(plugin, role)));
+    if let Some(f) = form {
+        o.insert("form".into(), serde_json::json!(f));
+    }
+    if let Some(s) = summary {
+        o.insert("summary".into(), serde_json::json!(s));
+    }
+    serde_json::Value::Object(o)
+}
+
 fn blocks_to_web(blocks: &[ContentBlock]) -> serde_json::Value {
     let arr: Vec<serde_json::Value> = blocks
         .iter()
@@ -1076,7 +1121,25 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
             let d = data?;
             // v2 形：{turn, step, message:{content, source:{kind:'tool', callId}}}
             if let Some(m) = d.get("message").filter(|m| m.is_object()) {
-                let content = blocks_from_web(m.get("content"));
+                let mut content = blocks_from_web(m.get("content"));
+                // v4 平铺形（role:'tool'、content 为裸结果块）包回 wrapper；
+                // v3/v2 形已含 tool-result wrapper 原样
+                if !matches!(content.first(), Some(ContentBlock::ToolResult { .. })) {
+                    let call4 = m
+                        .get("toolCallId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            m.pointer("/source/callId").and_then(|v| v.as_str()).map(|s| s.to_string())
+                        })
+                        .unwrap_or_default();
+                    let is_error4 = m.get("isError").and_then(|v| v.as_bool());
+                    content = vec![ContentBlock::ToolResult {
+                        tool_call_id: CallId(call4),
+                        content,
+                        is_error: is_error4,
+                    }];
+                }
                 let call = m
                     .get("source")
                     .and_then(|s| s.get("callId"))
@@ -1367,6 +1430,13 @@ pub const KNOWN_SESSION_EVENT_TYPES: &[&str] = &[
     "subagent/descriptor",
     "subagent/model-selection-policy",
     "system/message",
+    "workspace/changes",
+    "subagent/catalog",
+    "image/offload",
+    "feedback/message-delete",
+    "feedback/message-put",
+    "developer/message",
+    "deliverables/presented",
     "team/member",
     "team/message/delivered",
     "team/message/queued",
@@ -1452,8 +1522,8 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
             serde_json::json!({"turn": turn, "step": step}),
         )),
         SessionEvent::UserMessage(m) => {
-            // source 按真实词汇序列化（web merge-extensible sum）：
-            // user 原样；注入类还原 kind/plugin/form/summary/changes/references
+            // source 按 V4 词汇序列化：user 原样；plugin → producer kind
+            //（kind 即生产者名，plugin 字段删除）；注入类（context kind）原样
             let source = match &m.source {
                 MessageSource::User => serde_json::json!({"kind": "user"}),
                 MessageSource::Context {
@@ -1545,13 +1615,29 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
         // v2：chunk 不再是事件（缓冲后内嵌结算行）
         SessionEvent::AssistantChunk { .. } => None,
         SessionEvent::ToolResult { turn, step, message, presentation, .. } => {
-            // v2 形：{turn, step, message:{id, role:'user', content, source}}；
-            // presentation（UI 元数据缝）Some 时落信封外顶层字段（web 读侧对
-            // tool/result 未知字段宽容，不破坏互通）
+            // V4 一等 tool 角色形：message 平铺为 {id, role:'tool', source,
+            // toolCallId, content(裸结果块), isError?}——V3 的 user+wrapper
+            // 嵌套不再落盘（liftToolResult 净态）；presentation 同前
+            let (call_id, content, is_error) = match message.content.first() {
+                Some(ContentBlock::ToolResult { tool_call_id, content, is_error }) => {
+                    (tool_call_id.0.clone(), content.clone(), *is_error)
+                }
+                _ => (String::new(), Vec::new(), Some(false)),
+            };
+            let mut msg = serde_json::json!({
+                "id": message.id.0,
+                "role": "tool",
+                "source": {"kind": "tool", "callId": call_id},
+                "toolCallId": call_id,
+                "content": blocks_to_web(&content),
+            });
+            if let Some(err) = is_error {
+                msg["isError"] = serde_json::json!(err);
+            }
             let mut envelope = serde_json::json!({
                 "turn": turn,
                 "step": step,
-                "message": serde_json::to_value(message).unwrap_or(serde_json::Value::Null),
+                "message": msg,
             });
             if let Some(meta) = presentation {
                 envelope["presentation"] = meta.clone();
@@ -2025,7 +2111,7 @@ mod tests {
         assert!(raw.contains("\"request/header\""), "{raw}");
         assert!(!raw.contains("You are DeepSeek Harness (Rust)."), "{raw}");
         assert!(raw.contains("\"initial\""), "{raw}");
-        assert!(raw.contains("\"version\":3"), "{raw}");
+        assert!(raw.contains("\"version\":4"), "{raw}");
 
         // 读回：typed 事件还原（header 无 system）
         let (session, _) = rec.load(&id, Some("/tmp/ws")).unwrap();
@@ -2191,12 +2277,12 @@ mod tests {
             .join("sessions")
             .join(project_key("/tmp/ws-a"))
             .join(id.as_str())
-            .join("session.v3.jsonl.zstd");
+            .join("session.v4.jsonl.zstd");
         let b_file = dir
             .join("sessions")
             .join(project_key("/tmp/ws-b"))
             .join(id.as_str())
-            .join("session.v3.jsonl.zstd");
+            .join("session.v4.jsonl.zstd");
         assert!(a_file.exists());
         assert!(!b_file.exists(), "cross-bucket copy created");
         let (session, _) = rec.load(&id, None).unwrap();

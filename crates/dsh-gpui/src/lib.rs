@@ -735,3 +735,117 @@ mod process_title_tests {
         assert_eq!(out, vec![(PA::Commands, 2), (PA::Read, 1)]);
     }
 }
+
+// ---- 计划卡片数据面（上游 ui-plan plan.ts submittedPlan 同语义）----
+
+/// 一份已提交计划（来自日志中的 exit_plan_mode 工具调用）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubmittedPlan {
+    /// 发起调用的 tool call id（卡片与预览的持久标识）。
+    pub call_id: String,
+    /// 完整 markdown 计划。
+    pub markdown: String,
+    /// 首个 `# ` 标题（无标题的计划不产卡）。
+    pub title: String,
+}
+
+/// 从日志事件派生完整计划（上游 submittedPlan 收 `{type, data}` 整体）：仅
+/// `tool/call`（PTC dispatch 形 rustdsh 不产），工具名 `exit_plan_mode`，
+/// arguments 解析后含非空 `plan` 字符串；标题取 trim 后首个 `# ` 标题行，
+/// 无标题则无卡。
+pub fn submitted_plan(event: &serde_json::Value) -> Option<SubmittedPlan> {
+    let event_type = event.get("type").and_then(|t| t.as_str())?;
+    let data = event.get("data")?;
+    if event_type != "tool/call" {
+        return None;
+    }
+    if data.get("name").and_then(|n| n.as_str()) != Some("exit_plan_mode") {
+        return None;
+    }
+    let call_id = data.get("callId").and_then(|v| v.as_str())?;
+    if call_id.is_empty() {
+        return None;
+    }
+    // tool/call 的 arguments 是模型输出的原始 JSON 字符串（上游 JSON.parse；
+    // 解析失败保留 generic 工具行）；对象形直接用
+    let args = match data.get("arguments")? {
+        serde_json::Value::String(s) => {
+            serde_json::from_str::<serde_json::Value>(s).ok()?
+        }
+        v @ serde_json::Value::Object(_) => v.clone(),
+        _ => return None,
+    };
+    let markdown = args.get("plan").and_then(|p| p.as_str())?;
+    if markdown.is_empty() {
+        return None;
+    }
+    let title = markdown
+        .trim()
+        .lines()
+        .find_map(|l| {
+            let t = l.trim();
+            if t.starts_with("# ") {
+                let name = t[2..].trim().to_string();
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+            None
+        })?;
+    Some(SubmittedPlan {
+        call_id: call_id.to_string(),
+        markdown: markdown.to_string(),
+        title,
+    })
+}
+
+#[cfg(test)]
+mod submitted_plan_tests {
+    use super::*;
+
+    fn call_event(args_json: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "tool/call",
+            "data": {
+                "turn": 1, "step": 1,
+                "callId": "c1", "name": "exit_plan_mode",
+                "arguments": args_json,
+            },
+        })
+    }
+
+    #[test]
+    fn derives_plan_from_exit_plan_mode_call() {
+        let args = format!("{{\"plan\": \"# My Plan\\n\\n- step one\"}}");
+        let ev = call_event(&args);
+        let plan = submitted_plan(&ev);
+        assert_eq!(
+            plan.as_ref().map(|p| (&p.call_id[..], &p.markdown[..], &p.title[..])),
+            Some(("c1", "# My Plan
+
+- step one", "My Plan"))
+        );
+    }
+
+    #[test]
+    fn ignores_other_tools_and_malformed_args() {
+        let ev = call_event("{\"op\": \"read\"}");
+        assert!(submitted_plan(&ev).is_none());
+        let ev = call_event("{\"mode\": \"on\"}");
+        assert!(submitted_plan(&ev).is_none());
+        let ev = call_event("not json");
+        assert!(submitted_plan(&ev).is_none());
+    }
+
+    #[test]
+    fn plan_without_heading_yields_no_card() {
+        let ev = call_event("no heading here");
+        assert!(submitted_plan(&ev).is_none());
+    }
+
+    #[test]
+    fn non_call_events_are_ignored() {
+        let ev = serde_json::json!({"type":"tool/result","data":{"message":{"role":"tool"}}});
+        assert!(submitted_plan(&ev).is_none());
+    }
+}

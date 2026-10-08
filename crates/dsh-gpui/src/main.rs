@@ -6371,6 +6371,9 @@ fn main() {
     let _web = tools.register(Arc::new(WebTool::new())).unwrap();
     let _grep = tools.register(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone()))).unwrap();
     let _glob = tools.register(Arc::new(dsh_search::GlobTool::default().with_workdir(workdir.clone()))).unwrap();
+    // exit_plan_mode（上游 plan-mode 包同名工具最小等价）：模型提交计划，
+    // 审阅流与 plan-mode 状态机留待后续（偏差固化 backlog #2）
+    let _exit_plan = tools.register(Arc::new(dsh_tools::ExitPlanModeTool)).unwrap();
     let prompt = Arc::new(SystemPrompt::new());
     // web_fetch section（alpha.4 sdk-default-web-fetch：fetch 工具进入默认
     // 提示词；与 web_search 的「Follow up with web_fetch」衔接）

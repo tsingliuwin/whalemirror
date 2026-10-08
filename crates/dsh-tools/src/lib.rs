@@ -355,3 +355,79 @@ y");
         assert!(hunks[0].lines.iter().all(|l| l.kind == DiffLineKind::Add));
     }
 }
+
+
+/// `exit_plan_mode`（上游 plan-mode 包同名工具的最小等价）：校验提交的
+/// markdown 计划并返回确认文本。无 plan-mode 状态机与用户审阅流（rustdsh
+/// 无 user-questions 通道——审批交互偏差固化于 backlog #2），注册状态机
+/// 接线后补。
+pub struct ExitPlanModeTool;
+
+#[async_trait::async_trait]
+impl Tool for ExitPlanModeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "exit_plan_mode".to_string(),
+            description: "Present the completed plan for user review. The complete plan, as markdown, starting with a # heading that names it.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan": {
+                        "type": "string",
+                        "description": "The complete plan, as markdown, starting with a # heading that names it."
+                    }
+                },
+                "required": ["plan"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        let plan = input
+            .arguments
+            .get("plan")
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string());
+        let Some(plan) = plan else {
+            return ToolExecutionResult::error("exit_plan_mode requires a plan argument");
+        };
+        // 上游标题校验：非空 markdown 且以 # 标题开头
+        if !plan.trim_start().starts_with('#') || plan.trim().len() < 3 {
+            return ToolExecutionResult::error(
+                "exit_plan_mode requires a non-empty markdown plan starting with a # heading",
+            );
+        }
+        ToolExecutionResult::text(
+            "Plan approved — plan mode exited; carry out the plan starting with your next step.",
+        )
+    }
+}
+
+
+#[cfg(test)]
+mod exit_plan_tests {
+    use super::*;
+
+    fn run(plan: &str) -> ToolExecutionResult {
+        let input = ToolExecutionInput::with_raw_arguments(
+            CallId("c1".to_string()),
+            "exit_plan_mode".to_string(),
+            serde_json::json!({"plan": plan}).to_string(),
+        );
+        futures::executor::block_on(ExitPlanModeTool.execute(&input))
+    }
+
+    #[test]
+    fn rejects_plan_without_hash_heading() {
+        let r = run("just some notes");
+        assert!(r.is_error);
+        assert!(format!("{:?}", r.content).contains("# heading"));
+    }
+
+    #[test]
+    fn accepts_hash_headed_plan() {
+        let r = run("# My Plan\n\nstep one");
+        assert!(!r.is_error);
+        assert!(format!("{:?}", r.content).contains("Plan approved"));
+    }
+}

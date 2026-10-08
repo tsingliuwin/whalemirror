@@ -102,6 +102,9 @@ pub enum SessionEvent {
         name: String,
         arguments: String,
     },
+    /// `plan/mode`（log-only，最后者赢）：plan 模式开关状态（上游
+    /// plan-mode 包折叠语义——无此事件折叠为未激活）。
+    PlanMode { active: bool },
     /// `surfaceOp: append` — the tool-result message is the model-visible node.
     ToolResult {
         turn: u64,
@@ -257,6 +260,19 @@ impl Session {
         self.next_seq += 1;
         self.entries.push(SessionEntry { seq, event });
         seq
+    }
+
+    /// plan 模式折叠（上游 plan-mode 投影：最后一条 plan/mode 事件赢；
+    /// 无此事件 = 未激活）。
+    pub fn plan_mode_active(&self) -> bool {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|e| match &e.event {
+                SessionEvent::PlanMode { active, .. } => Some(*active),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     pub fn entries(&self) -> &[SessionEntry] {

@@ -1354,6 +1354,10 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .unwrap_or(HeaderReason::Change);
             Some(SessionEvent::RequestHeader { header, reason })
         }
+        // plan/mode（log-only 开关，最后者赢）
+        "plan/mode" => Some(SessionEvent::PlanMode {
+            active: data.and_then(|d| d.get("active")).and_then(|v| v.as_bool()).unwrap_or(false),
+        }),
         // v3 system prompt 面节点（上游 emitSystem 形：固定 plugin source，
         // 信封 surfaceOp append 或 {op:'replace',startSeq,endSeq} 精确替换 head）
         "system/message" => {
@@ -1759,6 +1763,9 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
                     "reason": serde_json::to_value(reason).unwrap_or(serde_json::Value::Null),
                 }),
             ))
+        }
+        SessionEvent::PlanMode { active } => {
+            Some(row("plan/mode", serde_json::json!({"active": active})))
         }
         SessionEvent::SystemMessage { turn, step, message, replace } => {
             // v3 system prompt 面节点（上游 emitSystem）：固定 role=system 的

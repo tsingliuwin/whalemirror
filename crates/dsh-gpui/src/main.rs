@@ -3914,6 +3914,13 @@ impl AppView {
         cx.notify();
     }
 
+    /// plan 模式切换（上游 /plan 命令的 on/off 切换）。
+    fn toggle_plan_mode(&mut self, cx: &mut Context<Self>) {
+        let active = self.agent.plan_mode_active();
+        self.agent.set_plan_mode(!active);
+        cx.notify();
+    }
+
     /// composer 模型菜单选择：切路由并持久化 agent-default-model。
     fn switch_model(&mut self, provider: String, model: String, cx: &mut Context<Self>) {
         self.set_route(&provider, &model);
@@ -4980,6 +4987,7 @@ impl AppView {
         const ROWS: &[CmdRow] = &[
             CmdRow { section: "添加", name: "file", label: "文件", desc: None },
             CmdRow { section: "指令", name: "compact", label: "压缩", desc: Some("压缩以上对话内容") },
+            CmdRow { section: "指令", name: "plan", label: "计划模式", desc: Some("进入或离开计划模式（输入 off 离开）") },
             CmdRow { section: "指令", name: "permission", label: "权限", desc: Some("切换权限预设（沙箱模式与审批策略）") },
             CmdRow { section: "指令", name: "model", label: "模型", desc: Some("选择本会话使用的模型") },
             CmdRow { section: "指令", name: "export", label: "下载日志", desc: Some("将当前会话日志导出到本地目录") },
@@ -5082,6 +5090,10 @@ impl AppView {
                                 v.command_menu = false;
                                 v.agent.compact_now();
                                 cx.notify();
+                            }),
+                            "plan" => t_row.update(cx, |v, cx| {
+                                v.command_menu = false;
+                                v.toggle_plan_mode(cx);
                             }),
                             "model" => t_row.update(cx, |v, cx| {
                                 v.command_menu = false;

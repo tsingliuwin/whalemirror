@@ -222,6 +222,11 @@ pub struct ReactLoopAgent {
     /// v3 system prompt 面节点 head：(日志 seq, 当前文本)。None = 本会话
     /// 尚无 system/message 行（上游 SystemPromptProjection 的 head 跟踪）。
     system_head: Mutex<Option<(u64, String)>>,
+    /// plan 模式激活态（上游 PlanModeController 的投影折叠：最后一条
+    /// plan/mode 事件赢；无此事件 = 未激活）。pending 切换在轮终边界落盘。
+    plan_mode: Mutex<bool>,
+    /// 待落盘的 plan 模式切换（轮终边界提交，上游 onBoundary 同语义）。
+    plan_pending: Mutex<Option<bool>>,
 }
 
 /// Side-channel observer for every appended session event.
@@ -256,6 +261,8 @@ impl ReactLoopAgent {
             on_event: Mutex::new(None),
             _turn_boundary_registration: Mutex::new(Some(turn_boundary_registration)),
             system_head: Mutex::new(None),
+            plan_mode: Mutex::new(false),
+            plan_pending: Mutex::new(None),
         })
     }
 
@@ -288,7 +295,12 @@ impl ReactLoopAgent {
             }
             _ => None,
         });
-        *self.system_head.lock().unwrap() = head;
+        let plan_active = session.entries().iter().rev().find_map(|e| match &e.event {
+            SessionEvent::PlanMode { active, .. } => Some(*active),
+            _ => None,
+        });
+        *self.plan_mode.lock().unwrap() = plan_active.unwrap_or(false);
+        self.plan_pending.lock().unwrap().take();
         *self.session.lock().unwrap() = session;
         self.inbox.lock().unwrap().clear();
     }
@@ -298,6 +310,59 @@ impl ReactLoopAgent {
     /// `agent.session.append(...)`): retry events ride this too.
     pub fn append_session_event(&self, event: SessionEvent) {
         self.append_event(event);
+    }
+
+    /// plan 模式切换（上游 /plan 命令与 exit_plan_mode 审阅共用的提交路径）：
+    /// 落 `plan/mode` 事件（轮终边界语义的立即形态），目标与当前一致时静默；
+    /// 模式切换时注入 narration（plugin source plan-mode notice）。
+    pub fn set_plan_mode(&self, active: bool) {
+        let current = {
+            let s = self.session.lock().unwrap();
+            s.entries()
+                .iter()
+                .rev()
+                .find_map(|e| match &e.event {
+                    SessionEvent::PlanMode { active, .. } => Some(*active),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        };
+        if current == active {
+            return;
+        }
+        let narrate = true;
+        self.append_event(SessionEvent::PlanMode { active });
+        *self.plan_mode.lock().unwrap() = active;
+        // narration（上游 narration：最后 header 见证与目标不同才注入）
+        let text = if active {
+            "The user switched this session to plan mode."
+        } else {
+            "The user switched this session back to the default mode."
+        };
+        if narrate {
+            let msg = dsh_llm::Message::new(
+                dsh_llm::Role::User,
+                vec![dsh_llm::ContentBlock::text(text)],
+                dsh_llm::MessageSource::Plugin {
+                    plugin: "plan-mode".into(),
+                    form: Some("notice".into()),
+                    summary: Some(text.to_string()),
+                    sections: None,
+                },
+            );
+            self.append_event(SessionEvent::UserMessage(msg));
+        }
+    }
+
+    /// 最后一条 plan:mode header 见证（上游 loggedActiveAtLastHeader 最小形：
+    /// 日志内 plan/mode 折叠值；None = 从未叙述）。
+    fn plan_mode_told(&self, _s: &Session) -> Option<bool> {
+        None
+    }
+
+    /// plan 模式是否激活（内存折叠值）。
+    pub fn plan_mode_active(&self) -> bool {
+        *self.plan_mode.lock().unwrap()
     }
 
     /// The projection registry this agent folds boundary facts into.

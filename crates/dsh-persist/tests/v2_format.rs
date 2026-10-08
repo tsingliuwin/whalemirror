@@ -771,3 +771,40 @@ fn v4_write_shape_tool_result_flattened_and_read_back() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn projcache_array_tables_never_overwrite() {
+    // 上游 storage-json format.ts 修正同语义：tables 为数组时视为不可见，
+    // 绝不把该空视图覆写回盘丢弃记录
+    let dir = temp_dir("array-tables");
+    std::fs::create_dir_all(
+        dir.join("storages")
+            .join("session_projcache")
+            .join("sessions"),
+    )
+    .unwrap();
+    let unit = dir
+        .join("storages")
+        .join("session_projcache")
+        .join("unit.session_projcache.json");
+    std::fs::write(
+        &unit,
+        serde_json::json!({
+            "unit": {"name": "session_projcache", "version": 3},
+            "global": null,
+            "tables": ["not", "an", "object"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let rec = SessionRecorder::new(dir.join("sessions"));
+    let id = SessionId::new("session-array");
+    rec.create(&id, "/tmp/ws", "standard").unwrap();
+    rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "题".into() }).unwrap();
+
+    // 单元文件保持原样（未被空视图覆写）
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&unit).unwrap()).unwrap();
+    assert!(after["tables"].is_array(), "array tables preserved");
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -435,6 +435,11 @@ impl SessionRecorder {
                     "tables": {"sessions": {}}
                 })
             });
+        // 数组判守（上游 storage-json format.ts 修正同语义）：tables 为数组
+        // 时按不可见处理直接返回——避免把读不到的记录当空视图覆写丢弃
+        if doc.get("tables").is_some_and(|t| t.is_array()) {
+            return;
+        }
         let Some(tables) = doc.get_mut("tables").and_then(|t| t.as_object_mut()) else {
             return;
         };

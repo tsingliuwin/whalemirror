@@ -526,7 +526,9 @@ pub fn read_text_page(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProcessActivity {
     Read,
+    ReadImage,
     Search,
+    Write,
     Edit,
     Commands,
     Code,
@@ -543,7 +545,9 @@ impl ProcessActivity {
     pub fn done_label(self) -> &'static str {
         match self {
             ProcessActivity::Read => "已读取文件",
+            ProcessActivity::ReadImage => "已读取图片",
             ProcessActivity::Search => "已搜索代码",
+            ProcessActivity::Write => "已写入文件",
             ProcessActivity::Edit => "修改了文件",
             ProcessActivity::Commands => "执行了命令",
             ProcessActivity::Code => "运行了代码",
@@ -572,7 +576,7 @@ pub fn process_activity(name: &str, arguments: &str) -> ProcessActivity {
     match name {
         "fs" => match op("op").as_deref() {
             Some("read") | Some("list") => ProcessActivity::Read,
-            Some("write") => ProcessActivity::Edit,
+            Some("write") => ProcessActivity::Write,
             _ => ProcessActivity::Tools,
         },
         "grep" | "glob" => ProcessActivity::Search,
@@ -708,7 +712,7 @@ mod process_title_tests {
     #[test]
     fn activity_categorizes_rustdsh_tool_names() {
         assert_eq!(process_activity("fs", r#"{"op":"read","path":"a"}"#), PA::Read);
-        assert_eq!(process_activity("fs", r#"{"op":"write","path":"a"}"#), PA::Edit);
+        assert_eq!(process_activity("fs", r#"{"op":"write","path":"a"}"#), PA::Write);
         assert_eq!(process_activity("fs", "{}"), PA::Tools);
         assert_eq!(process_activity("shell", "{}"), PA::Commands);
         assert_eq!(process_activity("grep", "{}"), PA::Search);

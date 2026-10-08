@@ -1,10 +1,10 @@
 # 上游更新分析法（模式 A 详细步骤）
 
 上游仓库：`E:\aiproject\deepseek-harness`（git）。rustdsh 是其 **web 前端（packages/client/*）+ 存储行为（storage/session）+ llm-deepseek 适配层** 的 Rust/GPUI 1:1 复刻。
-> **当前同步点：dsh-v0.1.7-alpha.2（00102833df）**——2026-09-23 同步（发布点=master HEAD，无增量；alpha.2 增量全为面外精修，存储零变更）。此前 c36a83ff6b（0.1.7-alpha.1，2026-09-22 同步）。
+> **当前同步点：dsh-v0.2.1-alpha.1（5badb15009）**——2026-09-23 同步（发布点=master HEAD，无增量；跨 0.1.7 系列与 0.2.x，1552 文件 +74303/-11195）。此前 00102833df（0.1.7-alpha.2，2026-09-23 同步）。
 > 0.1.5-alpha.1 主面：**会话格式 v3**（system prompt 晋升 system/message 行 + request/header 去 system + PTC 改名 + canonical 信封）、composer 统计行改双图标 pill + 互斥统计对话框、SystemPromptRow（系统提示词折叠行）；Sidebar 工作区文件树/dockkit/textpreview/remotes 全链面外。
 > **最近检查：2026-09-14（文件浏览器面重判 + 实施轮）**——上游无需新拉（本地 master c291e7961a 已含 ui-sidebar-files/documentpreview 全链；网络面 GitHub SSH/HTTPS 双断、系统代理 7897 出口坏，SSH443 握手可成但传输被掐，改用本地既有树分析）； **最近检查：2026-09-11（定时轮 #7，零更新轮）**——上游 pull 经仓库局部代理（http.proxy=127.0.0.1:7897，SSH/HTTPS 直连被墙后的固定修复）成功，Already up to date（HEAD=master=rc.2 发布点 fb2c4b9e69），五段零差异，无动作。上轮 #6 同步结论不变。
-> **最近检查：2026-09-23（定时轮 #17，同步+补缺轮）**——上游 alpha.2 无新增面内（滚动精修/文案微调面外）；**完成存储 v4 升级**（写 v4 + 读 v3/v4 + 四级迁移链 + tool 角色平铺 + producer kind source + turn/end 补齐）。
+> **最近检查：2026-09-23（定时轮 #18，同步轮）**——上游发布 0.2.1-alpha.1，面内实施一项（stepProcess 拆 Write/ReadImage + 轮尾文案）；存储域 invariant 删除（Host 自检面）、storage-json 数组判守（登记）；mods 桥/预览器/Team 等大批面外。
 
 ## 1. 一键差异分析
 
@@ -86,6 +86,10 @@
 | steering 系列修复（preserve steering order/cross-client pending order/retire confirmed echoes）| 面外→backlog #22 | rustdsh inbox 有 steer/send 双通道，顺序语义需对照上游核对 |
 | voice-input 语音输入插件 / account-controller 账号登录 / Team panel / shortcuts 快捷键系统（净态）/ CLI JSON Schema / tool-cordis inspect | 面外→backlog 登记 | 各无对应面或实验性（语音/账号/Team/快捷键为独立子系统）|
 | workspace 归档前停运行（cbae324bfa）/ XLSX 预览 / 文档缩放统一 / deliverables diff 行背景 | 面外→backlog 登记 | 归档接线小项；预览体系归 #7；diff 卡归 #1 |
+| stepProcess 拆分与文案更新（0.2.1-alpha.1：readImage/write 独立类目、subagents 改「子智能体」、prepare.* 系列准备中文案）| **面内**（已实施）| ProcessActivity 拆 Write/ReadImage + done 文案表更新；prepare.*（运行中行形态）rustdsh 折叠仅闭合轮无消费面，不落 |
+| message.turnProcess 文案（worked「已完成工作」→「已完成」、took「用时 X」→「已完成，用时 X」）| **面内**（已实施）| 轮尾用时行文案对齐 |
+| storage-json 数组判守（tables 为数组时拒绝——防把不可见记录当空视图覆写丢弃）| 面外→backlog #23 | rustdsh 读 web projcache 单元时的防御性对齐（登记小项）|
+| storage-domain invariant 删除 / mods 桥（Claude Code mods→DSH 插件实验面）/ DevTools 打包 / LibreOffice Kit / Team 后续 | 面外 | Host 自检伴生/实验 mods 桥/Electron 打包/Office 渲染/协作面各无对应面 |
 | category.service-stability 文案改「稳定性和速度」/ guide.description | 面外 | feedback 分类与 sidebar guide 面无镜像 |
 | CodeBlock contentRef/display:contents、TurnTailNodeView actions margin-top 4px | 面外 | web DOM 缝（ref/滚动端口挂载）与 DOM 流间距补偿，vendor TextView 布局模型无对应结构 |
 | sidebar guide 起始页/documentpreview 精修/preview scrollports | 面外 | Sidebar 全链面外（既有判定）|

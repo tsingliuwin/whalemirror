@@ -4049,13 +4049,13 @@ fn render_entry_footer(
                     .ghost()
                     .child(pill_row(
                         "icons/clock.svg",
-                        format!("用时 {}", format_run_duration(elapsed.as_millis() as u64)),
+                        format!("已完成，用时 {}", format_run_duration(elapsed.as_millis() as u64)),
                     )),
             )
             .content(move |_, _, _| turn_time_panel(u.clone()).into_any_element())
     });
 
-    let plain_time = format!("用时 {}", format_run_duration(elapsed.as_millis() as u64));
+    let plain_time = format!("已完成，用时 {}", format_run_duration(elapsed.as_millis() as u64));
 
     // web MessageIconActions：整行（复制 + 用量/用时药丸 + 时钟）按轮次
     // 新旧显隐——最新一轮常驻，更早的轮悬停条目时显现（opacity 保持布局）

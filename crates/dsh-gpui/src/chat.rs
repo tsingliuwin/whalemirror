@@ -2136,6 +2136,8 @@ open: false,
                         ei,
                         latest_turn,
                     ));
+                    // web PlanCards：轮尾提交计划卡（每 exit_plan_mode 调用一卡）
+                    col = col.child(plan_cards_row(&self.entries, entry.turn));
                 }
                 div().w_full().child(col)
             }
@@ -4283,3 +4285,145 @@ fn attach_tool_result(
 use dsh_agent_loop::AgentEvent;
 use dsh_llm::{ContentBlock, MessageSource};
 use dsh_session::{SessionEvent, TurnEndReason};
+
+/// 计划卡（web PlanCards：markdown 图标座 40×40、title 13/20 w500、
+/// 描述 10/16 三级、打开钮 28px；卡片 60px、0.5px l1、r-xl、点击开预览）。
+fn plan_cards_row(entries: &[ChatEntry], turn: u64) -> Div {
+    // 从本轮条目收集 exit_plan_mode 调用（每调用一卡，调用序去重）
+    let mut cards: Vec<(String, String)> = Vec::new(); // (callId, markdown)
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for e in entries {
+        if e.turn != turn {
+            continue;
+        }
+        for b in &e.blocks {
+            if let MsgBlock::Tool(tool) = b {
+                if tool.name == "exit_plan_mode" && seen.insert(tool.id.clone()) {
+                    // args.plan（模型 raw JSON 字符串里抽 plan 字段）
+                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool.arguments) {
+                        if let Some(plan) = args.get("plan").and_then(|p| p.as_str()) {
+                            cards.push((tool.id.clone(), plan.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if cards.is_empty() {
+        return div();
+    }
+    let mut wrap = div().w_full().v_flex().gap(px(10.0));
+    for (ix, (call_id, markdown)) in cards.iter().enumerate() {
+        let title = markdown
+            .trim()
+            .lines()
+            .find_map(|l| {
+                let t = l.trim();
+                if t.starts_with("# ") {
+                    Some(t[2..].trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "计划".to_string());
+        let md = markdown.clone();
+        let rid = format!("plan-card-{ix}");
+        // web 点击开侧栏预览；rustdsh 用 Popover 展示 markdown 全文（等宽块）
+        let card = div()
+            .id(SharedString::from(rid.clone()))
+            .w_full()
+            .h(px(60.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(12.0))
+            .border(px(0.5))
+            .border_color(theme::t().border_l1)
+            .bg(theme::t().surface)
+            .hover(|s| s.bg(theme::t().hover))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(40.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.0))
+                    .border(px(0.5))
+                    .border_color(theme::t().border_l1)
+                    .bg(theme::t().surface)
+                    .child(crate::chat::file_type_icon("PLAN.md")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .v_flex()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::t().text)
+                            .truncate()
+                            .child(title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .line_height(px(16.0))
+                            .text_color(theme::t().caption)
+                            .truncate()
+                            .child("计划 · Markdown"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.0))
+                    .border(px(0.5))
+                    .border_color(theme::t().border_l3)
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(theme::t().text_2)
+                    .child("打开"),
+            );
+        wrap = wrap.child(
+            gpui_component::popover::Popover::new(("plan-card-pop", ix as u64))
+                .anchor(gpui::Corner::TopLeft)
+                .trigger(
+                    gpui_component::button::Button::new(("plan-card-btn", ix as u64))
+                        .ghost()
+                        .child(card),
+                )
+                .content(move |_, _, _| {
+                    div()
+                        .max_w(px(560.0))
+                        .max_h(px(420.0))
+                        .p(px(16.0))
+                        .rounded(px(12.0))
+                        .bg(theme::t().menu)
+                        .shadow(theme::elevation_prominent())
+                        .child(
+                            div()
+                                .font_family(crate::theme_mono())
+                                .text_size(px(13.0))
+                                .line_height(px(20.0))
+                                .text_color(theme::t().text)
+                                .child(md.clone()),
+                        )
+                        .into_any_element()
+                }),
+        );
+    }
+    wrap
+}

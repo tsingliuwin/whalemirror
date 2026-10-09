@@ -1151,9 +1151,10 @@ l4").unwrap();
             .await;
         assert!(text_of(&r).contains("old_string must be a non-empty string"));
         // path 容错
-        let r = edit
-            .execute(&input(r#"{"path": "a.txt", "old_string": "q", "new_string": "z", "replace_all": true}"#))
-            .await;
+        edit.execute(&input(
+            r#"{"path": "a.txt", "old_string": "q", "new_string": "z", "replace_all": true}"#,
+        ))
+        .await;
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "z\nz\ny");
 
         let _ = std::fs::remove_dir_all(&dir);

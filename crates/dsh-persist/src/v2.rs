@@ -1168,7 +1168,7 @@ const V4_KNOWN_BLOCK_TYPES: &[&str] = &[
 /// 删除）；内容块白名单外加 plugin: 前缀；seq 致密重映射；未知必读类型拒绝；
 /// 源文件字节永不改动。rustdsh 日志无 subagent/catalog 与 children 证据，
 /// finish 的目录补齐为空操作（上游需显式 children 声明）。
-pub fn migrate_v3_to_v4(source: &Path, id: &SessionId) -> io::Result<PathBuf> {
+pub fn migrate_v3_to_v4(source: &Path, _id: &SessionId) -> io::Result<PathBuf> {
     let bytes = crate::read_decompressed(source)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let mut header: Option<serde_json::Value> = None;

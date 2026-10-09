@@ -44,7 +44,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{Icon, IconName, Root, StyledExt, TitleBar};
 use dsh_gpui::{
-    DirEntryKind, ToolBlock, child_path, files_failure_line, order_entries,
+    ToolBlock, child_path, files_failure_line, order_entries,
 };
 use std::collections::{HashMap, HashSet};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -86,7 +86,6 @@ struct DraftFile {
     id: String,
     path: std::path::PathBuf,
     name: String,
-    bytes: u64,
     state: DraftUpload,
     /// 图片草稿（PNG/JPEG 捕获面）：入存后的附件引用 + 像素尺寸；
     /// None = 普通文件草稿（File 块）。
@@ -1908,7 +1907,7 @@ impl AppView {
         let current_ws = self.current_workspace.clone();
         let collapsed = self.sidebar_collapsed;
         let width = self.sidebar_width;
-        self.sidebar.update(cx, |s, cx| {
+        self.sidebar.update(cx, |s, _cx| {
             s.refresh(sessions, workspaces, archived, current, running, current_ws, collapsed, width);
         });
         // dock 树根跟随视图会话（会话切换时整树重置/重载）
@@ -3351,10 +3350,6 @@ impl AppView {
         self.agent.session().lock().unwrap().id.clone()
     }
 
-    fn running(&self, cx: &App) -> bool {
-        self.chat.read_with(cx, |c, _| c.running())
-    }
-
     /// 视图/运行分离模型（运行中查看式切换的三条判定收口，含单测）。
     fn view_split(&self) -> dsh_gpui::ViewSplit {
         dsh_gpui::ViewSplit {
@@ -3531,7 +3526,6 @@ impl AppView {
                 id: id.clone(),
                 path: path.clone(),
                 name: name.clone(),
-                bytes: meta.len(),
                 state: DraftUpload::Uploading,
                 image,
             });
@@ -4599,7 +4593,6 @@ impl AppView {
             id: id.clone(),
             path: std::path::PathBuf::from(&name),
             name: name.clone(),
-            bytes: bytes.len() as u64,
             state: DraftUpload::Uploading,
             image: None,
         });
@@ -5518,7 +5511,6 @@ impl AppView {
 
     /// 底部 composer 区：输入卡 + 统计行（web composer.dock 槽，卡下 footer）。
     fn render_composer_area(&self, this: Entity<AppView>, has_text: bool, width: f32, snap: &ChatSnap) -> Div {
-        let content_w = layout::chat_content_width(width);
         let card_w = layout::composer_card_width(width);
         let locked = snap.empty && self.current_workspace.is_none();
         let this = this.clone();
@@ -6202,78 +6194,6 @@ impl AppView {
             )))
     }
 
-    /// 异会话运行中的让位卡：状态点 + 运行会话标题 + 「返回运行中的会话」。
-    /// 上游没有这个态（web 每会话独立 runtime，切走照常能发）；rustdsh 单
-    /// runtime，运行期间只能查看——做成显式状态条而不是禁用态输入框。
-    fn composer_foreign_card(&self, this: &Entity<AppView>, card_w: f32) -> Stateful<Div> {
-        let running_id = self.current_session_id();
-        let running_title = self
-            .sessions
-            .iter()
-            .find(|m| m.id == running_id)
-            .map(|m| m.title.clone())
-            .unwrap_or_else(|| "会话".into());
-        let t_back = this.clone();
-        div()
-            .id("composer-foreign")
-            .w_full()
-            .max_w(px(card_w))
-            .mx_auto()
-            .flex_none()
-            .h(px(64.0))
-            .px(px(16.0))
-            .flex()
-            .items_center()
-            .gap_2()
-            .rounded(px(22.0))
-            .bg(theme::t().surface)
-            .shadow(theme::elevation_soft_inert())
-            // 点整条也可返回（与右侧按钮同动作）
-            .cursor_pointer()
-            .on_click({
-                let t_row = this.clone();
-                let id = running_id.clone();
-                move |_, _, cx| {
-                    let id = id.clone();
-                    t_row.update(cx, |v, cx| { v.switch_session(id, cx); });
-                }
-            })
-            .child(state_dot_ongoing("composer-run-dot"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(theme::FONT_ROW))
-                    .line_height(px(20.0))
-                    .text_color(theme::t().text_2)
-                    .child(format!("「{running_title}」正在运行，本轮结束后可在此继续")),
-            )
-            .child(
-                div()
-                    .id("composer-foreign-back")
-                    .flex_none()
-                    .px_2()
-                    .h(px(28.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(8.0))
-                    .border(px(0.5))
-                    .border_color(theme::t().border_l3)
-                    .text_size(px(theme::FONT_ROW))
-                    .line_height(px(20.0))
-                    .text_color(theme::t().text)
-                    .hover(|s| s.bg(theme::t().surface_2))
-                    .on_click(move |_, _, cx| {
-                        let id = running_id.clone();
-                        t_back.update(cx, |v, cx| { v.switch_session(id, cx); });
-                    })
-                    .child("返回运行中的会话"),
-            )
-    }
-
     /// 输入卡（web InputBar .card）：r22、白 6% 描边、850 表面、
     /// 文本在上（16/24），控件行在下（+ / 模式 | 模型 / 发送）。
     fn composer_card(&self, this: Entity<AppView>, has_text: bool, card_w: f32, running: bool, locked: bool, slash_query: Option<&str>) -> Stateful<Div> {
@@ -6475,7 +6395,7 @@ impl AppView {
                     if locked {
                         return;
                     }
-                    t_cmd.update(cx, |v, cx| {
+                    let _ = t_cmd.update(cx, |v, cx| {
                         v.command_menu = !v.command_menu;
                         v.model_menu = false;
                         cx.notify();

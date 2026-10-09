@@ -602,7 +602,6 @@ fn apply_offload_targets(
         let Some((_, message, _)) = out.iter_mut().find(|(seq, _, _)| *seq == t.seq) else {
             continue;
         };
-        let mut image_index = 0usize;
         let mut wanted = t.image_indexes.clone();
         wanted.sort_unstable();
         let mut remaining = wanted.as_slice();
@@ -634,9 +633,9 @@ fn apply_offload_targets(
 #[cfg(test)]
 mod session_stats_tests {
     use super::*;
-    use dsh_llm::{CallId, ContentBlock, Message, MessageSource, TokenUsage};
+    use dsh_llm::{CallId, ContentBlock, Message, MessageSource};
 
-    fn ev(seq: u64, time: u64, event: SessionEvent) -> SessionEntry {
+    fn ev(seq: u64, _time: u64, event: SessionEvent) -> SessionEntry {
         SessionEntry { seq, event }
     }
 

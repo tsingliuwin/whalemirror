@@ -5,7 +5,7 @@ fn main() {
     let home = std::env::var("HOME").unwrap();
     let rec = SessionRecorder::new(format!("{home}/.dsh/sessions").into());
     let list = rec.list().unwrap();
-    let target = std::env::args().nth(1).map(|id| list.iter().find(|e| e.id.as_str() == id).expect("id not found").clone()).unwrap_or_else(|| list.iter().find(|e| e.cwd.as_deref().unwrap_or("").contains("deepseek-harness")).expect("no web session").clone());
+    let target = std::env::args().nth(1).map(|id| list.iter().find(|e| e.id.as_str() == id).expect("id not found")).unwrap_or_else(|| list.iter().find(|e| e.cwd.as_deref().unwrap_or("").contains("deepseek-harness")).expect("no web session"));
     let (session, _) = rec.load(&target.id, target.cwd.as_deref()).unwrap();
     let raw = home + "/.dsh/sessions/--Users-liuyq-aiproject-deepseek-harness--/" + target.id.as_str() + "/session.jsonl.zstd";
     let bytes = std::fs::read(&raw).unwrap();

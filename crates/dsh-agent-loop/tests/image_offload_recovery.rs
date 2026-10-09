@@ -159,7 +159,6 @@ async fn offload_required_with_no_images_left_concludes_as_error() {
     let dir = std::env::temp_dir().join(format!("dsh-loop-offload-e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
-    let recorder = Arc::new(SessionRecorder::new(dir.join("sessions")));
     let events = EventBus::new();
     let llm = Arc::new(LlmRuntime::with_events(events.clone()));
     let adapter = Arc::new(NoImageAdapter::default());

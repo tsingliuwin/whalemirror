@@ -304,6 +304,10 @@ impl ReactLoopAgent {
             _ => None,
         });
         *self.plan_mode.lock().unwrap() = plan_active.unwrap_or(false);
+        // v3 replace 语义要求换端点恰为当前 head：切换会话必须把内存 head
+        // 重定基到日志末条 system/message 行——否则 None 分支会对已有 head
+        // 重复 append（旧行残留），跨会话残留旧 seq 则写出悬空 replace 端点。
+        *self.system_head.lock().unwrap() = head;
         self.plan_pending.lock().unwrap().take();
         *self.session.lock().unwrap() = session;
         self.inbox.lock().unwrap().clear();
@@ -359,12 +363,6 @@ impl ReactLoopAgent {
             // 到上一轮名下（上游日志形不符）。
             self.inject(msg);
         }
-    }
-
-    /// 最后一条 plan:mode header 见证（上游 loggedActiveAtLastHeader 最小形：
-    /// 日志内 plan/mode 折叠值；None = 从未叙述）。
-    fn plan_mode_told(&self, _s: &Session) -> Option<bool> {
-        None
     }
 
     /// plan 模式是否激活（内存折叠值）。

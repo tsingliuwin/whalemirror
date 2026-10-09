@@ -152,7 +152,7 @@ mod tests {
             content: vec![ContentBlock::File { attachment: rf.clone() }],
             is_error: Some(false),
         };
-        let mut assistant = Message::assistant(vec![nested], "p", "m");
+        let assistant = Message::assistant(vec![nested], "p", "m");
 
         let resolver = |_rf: &FileAttachmentRef| Some("/stored/path".to_string());
         let out = project_files_to_text(vec![message, assistant], &resolver);

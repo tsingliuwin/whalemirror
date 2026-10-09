@@ -1997,7 +1997,6 @@ pub fn is_migration_known_type(ty: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn title_round_trips_to_web_artifacts() {

@@ -228,7 +228,7 @@ mod tests {
         });
         assert!(!prompt.render().contains("workspace rules"));
         disposer();
-        prompt.add_section(PromptSection {
+        let _ = prompt.add_section(PromptSection {
             name: "workspace:instructions".into(),
             order: 400,
             text: "workspace rules".into(),

@@ -42,9 +42,6 @@ use std::time::{Duration, Instant};
 pub(crate) struct TurnFold {
     first_process: usize,
     answer: usize,
-    tools: usize,
-    messages: usize,
-    subagents: usize,
     /// 过程活动类目计数（上游 processActivity：distinct call 去重、count 降序）。
     activities: Vec<(dsh_gpui::ProcessActivity, usize)>,
 }
@@ -665,10 +662,6 @@ impl ChatView {
             cache_read: self.stats_cache_read,
             cache_write: self.stats_cache_write,
         }
-    }
-
-    pub(crate) fn stats_steps(&self) -> u64 {
-        self.stats_steps
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -1446,10 +1439,6 @@ open: false,
     }
 
     /// 从会话日志回读指定工具调用的最新结果文本。
-    fn latest_tool_result_text(&self, call_id: &str) -> (String, bool) {
-        self.latest_tool_result(call_id).0
-    }
-
     /// 最新工具结果的 (文本, error, presentation)——presentation 为工具
     /// presentationMeta 投影（diff 卡 FileDiff 等）。
     fn latest_tool_result(&self, call_id: &str) -> ((String, bool), Option<serde_json::Value>) {
@@ -1512,36 +1501,21 @@ open: false,
             if process.is_empty() {
                 continue;
             }
-            let (mut tools, mut subagents, mut messages) = (0usize, 0usize, 0usize);
             let mut calls: Vec<(String, String, String)> = Vec::new();
             for &i in &process {
                 let e = &self.entries[i];
-                let mut reply = false;
                 for b in &e.blocks {
-                    match b {
-                        // subagent 委派单独计数（web 同名规则：subagent / subagent_*）
-                        MsgBlock::Tool(tool) => {
-                            if tool.name == "subagent" || tool.name.starts_with("subagent_") {
-                                subagents += 1;
-                            } else {
-                                tools += 1;
-                            }
-                            calls.push((
-                                tool.id.clone(),
-                                tool.name.clone(),
-                                tool.arguments.clone(),
-                            ));
-                        }
-                        MsgBlock::Text(x) if !x.trim().is_empty() => reply = true,
-                        _ => {}
+                    if let MsgBlock::Tool(tool) = b {
+                        calls.push((
+                            tool.id.clone(),
+                            tool.name.clone(),
+                            tool.arguments.clone(),
+                        ));
                     }
-                }
-                if reply {
-                    messages += 1;
                 }
             }
             let activities = dsh_gpui::process_activity_counts(calls);
-            out.insert(t, TurnFold { first_process: process[0], answer, tools, messages, subagents, activities });
+            out.insert(t, TurnFold { first_process: process[0], answer, activities });
         }
         out
     }
@@ -4728,7 +4702,7 @@ fn plan_cards_row(entries: &[ChatEntry], turn: u64) -> Div {
         return div();
     }
     let mut wrap = div().w_full().v_flex().gap(px(10.0));
-    for (ix, (call_id, markdown)) in cards.iter().enumerate() {
+    for (ix, (_call_id, markdown)) in cards.iter().enumerate() {
         let title = markdown
             .trim()
             .lines()

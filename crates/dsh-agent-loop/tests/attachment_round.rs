@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use dsh_agent_loop::{AgentOptions, ReactLoopAgent};
 use dsh_cordis::EventBus;
 use dsh_llm::{
-    BoxStream, ContentBlock, ContentBlockType, FileAttachmentRef, FinishReason, GenerateOptions,
+    BoxStream, ContentBlock, ContentBlockType, FinishReason, GenerateOptions,
     LlmAdapter, LlmError, LlmProviderInfo, LlmRuntime, SessionId, StreamChunk,
 };
 use dsh_persist::{AttachmentStore, SessionRecorder};

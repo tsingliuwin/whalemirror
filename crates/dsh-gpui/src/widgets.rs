@@ -964,7 +964,7 @@ pub(crate) fn unified_diff_card(
             body = body.child(row_for(i));
         }
     }
-    let mut card = div()
+    let card = div()
         .relative()
         .ml_1()
         .mt_1()

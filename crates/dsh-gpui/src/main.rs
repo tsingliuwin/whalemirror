@@ -1484,6 +1484,11 @@ pub(crate) struct AppView {
     /// 运行中「查看式切换」的目标会话（Some = 视图指向非 agent 会话；
     /// 仅运行中可能为 Some，轮终自动收敛回 None）
     peek_session: Option<SessionId>,
+    /// 当前会话是未物化的「新会话草稿」（纯内存，无磁盘足迹）：首条
+    /// 消息发送时才落盘（pin 三事件先行 + recorder 首事件自动建文件）；
+    /// 切走即弃（行从列表移除，无文件可清理）——用户定向的本地偏差
+    /// （上游 web 在 connectWorkspace 即建持久空白会话作草稿锚）。
+    draft_session: Option<SessionId>,
     /// 被查看子会话的最近一次重放时刻（250ms 节流；子活动高频合并）。
     last_peek_refresh: Option<Instant>,
     /// 侧栏列的窗口 bounds（与 SidebarView 共享的 Rc：root 的
@@ -1760,6 +1765,7 @@ impl AppView {
             current_cwd: String::new(),
             agent_busy: false,
             peek_session: None,
+            draft_session: None,
             last_peek_refresh: None,
             sb_col_bounds,
             renaming_workspace: None,
@@ -2755,6 +2761,11 @@ impl AppView {
             self.view_only_switch(id, cx);
             return;
         }
+        // 切走弃草稿：目标不是当前草稿自身时，摘行（无磁盘足迹）——
+        // 用户定向「不发送不写入，切走自然不显示」
+        if self.draft_session.as_ref() != Some(&id) {
+            self.drop_current_draft();
+        }
         // 会话切换同步当前工作区：hero chip/锁定判定/侧栏高亮都读它——
         // 侧栏选中带工作区的会话后应显示归属而非「选择工作区」
         self.current_workspace = self.workspace_of_session(&id).map(|w| w.id.clone());
@@ -2852,21 +2863,20 @@ impl AppView {
             }
             return;
         }
+        // 懒物化（用户定向 10-09）：新会话纯内存草稿——不建文件、不落
+        // pin 事件、不写名册；首条消息发送时才物化（send_user_turn），
+        // 切走即弃（无磁盘足迹，行随撤）。上游在点击即建持久空白会话
+        // 作草稿锚，此为本地偏差（见 upstream-analysis）。
+        self.drop_current_draft();
         let id = self.alloc_session_id();
-        let _ = self.recorder.create(&id, &cwd, "standard");
         self.current_cwd = cwd.clone();
         self.sync_fs_sandbox();
         self.agent.set_session(Session::new(id.clone()));
-        // 新会话 pin（上游 pinInitialPermission）：用户默认预设落三事件
+        self.draft_session = Some(id.clone());
+        // 权限三旋钮内存态（物化时随 pin 三事件落盘）
         {
             let default_preset = default_permission_preset();
             let (_, _, sandbox, approval) = preset_spec(&default_preset);
-            self.agent
-                .append_session_event(SessionEvent::PermissionPreset { preset: default_preset.clone() });
-            self.agent
-                .append_session_event(SessionEvent::SandboxModeSwitch { mode: sandbox.to_string() });
-            self.agent
-                .append_session_event(SessionEvent::ApprovalPolicy { policy: approval.to_string() });
             self.permission_preset = default_preset;
             self.approval_policy = approval.to_string();
             if let Some(m) = dsh_fs::FsMode::from_web(sandbox) {
@@ -2881,10 +2891,37 @@ impl AppView {
             c.reset_empty();
             cx.notify();
         });
-        self.assign_session_to_workspace(&id, ws.as_deref());
         self.sessions.insert(0, SessionMeta { id, title: "新会话".into(), time_label: "刚刚".into(), cwd: Some(cwd), blank: true });
         self.refresh_sidebar(cx);
         cx.notify();
+    }
+
+    /// 弃当前「新会话草稿」（切走/重开时）：仅内存——摘列表行即可，
+    /// 无磁盘足迹可清理。非草稿会话为无操作。
+    fn drop_current_draft(&mut self) {
+        if let Some(id) = self.draft_session.take() {
+            self.sessions.retain(|s| s.id != id);
+        }
+    }
+
+    /// 物化当前草稿（首条消息发送时）：pin 三事件先行落盘（上游
+    /// pinInitialPermission 序——recorder 首事件自动建文件）、写名册、
+    /// 列表行转正（blank 翻 false）。
+    fn materialize_current_draft(&mut self) {
+        let Some(id) = self.draft_session.take() else { return };
+        let default_preset = default_permission_preset();
+        let (_, _, sandbox, approval) = preset_spec(&default_preset);
+        self.agent
+            .append_session_event(SessionEvent::PermissionPreset { preset: default_preset });
+        self.agent
+            .append_session_event(SessionEvent::SandboxModeSwitch { mode: sandbox.to_string() });
+        self.agent
+            .append_session_event(SessionEvent::ApprovalPolicy { policy: approval.to_string() });
+        let ws = self.current_workspace.clone();
+        self.assign_session_to_workspace(&id, ws.as_deref());
+        if let Some(m) = self.sessions.iter_mut().find(|m| m.id == id) {
+            m.blank = false;
+        }
     }
     /// 新会话的目标工作区（web startSession 链）：显式选择 ?? 当前会话
     /// 所属 ?? 最近工作区（最近会话所属优先，退列首）。归属一律按
@@ -2909,7 +2946,9 @@ impl AppView {
     /// 零工作区的纯草稿（web sessions.clear() 同语义）：内存会话、
     /// 不落盘、不进列表；工作目录 = 进程 cwd（工具仍有执行基准）。
     fn enter_blank_draft(&mut self, cx: &mut Context<Self>) {
-        // 纯草稿不属任何工作区：清掉可能残留的显式选择，chip 回「选择工作区」
+        // 弃未物化草稿（若在）；纯草稿不属任何工作区：清掉可能残留的显式
+        // 选择，chip 回「选择工作区」
+        self.drop_current_draft();
         self.current_workspace = None;
         self.agent.set_session(Session::new(self.alloc_session_id()));
         self.selected_tool = None;
@@ -2973,6 +3012,29 @@ impl AppView {
     fn rebind_empty_session_to_workspace(&mut self, cx: &mut Context<Self>) {
         if self.agent_busy || !self.is_empty_session(cx) {
             return;
+        }
+        // 草稿重定向：当前就是未物化草稿时，选工作区只换归属（内存态：
+        // cwd/沙箱/行目录），无任何文件操作——懒物化语义的自然延伸
+        if self.draft_session.is_some() {
+            let ws_path = self
+                .current_workspace
+                .as_ref()
+                .and_then(|wid| self.workspaces.iter().find(|w| &w.id == wid))
+                .map(|w| w.path.clone())
+                .unwrap_or_default();
+            if !ws_path.is_empty() {
+                self.current_cwd = ws_path.clone();
+                self.sync_fs_sandbox();
+                let draft_id = self.draft_session.clone().unwrap();
+                if let Some(m) = self.sessions.iter_mut().find(|m| m.id == draft_id) {
+                    m.cwd = Some(ws_path.clone());
+                }
+                let cwd = ws_path;
+                self.chat.update(cx, |ch, _| ch.cwd = cwd);
+                self.refresh_sidebar(cx);
+                cx.notify();
+                return;
+            }
         }
         let ws_path = self
             .current_workspace
@@ -3572,6 +3634,9 @@ impl AppView {
             c.push_user_entry_with(has_text.then(|| text.to_string()), cards_for_chat, Some(echo_id));
             cx.notify();
         });
+        // 草稿物化：首条消息发送才落盘（pin 三事件先行——recorder 首事件
+        // 自动建文件；同步在 agent.send 唤醒驱动之前，行序 pin→turn/start）
+        self.materialize_current_draft();
         // followup 语义 = send(user_message, NextTurn)；这里携带混合内容块
         self.agent.send(msg, InboxTarget::NextTurn);
         self.attachments.clear();

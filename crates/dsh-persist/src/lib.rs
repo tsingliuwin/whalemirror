@@ -1967,6 +1967,33 @@ mod tests {
     }
 
     #[test]
+    fn append_without_create_materializes_the_log() {
+        // 懒物化地基（新会话草稿纯内存、首事件落盘才成文件）：append 对
+        // 未 create 的会话自动建文件（header + 行），load 可回读
+        let dir = std::env::temp_dir().join(format!("dsh-persist-lazy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rec = SessionRecorder::new(dir.join("sessions"));
+        let id = SessionId::new("session-lazy");
+        // 无 create：直接追加首事件（pin 形）
+        rec.append(&id, "/tmp/ws", &SessionEvent::PermissionPreset { preset: "workspace-write".into() })
+            .expect("first append materializes");
+        rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into() })
+            .expect("second append");
+        let (loaded, _) = rec.load(&id, Some("/tmp/ws")).expect("materialized session loads");
+        let types: Vec<&str> = loaded
+            .entries()
+            .iter()
+            .map(|e| match &e.event {
+                SessionEvent::PermissionPreset { .. } => "permission/preset",
+                SessionEvent::SessionTitle { .. } => "session/title",
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(types, vec!["permission/preset", "session/title"], "row order preserved");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn subagent_catalog_round_trips_through_web_row() {
         // 父所有的子 agent 发现事实：写形 {version:0, childId,
         // childCreatedAt, mode, label?}（label 缺省省略），读侧还原

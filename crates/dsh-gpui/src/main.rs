@@ -2424,6 +2424,10 @@ impl AppView {
             // 图片预览（上游 documentpreview image 体）：体直接渲染位图，
             // 不走文本分页
             preview.eof = true;
+        } else if dsh_gpui::is_pdf_preview(&preview.path) {
+            // pdf：无富渲染面（GPUI 无 canvas/pdfjs）——明示能力边界
+            //（上游 watch-unsupported 同语义：失败行而非乱码）；不读字节
+            preview.eof = true;
         } else if dsh_gpui::is_markdown_preview(&preview.path)
             || dsh_gpui::is_html_preview(&preview.path)
         {
@@ -2517,7 +2521,8 @@ impl AppView {
             match &root {
                 Some(r) => {
                     Self::load_preview_page(r, p);
-                    // markdown/html 全量（富渲染整文档；其余单页起步续读）
+                    // markdown/html 全量（富渲染整文档；pdf 已 eof 不再读
+                    // 字节；其余单页起步续读）
                     if dsh_gpui::is_markdown_preview(&p.path)
                         || dsh_gpui::is_html_preview(&p.path)
                     {
@@ -6956,6 +6961,35 @@ impl AppView {
                             .text_color(theme::t().text_2),
                     ),
             );
+        // pdf 预览体：GPUI 无 canvas/pdfjs 渲染面——明示能力边界行
+        //（上游 watch-unsupported 同语义）。头部（路径+wrap/重载钮）保留。
+        if dsh_gpui::is_pdf_preview(&f.path) {
+            return header.child(
+                div()
+                    .id(SharedString::from(format!("dock-pdf-{fi}")))
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(16.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_size(px(theme::FONT_ROW))
+                            .line_height(px(theme::FONT_ROW_LEADING))
+                            .text_color(theme::t().text_3)
+                            .child(
+                                Icon::new(IconName::File)
+                                    .size(px(16.0))
+                                    .text_color(theme::t().text_3),
+                            )
+                            .child("此版本暂不支持 PDF 富渲染。"),
+                    ),
+            );
+        }
         // html 预览体（上游 documentpreview html）：TextView::html 富渲染
         // （vendor 基础标签内容阅读器——无 CSS，样式走主题默认）
         if dsh_gpui::is_html_preview(&f.path) {

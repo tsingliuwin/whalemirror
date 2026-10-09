@@ -398,6 +398,15 @@ impl MultiSessionGate {
     }
 }
 
+/// pdf 预览判定（#7 documentpreview pdf 格式）：GPUI 无 pdf canvas 渲染面
+/// （上游 PdfBody 走 pdfjs-dist worker）——判定命中即走明示失败行
+/// （上游 watch-unsupported 同语义：能力边界明示而非乱码）。
+pub fn is_pdf_preview(path: &str) -> bool {
+    let lower = path.rsplit(['/', '\\']).next().unwrap_or(path).to_ascii_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    ext == "pdf"
+}
+
 /// html 预览判定（#7 documentpreview html 格式）：预览面板走
 /// TextView::html 富渲染（vendor 基础 HTML 标签内容阅读器——无 CSS）。
 pub fn is_html_preview(path: &str) -> bool {
@@ -1554,5 +1563,19 @@ mod plan_review_panel_tests {
         p.close();
         assert!(p.plan().is_none());
         assert!(!p.is_open());
+    }
+}
+
+#[cfg(test)]
+mod pdf_preview_tests {
+    use super::*;
+
+    #[test]
+    fn pdf_extension_routes_to_boundary_notice() {
+        assert!(is_pdf_preview("E:/ws/doc.pdf"));
+        assert!(is_pdf_preview("report.PDF"));
+        assert!(!is_pdf_preview("E:/ws/main.rs"));
+        assert!(!is_pdf_preview("photo.png"));
+        assert!(!is_pdf_preview("noext"));
     }
 }

@@ -106,7 +106,7 @@ pub(crate) fn render_settings(app: &AppView, this: Entity<AppView>, window: &mut
 
     // 内容区（web .options：pad(0,24,24,24)、滚动）
     let content = match app.settings_tab {
-        SettingsTab::General => general_page(app, &this),
+        SettingsTab::General => general_page(app, &this, cx),
         SettingsTab::Models => models_page(app, &this, window, cx),
         SettingsTab::Plugins => placeholder_page("插件", "插件系统尚未在 Rust 版接入；接入后将在此管理。"),
         SettingsTab::Presets => placeholder_page("Agent 预设", "预设（标准/计划/只读等模式）尚未在 Rust 版接入；接入后将在此选择。"),
@@ -358,7 +358,7 @@ fn segmented(
 }
 
 /// 通用设置页。
-fn general_page(app: &AppView, this: &Entity<AppView>) -> Div {
+fn general_page(app: &AppView, this: &Entity<AppView>, cx: &mut App) -> Div {
     let tk = theme::t();
     let t = this.clone();
     let appearance = segmented(
@@ -442,6 +442,30 @@ fn general_page(app: &AppView, this: &Entity<AppView>) -> Div {
         },
     );
 
+    // 工作步骤收起时机（上游 settings.collapse.*，CollapseTiming）：
+    // Browser-local 内存偏好（客户端生命周期，不写 settings.yaml——上游
+    // 同「without changing Host settings」）
+    let timing_now = app.chat.read_with(cx, |c, _| c.collapse_timing);
+    let t_collapse = this.clone();
+    let collapse = segmented(
+        "set-collapse",
+        &[
+            ("回答结束后", timing_now == dsh_gpui::CollapseTiming::Completion, true),
+            ("下次有新消息时", timing_now == dsh_gpui::CollapseTiming::NextInput, true),
+        ],
+        move |i, _, _, cx| {
+            let timing = if i == 0 {
+                dsh_gpui::CollapseTiming::Completion
+            } else {
+                dsh_gpui::CollapseTiming::NextInput
+            };
+            t_collapse.update(cx, |v, cx| {
+                v.chat.update(cx, |c, _| c.collapse_timing = timing);
+                cx.notify();
+            });
+        },
+    );
+
     div()
         .v_flex()
         .pt_2()
@@ -482,7 +506,13 @@ fn general_page(app: &AppView, this: &Entity<AppView>) -> Div {
             enter,
             false,
         ))
-        .child(settings_row("对话视图", "已完成轮次的过程折叠显示", transcript, true))
+        .child(settings_row("对话视图", "已完成轮次的过程折叠显示", transcript, false))
+        .child(settings_row(
+            "工作步骤收起时机",
+            "选择何时自动收起工作步骤",
+            collapse,
+            true,
+        ))
 }
 
 /// select 形态的选项 chip（web InputBar .select：h28 r8、13/20 medium

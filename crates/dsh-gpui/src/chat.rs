@@ -358,6 +358,9 @@ pub(crate) struct ChatView {
     pub(crate) turn_open: Option<u64>,
     /// 手动展开过的轮次（compact 默认折叠；web 的页内存 manual overrides）
     pub(crate) turn_expanded: std::collections::HashSet<u64>,
+    /// 工作步骤收起时机（上游 CollapseTiming，Browser-local 内存态默认
+    /// Completion）：NextInput 下完成轮保持展开，下一条消息发送时折回。
+    pub(crate) collapse_timing: dsh_gpui::CollapseTiming,
     /// 轮次过程折叠的本帧缓存（render 时算一次，render_item 逐可见行读取）
     folds_frame: RefCell<Rc<HashMap<u64, TurnFold>>>,
     /// 消息流虚拟列表（可变高、Top 对齐）
@@ -452,6 +455,7 @@ impl ChatView {
             ui_turn: 0,
             turn_open: None,
             turn_expanded: Default::default(),
+            collapse_timing: dsh_gpui::CollapseTiming::Completion,
             folds_frame: Default::default(),
             // Top 对齐（web 同语义）：内容自顶排布，短会话首条消息在顶部；
             // 溢出后的吸底由 sync_chat_list 的 scroll_to_reveal_item 承担
@@ -1094,6 +1098,11 @@ open: false,
         attachments: Vec<crate::ChatAttachment>,
         message_id: Option<String>,
     ) {
+        // 收起时机 NextInput：发送时刻把此前保持展开的完成轮折回
+        //（上游 deferCompletedTurns 的折叠触发点；运行中的 steer 不动）
+        if dsh_gpui::fold_now_on_next_input(self.collapse_timing) && !self.running {
+            self.turn_open = None;
+        }
         let mut blocks: Vec<MsgBlock> =
             attachments.into_iter().map(MsgBlock::Attachment).collect();
         if let Some(t) = text {
@@ -1324,9 +1333,13 @@ open: false,
                     e.ended_at_ms = Some(now_ms());
                 }
                 self.turn_started_at = None;
-                self.turn_open = None;
-                // 该轮折尔回到 compact 默认（web：manual overrides 保留其余轮）
-                self.turn_expanded.remove(&turn);
+                // 收起时机（上游 deferCompletedTurns）：NextInput 下完成轮
+                // 保持展开（turn_open 不清），折回延迟到下一条消息发送
+                if dsh_gpui::fold_now_on_turn_end(self.collapse_timing) {
+                    self.turn_open = None;
+                    // 该轮折尔回到 compact 默认（web：manual overrides 保留其余轮）
+                    self.turn_expanded.remove(&turn);
+                }
             }
             AgentEvent::Error { message, .. } => {
                 self.running = false;

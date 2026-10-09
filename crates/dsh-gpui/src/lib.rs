@@ -744,6 +744,28 @@ mod process_title_tests {
     }
 }
 
+// ---- 工作步骤收起时机（上游 presentation-policy CollapseTiming / deferCompletedTurns）----
+
+/// 完成轮折回历史呈现的时机（Browser-local 偏好：客户端生命周期内存
+/// 态、不写 Host 设置；上游默认 Completion）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollapseTiming {
+    /// 轮完成即折叠（上游默认：立即折叠并滚动收敛）。
+    Completion,
+    /// 保持展开，直到下一条新消息发送时折回。
+    NextInput,
+}
+
+/// 轮完成此刻是否折回（deferCompletedTurns 的反向判定）。
+pub fn fold_now_on_turn_end(timing: CollapseTiming) -> bool {
+    timing == CollapseTiming::Completion
+}
+
+/// 下一条消息发送时刻是否折回（此前保持展开的完成轮）。
+pub fn fold_now_on_next_input(timing: CollapseTiming) -> bool {
+    timing == CollapseTiming::NextInput
+}
+
 // ---- Echo 退役判定（上游 809e0942b9 retire confirmed echoes 的单进程 analogue）----
 
 /// 轮终判定未认领回显：composer 已回显但从未落盘（日志无该消息 id）的
@@ -1016,5 +1038,19 @@ mod workspace_of_cwd_tests {
         assert_eq!(workspace_id_of_cwd(&ws, Some("E:\\rustproject\\rustdsh")), None);
         assert_eq!(workspace_id_of_cwd(&ws, None), None);
         assert_eq!(workspace_id_of_cwd(&[], Some("E:\\x")), None);
+    }
+}
+
+#[cfg(test)]
+mod collapse_timing_tests {
+    use super::*;
+
+    #[test]
+    fn completion_folds_at_turn_end_next_input_defers_to_send() {
+        use CollapseTiming::*;
+        assert!(fold_now_on_turn_end(Completion));
+        assert!(!fold_now_on_next_input(Completion));
+        assert!(!fold_now_on_turn_end(NextInput));
+        assert!(fold_now_on_next_input(NextInput));
     }
 }

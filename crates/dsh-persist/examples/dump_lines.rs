@@ -37,6 +37,7 @@ fn main() {
                         dsh_session::SessionEvent::ApprovalPolicy { .. } => "approval/policy",
                         dsh_session::SessionEvent::PlanMode { .. } => "plan/mode",
                         dsh_session::SessionEvent::SubagentCatalog { .. } => "subagent/catalog",
+                        dsh_session::SessionEvent::PresentedFiles { .. } => "deliverables/presented",
                     };
                     *counts.entry(k).or_insert(0) += 1;
                 }

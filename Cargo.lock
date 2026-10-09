@@ -1548,6 +1548,7 @@ dependencies = [
  "async-trait",
  "dsh-llm",
  "dsh-persist",
+ "dsh-session",
  "dsh-tools",
  "serde_json",
  "tokio",

@@ -32,7 +32,7 @@
 
 | # | 缺口 | 引入点 | 缺口描述 | 依赖/约束 | 状态 |
 |---|---|---|---|---|---|
-| 6 | deliverables 交付文件面 | 0.1.5-alpha.2/0.1.6-alpha.2 | 产出文件列表卡（本轮文件改动卡的兄弟面）、presented.* 打开动作（资源管理器/Finder/默认应用/更多操作）、与侧栏资源联动 | 依赖 #1 的改动收集数据面 | 待办（#1 后） |
+| 6 | deliverables 交付文件面 | 0.1.5-alpha.2/0.1.6-alpha.2 | **present 工具 + 轮尾交付卡已落（10-09）**：PresentTool（上游 tool-present 同名；files 数组 1-8 校验/常规文件校验/错误文案逐字；成功经交付缝落 deliverables/presented 耐久事件——SessionEvent::PresentedFiles 变体 + dsh-persist 读写臂 + KNOWN 已有）+ 聊天轮尾交付卡（presented_by_turn 按轮归并：回放从日志收集、实时轮终扫会话；每行文件类型图标+路径名+模型描述，卡规格同 plan 卡家族）+ widgets 行文本（交付文件+路径摘要） | 剩 presented.* 打开动作（资源管理器/默认应用）待 #11 openResource；与 #1 workspace-changes git 快照卡互补（#1 UI 待定向） | 进行中（剩打开动作） |
 | 7 | documentpreview 富渲染器 | 0.1.5-alpha.2 | 侧栏预览 html/pdf/markdown/image 体（当前纯文本+行号）；pdf 文本层旋转（afe85c1cfd） | pdf/html 渲染在 GPUI 需自绘/嵌方案，逐格式评估 | 待办（逐格式拆） |
 | 8 | 语法高亮（代码块/预览） | 0.1.5-rc.1（Mermaid 系列 revert 后净态外的持续面） | vendor TextView 代码块无 shiki 级高亮；上游 CodeBlock 高亮 + code-file-icon 的语言着色 | vendor TextView 扩展或自绘代码块（8b 行渲染已有底座） | 待办 |
 | 9 | fs watch 变更通告 | 0.1.5-alpha.2 | 文件树 changed/reloadNow 条（外部改动检测 + 一键重载） | 需 notify 类 crate 或轮询 mtime | 待办 |

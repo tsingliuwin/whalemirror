@@ -361,6 +361,9 @@ pub(crate) struct ChatView {
     /// 工作步骤收起时机（上游 CollapseTiming，Browser-local 内存态默认
     /// Completion）：NextInput 下完成轮保持展开，下一条消息发送时折回。
     pub(crate) collapse_timing: dsh_gpui::CollapseTiming,
+    /// 轮次交付文件（present 工具落的 deliverables/presented 事件按轮
+    /// 归并；回放从日志收集，实时在轮终扫一次会话）——轮尾卡数据源。
+    pub(crate) presented_by_turn: HashMap<u64, Vec<dsh_session::PresentedFile>>,
     /// 轮次过程折叠的本帧缓存（render 时算一次，render_item 逐可见行读取）
     folds_frame: RefCell<Rc<HashMap<u64, TurnFold>>>,
     /// 消息流虚拟列表（可变高、Top 对齐）
@@ -456,6 +459,7 @@ impl ChatView {
             turn_open: None,
             turn_expanded: Default::default(),
             collapse_timing: dsh_gpui::CollapseTiming::Completion,
+            presented_by_turn: HashMap::new(),
             folds_frame: Default::default(),
             // Top 对齐（web 同语义）：内容自顶排布，短会话首条消息在顶部；
             // 溢出后的吸底由 sync_chat_list 的 scroll_to_reveal_item 承担
@@ -660,6 +664,7 @@ impl ChatView {
     /// 清空至全新会话态（new_session / blank draft / rebind 共用）。
     pub(crate) fn reset_empty(&mut self) {
         self.entries.clear();
+        self.presented_by_turn.clear();
         self.running = false;
         self.turn_started_at = None;
         self.replay_unfinished_turn = None;
@@ -716,6 +721,10 @@ impl ChatView {
         let mut last_msg_time: Option<u64> = None;
         for entry in session.entries() {
             match &entry.event {
+                // 交付文件声明（present 工具）：按轮归并——轮尾卡数据源
+                SessionEvent::PresentedFiles { turn, files, .. } => {
+                    self.presented_by_turn.entry(*turn).or_default().extend(files.clone());
+                }
                 SessionEvent::TurnStart { turn } => {
                     cur_turn = *turn;
                     unfinished = true;
@@ -1293,6 +1302,28 @@ open: false,
             AgentEvent::TurnEnded { turn, .. } => {
                 self.running = false;
                 self.retire_unclaimed_echoes();
+                // 轮终交付文件收卡：present 落的耐久事件按本轮归并
+                //（事件走宿主 sink 不进 UI 事件流，此处扫一次会话）
+                {
+                    let session = self.session_handle();
+                    let presented: Vec<dsh_session::PresentedFile> = session
+                        .lock()
+                        .unwrap()
+                        .entries()
+                        .iter()
+                        .filter_map(|e| match &e.event {
+                            SessionEvent::PresentedFiles { turn: t, files, .. } if *t == turn => {
+                                Some(files.clone())
+                            }
+                            _ => None,
+                        })
+                        .flatten()
+                        .collect();
+                    if !presented.is_empty() {
+                        self.presented_by_turn.entry(turn).or_default().extend(presented);
+                        self.heights_dirty.set(true);
+                    }
+                }
                 let elapsed = self.turn_started_at.map(|t| t.elapsed());
                 // 冻结本轮统计快照（web turn tail：usage 药丸 + 用时对话框）
                 let mut usage = std::mem::take(&mut self.turn_usage);
@@ -2275,6 +2306,8 @@ open: false,
                     ));
                     // web PlanCards：轮尾提交计划卡（每 exit_plan_mode 调用一卡）
                     col = col.child(plan_cards_row(&self.entries, entry.turn));
+                    // web DeliverablesTail：轮尾交付文件卡（present 声明）
+                    col = col.child(presented_files_row(self.presented_by_turn.get(&entry.turn)));
                 }
                 div().w_full().child(col)
             }
@@ -4425,6 +4458,95 @@ use dsh_session::{SessionEvent, TurnEndReason};
 
 /// 计划卡（web PlanCards：markdown 图标座 40×40、title 13/20 w500、
 /// 描述 10/16 三级、打开钮 28px；卡片 60px、0.5px l1、r-xl、点击开预览）。
+/// 轮尾交付文件卡（web DeliverablesTail/PresentedFileCard 的 rustdsh
+/// 承载）：present 声明的文件列为一卡——每行文件类型图标 + 路径名 +
+/// 模型描述；卡规格同 plan 卡家族（0.5 l1 边/r12/surface）。
+fn presented_files_row(files: Option<&Vec<dsh_session::PresentedFile>>) -> Div {
+    let Some(files) = files else {
+        return div();
+    };
+    if files.is_empty() {
+        return div();
+    }
+    let mut rows = Vec::new();
+    for (ix, f) in files.iter().enumerate() {
+        let name = std::path::Path::new(&f.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| f.path.clone());
+        rows.push(
+            div()
+                .id(SharedString::from(format!("presented-file-{ix}")))
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .py(px(6.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(28.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.0))
+                        .child(crate::chat::file_type_icon(&name).size(px(14.0))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .v_flex()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .line_height(px(20.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::t().text)
+                                .truncate()
+                                .child(name),
+                        )
+                        .when_some(f.description.clone(), |d, desc| {
+                            d.child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .line_height(px(16.0))
+                                    .text_color(theme::t().caption)
+                                    .truncate()
+                                    .child(desc),
+                            )
+                        }),
+                ),
+        );
+    }
+    div()
+        .w_full()
+        .v_flex()
+        .gap(px(10.0))
+        .child(
+            div()
+                .id("presented-card")
+                .w_full()
+                .v_flex()
+                .gap(px(4.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(12.0))
+                .border(px(0.5))
+                .border_color(theme::t().border_l1)
+                .bg(theme::t().surface)
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .line_height(px(16.0))
+                        .text_color(theme::t().caption)
+                        .child("交付文件"),
+                )
+                .children(rows),
+        )
+}
+
 fn plan_cards_row(entries: &[ChatEntry], turn: u64) -> Div {
     // 从本轮条目收集 exit_plan_mode 调用（每调用一卡，调用序去重）
     let mut cards: Vec<(String, String)> = Vec::new(); // (callId, markdown)

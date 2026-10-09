@@ -6801,6 +6801,10 @@ fn main() {
             dsh_persist::attachments_root_from_sessions_root(&sessions_dir()),
         ))),
     ))).unwrap();
+    // present（上游 tool-present 同名工具）：模型声明交付文件——成功
+    // 结果经交付缝落 deliverables/presented 耐久事件（agent 构造后接线）
+    let present_tool = dsh_fs::PresentTool::new(fs_sandbox.clone(), workdir.clone());
+    let _present = tools.register(Arc::new(present_tool.clone())).unwrap();
     let _shell = tools.register(Arc::new(ShellTool::default().with_workdir(workdir.clone()))).unwrap();
     let _web = tools.register(Arc::new(WebTool::new())).unwrap();
     let _grep = tools.register(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone()))).unwrap();
@@ -6992,6 +6996,30 @@ fn main() {
         })
     });
     subagent_tool.set_parent_link(Arc::clone(&agent));
+    // present 交付缝：宿主算轮号（会话日志最后 turn/start 折叠）并落
+    // deliverables/presented 耐久事件（上游 tools/result 钩子的单进程等价）
+    present_tool.set_delivery_sink(Arc::new({
+        let agent = Arc::clone(&agent);
+        move |call_id: &str, files: Vec<dsh_session::PresentedFile>| {
+            let turn = {
+                let s = agent.session();
+                let s = s.lock().unwrap();
+                s.entries()
+                    .iter()
+                    .rev()
+                    .find_map(|e| match &e.event {
+                        SessionEvent::TurnStart { turn } => Some(*turn),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            };
+            agent.append_session_event(SessionEvent::PresentedFiles {
+                turn,
+                call_id: call_id.to_string(),
+                files,
+            });
+        }
+    }));
 
     let event_rx = agent.subscribe();
     agent.spawn();

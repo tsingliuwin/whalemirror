@@ -1265,6 +1265,33 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .to_string(),
             label: data?.get("label").and_then(|v| v.as_str()).map(str::to_string),
         }),
+        "deliverables/presented" => {
+            let d = data?;
+            let files = d
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|f| {
+                            let path = f.get("path").and_then(|v| v.as_str())?;
+                            Some(dsh_session::PresentedFile {
+                                path: path.to_string(),
+                                description: f.get("description").and_then(|v| v.as_str()).map(str::to_string),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(SessionEvent::PresentedFiles {
+                turn: num(data, "turn"),
+                call_id: d
+                    .get("callId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                files,
+            })
+        }
         "compaction/summary" => {
             let d = data?;
             // v2 富形：{compactionId, summary, shadowedRange, shadowedSeqs,
@@ -1819,6 +1846,28 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
             }
             Some(row("subagent/catalog", data))
         }
+        SessionEvent::PresentedFiles { turn, call_id, files } => {
+            // 上游 tool-present：present 成功结果落盘（含嵌套调用）。
+            // files = [{path, description?}]（PresentedFile，description 缺省省略）
+            let files_json: Vec<serde_json::Value> = files
+                .iter()
+                .map(|f| {
+                    let mut o = serde_json::json!({ "path": f.path });
+                    if let Some(d) = &f.description {
+                        o["description"] = serde_json::json!(d);
+                    }
+                    o
+                })
+                .collect();
+            Some(row(
+                "deliverables/presented",
+                serde_json::json!({
+                    "turn": turn,
+                    "callId": call_id,
+                    "files": files_json,
+                }),
+            ))
+        }
         SessionEvent::SystemMessage { turn, step, message, replace } => {
             // v3 system prompt 面节点（上游 emitSystem）：固定 role=system 的
             // plugin source；replace 精确替换 head 并携带 sourceEventSeqs
@@ -1991,6 +2040,44 @@ mod tests {
             .collect();
         assert_eq!(types, vec!["permission/preset", "session/title"], "row order preserved");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn presented_files_round_trip_through_web_row() {
+        // 上游 tool-present：present 成功结果落 deliverables/presented
+        // {turn, callId, files:[{path, description?}]}（缺省 description 省略）
+        let ev = SessionEvent::PresentedFiles {
+            turn: 3,
+            call_id: "call-9".into(),
+            files: vec![
+                dsh_session::PresentedFile {
+                    path: "E:/ws/out.xlsx".into(),
+                    description: Some("结果表格".into()),
+                },
+                dsh_session::PresentedFile { path: "E:/ws/report.md".into(), description: None },
+            ],
+        };
+        let row = event_to_web_line(&ev, 11, 100).unwrap();
+        assert_eq!(row["type"], "deliverables/presented");
+        assert_eq!(row["data"]["turn"], 3);
+        assert_eq!(row["data"]["callId"], "call-9");
+        let files = row["data"]["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["path"], "E:/ws/out.xlsx");
+        assert_eq!(files[0]["description"], "结果表格");
+        assert!(files[1].get("description").is_none(), "absent description stays absent");
+
+        let parsed = web_line_to_event(&row).expect("known type parses back");
+        match parsed {
+            SessionEvent::PresentedFiles { turn, call_id, files } => {
+                assert_eq!((turn, call_id.as_str()), (3, "call-9"));
+                assert_eq!(files.len(), 2);
+                assert_eq!(files[0].path, "E:/ws/out.xlsx");
+                assert_eq!(files[0].description.as_deref(), Some("结果表格"));
+                assert_eq!(files[1].description, None);
+            }
+            other => panic!("expected PresentedFiles, got {other:?}"),
+        }
     }
 
     #[test]

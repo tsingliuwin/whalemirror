@@ -787,6 +787,124 @@ impl Tool for ReadImageTool {
     }
 }
 
+/// 上游 `present` 工具（tool-present）：声明既有文件为最终交付——
+/// 每个路径校验存在且为常规文件（错误文案逐字对齐）；成功时模型可见
+/// 文本为逐行 `Presented {path}`，并经交付缝把 (callId, files) 交宿主
+/// 落 `deliverables/presented` 耐久事件（上游 tools/result 钩子语义的
+/// 单进程等价——错误结果不落）。
+/// （delivery 缝为共享 Arc 内的 Mutex——手动 Clone 共享同一缝）。
+pub struct PresentTool {
+    policy: Arc<dyn FsPolicy>,
+    workdir: dsh_tools::Workdir,
+    /// 交付缝：宿主接 agent.append_session_event（算轮号并落事件）。
+    delivery: std::sync::Mutex<
+        Option<std::sync::Arc<dyn Fn(&str, Vec<dsh_session::PresentedFile>) + Send + Sync>>,
+    >,
+}
+
+impl Clone for PresentTool {
+    fn clone(&self) -> Self {
+        Self {
+            policy: Arc::clone(&self.policy),
+            workdir: self.workdir.clone(),
+            delivery: std::sync::Mutex::new(self.delivery.lock().unwrap().clone()),
+        }
+    }
+}
+
+impl PresentTool {
+    pub fn new(policy: Arc<dyn FsPolicy>, workdir: dsh_tools::Workdir) -> Self {
+        Self { policy, workdir, delivery: std::sync::Mutex::new(None) }
+    }
+
+    /// 注入交付缝（callId + 已解析文件列表 → 宿主落耐久事件）。
+    pub fn set_delivery_sink(
+        &self,
+        sink: std::sync::Arc<dyn Fn(&str, Vec<dsh_session::PresentedFile>) + Send + Sync>,
+    ) {
+        *self.delivery.lock().unwrap() = Some(sink);
+    }
+}
+
+#[async_trait]
+impl Tool for PresentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "present".into(),
+            description: "Declare existing files as final deliverables for the user.                 Use it when the user needs a separate file, especially Office documents,                 spreadsheets, and slide decks; prefer your final response when that suffices.                 The user opens the current files; their contents are not copied."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "description": "Usually the 1-2 most important deliverables; at most 4 per call.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Path of an existing regular file. Relative paths use the Session working directory." },
+                                "description": { "type": "string", "description": "Brief description for the user." }
+                            },
+                            "required": ["path"]
+                        }
+                    }
+                },
+                "required": ["files"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        // 上游 maxFiles 默认 8（建议每调用至多 4——文案已入 schema）
+        const MAX_FILES: usize = 8;
+        let files_arg = input.arguments.get("files").and_then(|v| v.as_array());
+        let files_arg = match files_arg {
+            Some(a) if !a.is_empty() && a.len() <= MAX_FILES => a,
+            Some(a) if a.is_empty() => {
+                return ToolExecutionResult::error(format!("present accepts 1 to {MAX_FILES} files"))
+            }
+            _ => return ToolExecutionResult::error(format!("present accepts 1 to {MAX_FILES} files")),
+        };
+        let mut presented: Vec<dsh_session::PresentedFile> = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        for f in files_arg {
+            let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.trim().is_empty() {
+                return ToolExecutionResult::error("present requires a non-empty file path");
+            }
+            let resolved = self.workdir.resolve(Path::new(path));
+            if !self.policy.allow_read(&resolved) {
+                return ToolExecutionResult::error(self.policy.deny_reason());
+            }
+            match std::fs::metadata(&resolved) {
+                Ok(m) if m.is_file() => {}
+                Ok(_) => {
+                    return ToolExecutionResult::error(format!(
+                        "Cannot present {path}: not a regular file"
+                    ))
+                }
+                Err(_) => {
+                    return ToolExecutionResult::error(format!(
+                        "Cannot present {path}: file not found. Check the path, create the file if needed, and retry."
+                    ))
+                }
+            }
+            let description = f.get("description").and_then(|v| v.as_str()).map(str::to_string);
+            presented.push(dsh_session::PresentedFile {
+                path: resolved.display().to_string(),
+                description,
+            });
+            lines.push(format!("Presented {}", resolved.display()));
+        }
+        // 成功路径交付（上游 tools/result 钩子仅成功结果落耐久事件）
+        if let Some(sink) = self.delivery.lock().unwrap().as_ref() {
+            sink(input.call_id.as_str(), presented);
+        }
+        ToolExecutionResult::text(lines.join("
+"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1232,6 +1350,90 @@ mod read_image_tests {
             ContentBlock::Image { attachment, .. } => assert_eq!(attachment.media_type, "image/png"),
             other => panic!("expected image block, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod present_tests {
+    use super::*;
+    use dsh_llm::ContentBlock;
+
+    fn input(raw: &str) -> ToolExecutionInput {
+        ToolExecutionInput::with_raw_arguments(
+            dsh_llm::CallId("p1".to_string()),
+            "present".to_string(),
+            raw.to_string(),
+        )
+    }
+
+    fn text_of(r: &ToolExecutionResult) -> String {
+        r.content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn present_validates_and_delivers_resolved_files() {
+        let dir = std::env::temp_dir().join(format!("dsh-fs-present-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("out.xlsx"), b"xlsx").unwrap();
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+        let wd = dsh_tools::Workdir::new();
+        wd.set(dir.clone());
+        let tool = PresentTool::new(Arc::new(AllowAllPolicy), wd);
+
+        // 交付缝捕获（宿主落事件面）
+        let delivered: Arc<std::sync::Mutex<Vec<(String, Vec<dsh_session::PresentedFile>)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_delivered = Arc::clone(&delivered);
+        tool.set_delivery_sink(Arc::new(move |call_id, files| {
+            sink_delivered.lock().unwrap().push((call_id.to_string(), files));
+        }));
+
+        let r = tool
+            .execute(&input(
+                r#"{"files": [{"path": "out.xlsx", "description": "结果表格"}, {"path": "subdir"}]}"#,
+            ))
+            .await;
+        // 目录不是常规文件
+        assert!(text_of(&r).contains("Cannot present subdir: not a regular file"), "{}", text_of(&r));
+        assert!(delivered.lock().unwrap().is_empty(), "错误结果不交付");
+
+        let r = tool
+            .execute(&input(r#"{"files": [{"path": "out.xlsx", "description": "结果表格"}]}"#))
+            .await;
+        let text = text_of(&r);
+        assert!(text.contains("Presented "), "{text}");
+        assert!(text.contains("out.xlsx"), "{text}");
+        let got = delivered.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "p1");
+        assert_eq!(got[0].1.len(), 1);
+        assert!(got[0].1[0].path.ends_with("out.xlsx"), "resolved path: {}", got[0].1[0].path);
+        assert_eq!(got[0].1[0].description.as_deref(), Some("结果表格"));
+
+        // 不存在 / 空路径 / 超限
+        let r = tool.execute(&input(r#"{"files": [{"path": "missing.txt"}]}"#)).await;
+        assert!(
+            text_of(&r).contains("file not found. Check the path, create the file if needed, and retry."),
+            "{}", text_of(&r)
+        );
+        let r = tool.execute(&input(r#"{"files": [{"path": ""}]}"#)).await;
+        assert!(text_of(&r).contains("present requires a non-empty file path"));
+        let r = tool.execute(&input(r#"{"files": []}"#)).await;
+        assert!(text_of(&r).contains("present accepts 1 to 8 files"));
+        let many: String = (0..9)
+            .map(|i| format!(r#"{{"path": "out.xlsx", "description": "d{i}"}}"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let r = tool.execute(&input(&format!(r#"{{"files": [{many}]}}"#))).await;
+        assert!(text_of(&r).contains("present accepts 1 to 8 files"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

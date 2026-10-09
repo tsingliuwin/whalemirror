@@ -62,6 +62,17 @@ pub struct RequestContext {
     pub context_window: Option<u64>,
 }
 
+/// 已声明的交付文件（上游 PresentedFile：路径 + 模型给的可选描述；
+/// 内容留在源路径，用户打开当前文件——不复制）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PresentedFile {
+    /// 原绝对路径或相对会话工作目录的路径。
+    pub path: String,
+    /// 模型补充的一行描述。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// One durable session event.
 ///
 /// Serialized as tagged JSON (one line per event) so a session can be
@@ -164,6 +175,14 @@ pub enum SessionEvent {
         child_created_at: u64,
         mode: String,
         label: Option<String>,
+    },
+    /// 交付文件声明（log-only；web `deliverables/presented`，present 工具
+    /// 成功结果落盘——含嵌套调用）。data = {turn, callId, files:[{path,
+    /// description?}]}（上游 PresentedFile）。
+    PresentedFiles {
+        turn: u64,
+        call_id: String,
+        files: Vec<PresentedFile>,
     },
     /// 一次 provider 路由重试等待排定前的持久记录（web `llm/retry`，
     /// LlmRetryEventData：normal 模式带 maxRetries，always 模式不带）。

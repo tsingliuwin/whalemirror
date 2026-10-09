@@ -1462,6 +1462,7 @@ pub(crate) fn tool_display(name: &str) -> (String, IconName) {
         "shell" | "bash" => ("Bash".into(), IconName::SquareTerminal),
         "fs" | "read" | "write" | "edit" => ("Fs".into(), IconName::File),
         "read_image" => ("Read image".into(), IconName::File),
+        "present" => ("Present".into(), IconName::File),
         "web_fetch" => ("Web".into(), IconName::Globe),
         other => (other.to_string(), IconName::Bot),
     }
@@ -1497,6 +1498,24 @@ pub(crate) fn tool_row_texts(name: &str, args: &str) -> (String, String, Option<
             path_pick.clone().unwrap_or_else(|| first_line(args)),
             path_pick,
         ),
+        "present" => {
+            let paths = parsed
+                .as_ref()
+                .and_then(|v| v.get("files"))
+                .and_then(|f| f.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|f| f.get("path").and_then(|p| p.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            (
+                "交付文件".into(),
+                if paths.is_empty() { first_line(args) } else { paths },
+                None,
+            )
+        }
         "web_fetch" => (
             "网页获取".into(),
             pick(&["url"]).unwrap_or_else(|| first_line(args)),

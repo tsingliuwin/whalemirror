@@ -41,6 +41,8 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | C10 | 附件卡文件类型图标（0.1.5-alpha.2）：回形针选文件/气泡附件卡按扩展名出类色文件底+白 mark 图标（pdf 红/word 蓝/excel 绿/图片紫/代码 deepseek 蓝/其他灰）| 附件 TXT/PDF/PNG/RS 各一张 | 图标随类型变化、未知扩展回落灰 other、双层渲染无错位 |
 | C11 | 计划卡（0.2.1-alpha.1 补缺）：模型调 exit_plan_mode 提交计划后，轮尾出现计划卡（markdown 图标座+标题「计划 · Markdown」描述+打开钮），点击弹 Popover 展示计划全文（等宽块） | 让模型写计划提交 | 卡片出现、标题正确、Popover 展示全文 |
 | C12 | 图片粘贴捕获（0.2.1-alpha.1 补缺子批 3）：剪贴板复制图片后 Ctrl+V → 图片作为附件 tile 出现在 composer 草稿（同回形针流终点），输入框不插入乱码文本；PNG/JPEG 外格式走文本粘贴 | 复制图片→composer 粘贴 | 草稿图片 tile 出现、发送含 image 块 |
+| C13 | 非人类消息 context 行（10-09 补缺）：plan-mode 切换后下一轮轮头出现「上下文注入」行（标签 plan-mode，notice 摘要），不再是用户气泡；model-switch 公告同形（标签 model-selection） | /plan 切换→发消息开轮 | 轮头 context 行出现、标签正确、展开可见通知文本、落盘 source 为 producer-owned kind（plan-mode/model-selection） |
+| C14 | subagent 子会话耐久化（0.1.6-alpha.2 补缺 #4 数据面）：模型调 subagent 委派任务后，子会话以真实会话文件落盘（标题=description），父日志落 subagent/catalog 行；重启宿主后侧栏可点开子会话回看完整过程 | 让模型委派 subagent 任务→重启→侧栏找标题为 description 的会话 | 工具结果含子报告、侧栏出现子会话并可回看轮次流、父会话日志含 subagent/catalog（dump_lines 可见） |
 
 ## D. 侧栏（sidebar.rs）
 

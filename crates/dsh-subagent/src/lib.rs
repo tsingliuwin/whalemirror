@@ -40,6 +40,13 @@ pub struct SubagentTool {
     projections: Arc<SessionProjections>,
     /// 单次子任务等待上限。
     timeout: Duration,
+    /// 子会话耐久化缝（宿主注入：cwd 由闭包内部解析）：注入后子会话
+    /// 事件（含标题）全部落盘，侧栏按普通会话回看（上游子会话即完整
+    /// 耐久会话）。
+    child_sink: std::sync::Mutex<Option<std::sync::Arc<dyn Fn(&dsh_llm::types::SessionId, &SessionEvent) + Send + Sync>>>,
+    /// 父 agent 弱引用：子任务建立时向父日志落 `subagent/catalog` 发现
+    /// 事实（上游 establishCatalogChild；Weak 防工具↔agent 构造环）。
+    parent: std::sync::Mutex<std::sync::Weak<ReactLoopAgent>>,
 }
 
 impl SubagentTool {
@@ -62,7 +69,22 @@ impl SubagentTool {
             max_depth: 2,
             projections: Arc::new(SessionProjections::default()),
             timeout: Duration::from_secs(300),
+            child_sink: std::sync::Mutex::new(None),
+            parent: std::sync::Mutex::new(std::sync::Weak::new()),
         })
+    }
+
+    /// 注入子会话耐久化缝（宿主以 recorder+cwd 构造闭包）。
+    pub fn set_child_sink(
+        &self,
+        sink: std::sync::Arc<dyn Fn(&dsh_llm::types::SessionId, &SessionEvent) + Send + Sync>,
+    ) {
+        *self.child_sink.lock().unwrap() = Some(sink);
+    }
+
+    /// 接父 agent（构造完成后调用；子任务建立时向父日志落目录事实）。
+    pub fn set_parent_link(&self, parent: std::sync::Arc<ReactLoopAgent>) {
+        *self.parent.lock().unwrap() = std::sync::Arc::downgrade(&parent);
     }
 
     /// 共享宿主的投影注册表（子 agent 的 turnBoundary 折进同一注册表）。
@@ -177,6 +199,13 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
         }
 
         let (provider, model) = self.route.read().unwrap().clone();
+        let child_id = dsh_llm::types::SessionId::new(uuid::Uuid::new_v4().to_string());
+        let description = input
+            .arguments
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("task")
+            .to_string();
         let options = AgentOptions {
             provider,
             model,
@@ -189,7 +218,7 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
             attachments_root: None,
         };
         let child = ReactLoopAgent::new(
-            dsh_llm::types::SessionId::new(uuid::Uuid::new_v4().to_string()),
+            child_id.clone(),
             options,
             Arc::clone(&self.llm),
             Arc::clone(&self.tools),
@@ -198,6 +227,26 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
             EventBus::new(),
         );
         let _events = child.subscribe(); // 子事件隔离：留接收端防背压，不转发
+        // 子会话耐久化 + 父目录（上游 establishCatalogChild 语义：子建立
+        // 即向父落 one-shot 发现事实；标题=description 供侧栏识别）
+        if let Some(sink) = self.child_sink.lock().unwrap().as_ref() {
+            let sink_for_child = Arc::clone(sink);
+            let sink_id = child_id.clone();
+            child.set_event_sink(move |event| sink_for_child(&sink_id, &event));
+            sink(&child_id, &SessionEvent::SessionTitle { title: description.clone() });
+            if let Some(parent) = self.parent.lock().unwrap().upgrade() {
+                let created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                parent.append_session_event(SessionEvent::SubagentCatalog {
+                    child_id: child_id.as_str().to_string(),
+                    child_created_at: created_at,
+                    mode: "one-shot".into(),
+                    label: Some(description.clone()),
+                });
+            }
+        }
         child.spawn();
         self.depth.fetch_add(1, Ordering::SeqCst);
         child.followup(prompt);
@@ -215,12 +264,9 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
                 let text = final_assistant_text(&child.session().lock().unwrap());
                 match text {
                     Some(text) => {
-                        let description = input
-                            .arguments
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("task");
-                        ToolExecutionResult::text(format!("Subagent ({description}) final report:\n\n{text}"))
+                        ToolExecutionResult::text(format!(
+                            "Subagent ({description}) final report:\n\n{text}"
+                        ))
                     }
                     None => ToolExecutionResult::error("subagent produced no final message"),
                 }

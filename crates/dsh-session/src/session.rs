@@ -155,6 +155,16 @@ pub enum SessionEvent {
     /// 审批策略覆盖（log-only：web `approval/policy`，data.policy；
     /// rustdsh 无审批管线，事件为跨端互通与回放保留）。
     ApprovalPolicy { policy: String },
+    /// 直接子 agent 发现事实（log-only；web `subagent/catalog`，父所有）。
+    /// data = {version, childId, childCreatedAt, mode, label?}——version 由
+    /// 写侧固定 0（上游 SUBAGENT_CATALOG_VERSION）；mode 原文保留
+    /// （one-shot/continuable/unknown 开放词汇，上游 v0 已知/v1 扩 unknown）。
+    SubagentCatalog {
+        child_id: String,
+        child_created_at: u64,
+        mode: String,
+        label: Option<String>,
+    },
     /// 一次 provider 路由重试等待排定前的持久记录（web `llm/retry`，
     /// LlmRetryEventData：normal 模式带 maxRetries，always 模式不带）。
     LlmRetry {

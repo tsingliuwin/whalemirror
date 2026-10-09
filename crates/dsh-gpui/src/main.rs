@@ -6634,6 +6634,19 @@ fn main() {
         let _ = recorder_sink.append(&id, &cwd, &event);
     });
 
+    // 子会话耐久化 + 父目录 catalog（backlog #4 数据面）：子会话落同一
+    // sessions 根（cwd 取当前会话工作区；标题=description，侧栏可回看），
+    // 父日志落 subagent/catalog 发现事实（上游 establishCatalogChild）
+    subagent_tool.set_child_sink({
+        let recorder = Arc::clone(&recorder);
+        let cwd_slot = Arc::clone(&cwd_slot_for_view);
+        Arc::new(move |id: &dsh_llm::types::SessionId, event: &dsh_session::SessionEvent| {
+            let cwd = cwd_slot.lock().unwrap().clone();
+            let _ = recorder.append(id, &cwd, event);
+        })
+    });
+    subagent_tool.set_parent_link(Arc::clone(&agent));
+
     let event_rx = agent.subscribe();
     agent.spawn();
 

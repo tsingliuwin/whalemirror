@@ -36,6 +36,7 @@ fn main() {
                         dsh_session::SessionEvent::SandboxModeSwitch { .. } => "sandbox/mode",
                         dsh_session::SessionEvent::ApprovalPolicy { .. } => "approval/policy",
                         dsh_session::SessionEvent::PlanMode { .. } => "plan/mode",
+                        dsh_session::SessionEvent::SubagentCatalog { .. } => "subagent/catalog",
                     };
                     *counts.entry(k).or_insert(0) += 1;
                 }

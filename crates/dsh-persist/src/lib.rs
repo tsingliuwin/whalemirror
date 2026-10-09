@@ -1245,6 +1245,20 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .unwrap_or_default()
                 .to_string(),
         }),
+        "subagent/catalog" => Some(SessionEvent::SubagentCatalog {
+            child_id: data?
+                .get("childId")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            child_created_at: num(data, "childCreatedAt"),
+            mode: data?
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("one-shot")
+                .to_string(),
+            label: data?.get("label").and_then(|v| v.as_str()).map(str::to_string),
+        }),
         "compaction/summary" => {
             let d = data?;
             // v2 富形：{compactionId, summary, shadowedRange, shadowedSeqs,
@@ -1785,6 +1799,20 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
         SessionEvent::PlanMode { active } => {
             Some(row("plan/mode", serde_json::json!({"active": active})))
         }
+        SessionEvent::SubagentCatalog { child_id, child_created_at, mode, label } => {
+            // 父所有的子 agent 发现事实（上游 establishCatalogChild）：
+            // {version:0, childId, childCreatedAt, mode, label?}
+            let mut data = serde_json::json!({
+                "version": 0,
+                "childId": child_id,
+                "childCreatedAt": child_created_at,
+                "mode": mode,
+            });
+            if let Some(l) = label {
+                data["label"] = serde_json::json!(l);
+            }
+            Some(row("subagent/catalog", data))
+        }
         SessionEvent::SystemMessage { turn, step, message, replace } => {
             // v3 system prompt 面节点（上游 emitSystem）：固定 role=system 的
             // plugin source；replace 精确替换 head 并携带 sourceEventSeqs
@@ -1930,6 +1958,46 @@ mod tests {
         let source = &row["data"]["message"]["source"];
         assert_eq!(source["kind"], "system-prompt", "role-sensitive mapping");
         assert!(source.get("plugin").is_none());
+    }
+
+    #[test]
+    fn subagent_catalog_round_trips_through_web_row() {
+        // 父所有的子 agent 发现事实：写形 {version:0, childId,
+        // childCreatedAt, mode, label?}（label 缺省省略），读侧还原
+        let ev = SessionEvent::SubagentCatalog {
+            child_id: "session-child".into(),
+            child_created_at: 1_724_000_000_000,
+            mode: "one-shot".into(),
+            label: Some("demo task".into()),
+        };
+        let row = event_to_web_line(&ev, 9, 100).unwrap();
+        assert_eq!(row["type"], "subagent/catalog");
+        assert_eq!(row["data"]["version"], 0);
+        assert_eq!(row["data"]["childId"], "session-child");
+        assert_eq!(row["data"]["childCreatedAt"], 1_724_000_000_000u64);
+        assert_eq!(row["data"]["mode"], "one-shot");
+        assert_eq!(row["data"]["label"], "demo task");
+
+        let parsed = web_line_to_event(&row).expect("known type parses back");
+        match parsed {
+            SessionEvent::SubagentCatalog { child_id, child_created_at, mode, label } => {
+                assert_eq!(child_id, "session-child");
+                assert_eq!(child_created_at, 1_724_000_000_000);
+                assert_eq!(mode, "one-shot");
+                assert_eq!(label.as_deref(), Some("demo task"));
+            }
+            other => panic!("expected SubagentCatalog, got {other:?}"),
+        }
+
+        // label 省略形（one-shot 的 label 可选）
+        let ev = SessionEvent::SubagentCatalog {
+            child_id: "session-child-2".into(),
+            child_created_at: 7,
+            mode: "one-shot".into(),
+            label: None,
+        };
+        let row = event_to_web_line(&ev, 10, 100).unwrap();
+        assert!(row["data"].get("label").is_none(), "absent label stays absent");
     }
 
     #[test]

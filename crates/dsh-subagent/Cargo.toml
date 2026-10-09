@@ -17,3 +17,7 @@ async-trait.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+dsh-persist = { path = "../dsh-persist" }
+futures.workspace = true

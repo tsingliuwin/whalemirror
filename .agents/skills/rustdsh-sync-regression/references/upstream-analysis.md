@@ -131,3 +131,4 @@
 
 - V3 system prompt 面：上游 in-history 路线（provider 适配器声明能力）变化时 append 新节点；rustdsh 路线走请求 system 参数（非 in-history）→ 归一化 replace head。读取多节点 v3 日志（in-history 写形）时 rustdsh 线性显示每条 system/message，不做 surface 替换折叠。
 - 统计 pill：IconGaugeOutline16/IconDatabaseOutline16 不可得（gpui-component-assets 86 枚无 gauge/database），近似用 LayoutDashboard/ChartPie；TPS 的 decode 窗口以 llm−ttft 近似（rustdsh 无独立解码计时）；对话框无点外关闭（strip 在文档流，无法全窗捕获；pill 再点/互斥切换关闭）+ 面板固定于 pill 行上方居中（上游逐 pill 锚定 + viewport clamp）。
+- subagent 子会话耐久化（10-09 补缺 #4 数据面）：宿主经 SubagentTool::set_child_sink 注入 recorder+cwd 闭包（dsh-subagent 不反向依赖 dsh-persist），子会话事件含 SessionTitle（=description）落同一 sessions 根；父日志 subagent/catalog 由 set_parent_link(Weak) + append_session_event 落（mode 'one-shot'，上游 establishCatalogChild 语义）。偏差：catalog append 失败为尽力而为（上游失败则处置 run 并向调用者抛错）；运行中侧栏列表不自动刷新（重启后可见）；子 agent 的 childCreatedAt 取 spawn 时刻（上游取 child.header.createdAt，差值为同毫秒级）。

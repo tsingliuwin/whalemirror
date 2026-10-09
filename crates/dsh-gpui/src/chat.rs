@@ -4474,6 +4474,10 @@ fn presented_files_row(files: Option<&Vec<dsh_session::PresentedFile>>) -> Div {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| f.path.clone());
+        // 行点击打开（上游 presented.* open 动作的 rustdsh 承载）：走
+        // 宿主注入的相对文件打开钩子（存在性守卫 + dock 预览路由——同
+        // markdown 路径链接点击）
+        let open_path = f.path.clone();
         rows.push(
             div()
                 .id(SharedString::from(format!("presented-file-{ix}")))
@@ -4482,6 +4486,12 @@ fn presented_files_row(files: Option<&Vec<dsh_session::PresentedFile>>) -> Div {
                 .items_center()
                 .gap(px(10.0))
                 .py(px(6.0))
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::t().hover))
+                .on_click(move |_, _, cx| {
+                    let _ = gpui_component::text::try_relative_file_opener(&open_path, cx);
+                })
                 .child(
                     div()
                         .flex_none()

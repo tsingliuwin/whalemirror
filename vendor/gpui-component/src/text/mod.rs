@@ -1,7 +1,7 @@
 mod format;
 mod inline;
 #[allow(unused_imports)]
-pub use inline::set_relative_file_opener;
+pub use inline::{set_relative_file_opener, try_relative_file_opener};
 mod node;
 mod style;
 mod text_view;

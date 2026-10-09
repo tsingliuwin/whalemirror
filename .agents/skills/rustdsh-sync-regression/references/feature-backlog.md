@@ -21,7 +21,7 @@
 | 5c | stepProcess 过程组类目标题 | 0.1.7-alpha.1 | 折叠控制行从计数标签升级为类目标题（前 3 类 done 文案组合） | 已实施（09-22，lib 5 测） | 已完成 |
 | 5d | turn triggers 轮触发标注 | 0.1.7-alpha.1 | 轮头标注本轮触发源（message.trigger.request/goal：收到执行请求/继续执行目标） | 轮头有承载位 | 待办 |
 | 5e | steering 顺序语义核对 | 0.1.7-alpha.1 | preserve steering order/cross-client pending order/retire confirmed echoes 三笔修复——rustdsh inbox 的 steer/send 顺序与 echo 语义对照 | 需读上游 session spec | 待办 |
-| 5f | 归档前停止运行 | 0.1.7-alpha.1 | archive 会话时先停 agent 运行（cbae324bfa） | 小接线 | 待办 |
+| 5f | 归档前停止运行 | 0.1.7-alpha.1 | archive 会话时先停 agent 运行（cbae324bfa） | 已实施（09-25：archive_session 运行态从「禁止归档」改「先 cancel 再归档」——运行回合落 aborted turn end，归档文档与列表隐藏照旧；上游 ArchivedSessionGate 的 pre-step 拒绝/血缘门禁无对应面——单 runtime 无迟到投递） | 已完成 |
 | 23 | storage-json 数组判守 | 0.2.1-alpha.1 | 读 web projcache 单元时 tables 为数组应拒绝（防把不可见记录当空视图覆写丢弃——上游 format.ts 修正同语义） | 已实施（09-24：touch_projcache 的 tables 数组判守 + 单测「数组保留不覆写」） | 已完成 |
 | 24 | 图片大图查看器（image.open「查看大图」/image.loading）| 0.2.1-alpha.1 | 聊天图片 tile 点击放大查看 | 依赖 #7 富渲染器体系 | 观察 |
 | 25 | prepare.* 过程组运行中形态 | 0.2.1-alpha.1 | 工具准备期的「准备读取文件」等运行中行（上游 ProcessActivitySummary.running）| rustdsh 折叠仅闭合轮，运行中轮不折叠；需先有过程组运行中面 | 观察 |

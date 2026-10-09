@@ -1903,8 +1903,11 @@ impl AppView {
     /// 隐藏；日志保留、workspace 归属不动（web：archiving never touches
     /// workspace accounting，unarchive 时原位恢复）。单向，无取消 UI。
     fn archive_session(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        // 0.2.1-alpha.1（cbae324bfa）：归档不再被运行态挡住——先停止该会话
+        // 仍在运行的工作（rustdsh 单 runtime：agent 槽会话运行中即 cancel，
+        // 运行回合落 aborted turn end），再落归档文档
         if self.agent_busy && self.current_session_id() == *id {
-            return;
+            self.agent.cancel();
         }
         archive_session_doc(id.as_str());
         self.archived.insert(id.as_str().to_string());

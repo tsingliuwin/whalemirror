@@ -320,6 +320,9 @@ impl Tool for FsTool {
     }
 }
 
+/// 上游 READ_LIMIT：单次 read 默认（且最大）返回行数。
+const READ_LIMIT: usize = 2000;
+
 /// 上游 `read` 工具名形别名（tool-fs/read.ts：name 'read'，参数
 /// file_path/offset/limit）：执行侧改写参数委托 fs op=read 原面（沙箱/
 /// workdir 同路）。提示词 section 以「read 工具」名引用——缺注册时模型
@@ -334,16 +337,6 @@ impl ReadTool {
     }
 }
 
-/// 上游 read 的行窗（offset 1 起 / limit 行数）；缺省全文件。
-fn apply_read_window(text: &str, offset: Option<u64>, limit: Option<u64>) -> String {
-    if offset.is_none() && limit.is_none() {
-        return text.to_string();
-    }
-    let start = offset.unwrap_or(1).saturating_sub(1) as usize;
-    let take = limit.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
-    text.lines().skip(start).take(take).collect::<Vec<_>>().join("
-")
-}
 
 #[async_trait]
 impl Tool for ReadTool {
@@ -380,17 +373,53 @@ impl Tool for ReadTool {
             arguments: json!({"op": "read", "path": path}),
         };
         let result = self.fs.execute(&forwarded).await;
-        // 行窗在成功文本上后置应用（委托面返回整文件）
-        let offset = args.get("offset").and_then(|v| v.as_u64());
-        let limit = args.get("limit").and_then(|v| v.as_u64());
-        if offset.is_none() && limit.is_none() {
+        if result.is_error {
             return result;
         }
-        if let Some(ContentBlock::Text { text }) = result.content.first() {
-            let windowed = apply_read_window(text, offset, limit);
-            return ToolExecutionResult::text(windowed);
-        }
-        result
+        let Some(ContentBlock::Text { text }) = result.content.first() else {
+            return result;
+        };
+        // 上游 formatReadOutput（read-render.ts）：行号体 + 分页 footer +
+        // <path>/<type>/<content> 信封；默认窗 2000 行（READ_LIMIT）
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|l| l.max(1) as usize)
+            .unwrap_or(READ_LIMIT);
+        let total = text.lines().count();
+        let lines: Vec<(usize, &str)> = text
+            .lines()
+            .enumerate()
+            .skip(offset.saturating_sub(1))
+            .take(limit)
+            .map(|(i, l)| (i + 1, l))
+            .collect();
+        let end_line = lines.last().map(|(n, _)| *n).unwrap_or(offset.saturating_sub(1));
+        let footer = if end_line < total {
+            format!("(Showing lines {offset}-{end_line} of {total}. Use offset={} to continue.)", end_line + 1)
+        } else {
+            format!("(End of file - total {total} lines)")
+        };
+        let body = if lines.is_empty() {
+            footer
+        } else {
+            format!(
+                "{}
+
+{}",
+                lines.iter().map(|(n, t)| format!("{n}: {t}")).collect::<Vec<_>>().join("
+"),
+                footer
+            )
+        };
+        let display = self.fs.workdir.resolve(Path::new(path)).display().to_string();
+        let out = format!("<path>{display}</path>
+<type>file</type>
+<content>
+{body}
+</content>");
+        ToolExecutionResult::text(out)
     }
 }
 
@@ -864,7 +893,8 @@ mod presentation_tests {
 
     #[tokio::test]
     async fn read_alias_accepts_file_path_and_path_with_window() {
-        // 上游名形别名：file_path 为准、path 容错；offset/limit 行窗
+        // 上游名形别名：file_path 为准、path 容错；输出为 formatReadOutput
+        // 信封形（行号体 + 分页 footer），窗口 offset/limit 生效、默认全窗
         let dir = std::env::temp_dir().join(format!("dsh-fs-alias-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "l1
@@ -876,23 +906,27 @@ l4").unwrap();
         let fs = FsTool::new(Arc::new(AllowAllPolicy)).with_workdir(wd.clone());
         let read = ReadTool::new(fs.clone());
 
-        let r = read.execute(&input(r#"{"file_path": "a.txt"}"#)).await;
-        assert_eq!(text_of(&r), "l1
-l2
-l3
-l4");
-        // path 容错（fs op 形习惯偏差）
-        let r = read.execute(&input(r#"{"path": "a.txt"}"#)).await;
-        assert_eq!(text_of(&r), "l1
-l2
-l3
-l4");
-        // 行窗：offset 2 起、limit 2 行
-        let r = read
-            .execute(&input(r#"{"file_path": "a.txt", "offset": 2, "limit": 2}"#))
-            .await;
-        assert_eq!(text_of(&r), "l2
-l3");
+        let full = text_of(&read.execute(&input(r#"{"file_path": "a.txt"}"#)).await);
+        assert!(full.starts_with("<path>") && full.contains("</path>"), "{full}");
+        assert!(full.contains("<type>file</type>") && full.contains("<content>"), "{full}");
+        let numbered = "1: l1
+2: l2
+3: l3
+4: l4";
+        assert!(full.contains(numbered), "{full}");
+        assert!(full.contains("(End of file - total 4 lines)"), "{full}");
+        assert!(full.trim_end().ends_with("</content>"), "{full}");
+        // path 容错（fs op 形习惯偏差）：同形输出
+        let via_path = text_of(&read.execute(&input(r#"{"path": "a.txt"}"#)).await);
+        assert_eq!(via_path, full);
+        // 行窗：offset 2 起、limit 2 行——未含第 1 行，footer 指续读
+        let windowed = text_of(&read.execute(&input(
+            r#"{"file_path": "a.txt", "offset": 2, "limit": 2}"#,
+        )).await);
+        assert!(windowed.contains("2: l2
+3: l3"), "{windowed}");
+        assert!(windowed.contains("(Showing lines 2-3 of 4. Use offset=4 to continue.)"), "{windowed}");
+        assert!(!windowed.contains("1: l1"), "{windowed}");
         // 缺 file_path
         let r = read.execute(&input("{}")).await;
         assert!(text_of(&r).contains("file_path must be a non-empty string"));
@@ -949,7 +983,7 @@ l3");
             .await;
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "alpha\nBETA\ngamma");
         let text = text_of(&r);
-        assert!(text.contains("has been updated successfully"), "{text}");
+        assert!(text.contains("has been updated successfully"), "{}", text);
         let diff = r.presentation.expect("diff presentation");
         assert_eq!(diff["card"], "diff");
         assert_eq!(diff["diffs"][0]["oldText"], "alpha\nbeta\ngamma");
@@ -979,7 +1013,7 @@ l3");
         let text = text_of(&r);
         assert!(
             text.contains("old_string matched 2 times") && text.contains("replace_all to true"),
-            "{text}"
+            "{}", text
         );
         // replace_all=true：全部替换 + All occurrences 文案
         let r = edit

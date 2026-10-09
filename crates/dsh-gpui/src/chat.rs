@@ -1811,7 +1811,8 @@ open: false,
                         .and_then(|v| serde_json::to_string_pretty(&v).ok())
                         .unwrap_or_else(|| tool.arguments.clone());
                     let element = match tool.name.as_str() {
-                        "shell" => {
+                        // bash（上游 tool-bash 名）+ 旧名 shell（历史日志回放）
+                        "shell" | "bash" => {
                             let t_fold = this.clone();
                             widgets::terminal_card(
                                 uid,
@@ -1829,6 +1830,45 @@ open: false,
                                             tool.expanded = !tool.expanded;
                                         }
                                         // 折叠/展开改了条目高度：列表须重测
+                                        v.invalidate_chat_heights_range(ei..ei + 1);
+                                        cx.notify();
+                                    });
+                                },
+                            )
+                            .into_any_element()
+                        }
+                        // read 名形别名（上游 read.ts）：结果为 formatReadOutput
+                        // 信封——解析出行号体喂读卡（非信封回退原样）
+                        "read" if !tool.error && tool.result.is_some() => {
+                            let path = {
+                                let p = arg_str("file_path");
+                                if p.is_empty() { arg_str("path") } else { p }
+                            };
+                            let shown = widgets::display_path(&path, &self.cwd);
+                            let result = tool.result.clone().unwrap_or_default();
+                            let lang = std::path::Path::new(&path)
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("")
+                                .to_lowercase();
+                            let card_text = dsh_gpui::parse_read_envelope(&result)
+                                .map(|l| l.join("
+"))
+                                .unwrap_or(result);
+                            let t_fold = this.clone();
+                            widgets::read_card(
+                                uid,
+                                &shown,
+                                &lang,
+                                &card_text,
+                                tool.expanded,
+                                move |_, _, cx| {
+                                    t_fold.update(cx, |v, cx| {
+                                        if let Some(MsgBlock::Tool(tool)) =
+                                            v.entries.get_mut(ei).and_then(|e| e.blocks.get_mut(bi))
+                                        {
+                                            tool.expanded = !tool.expanded;
+                                        }
                                         v.invalidate_chat_heights_range(ei..ei + 1);
                                         cx.notify();
                                     });

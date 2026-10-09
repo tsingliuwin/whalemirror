@@ -1459,8 +1459,9 @@ pub(crate) fn code_card(text: &str, error: bool) -> Div {
 /// 工具显示名 + 图标。
 pub(crate) fn tool_display(name: &str) -> (String, IconName) {
     match name {
-        "shell" => ("Shell".into(), IconName::SquareTerminal),
-        "fs" => ("Fs".into(), IconName::File),
+        "shell" | "bash" => ("Bash".into(), IconName::SquareTerminal),
+        "fs" | "read" | "write" | "edit" => ("Fs".into(), IconName::File),
+        "read_image" => ("Read image".into(), IconName::File),
         "web_fetch" => ("Web".into(), IconName::Globe),
         other => (other.to_string(), IconName::Bot),
     }
@@ -1479,11 +1480,22 @@ pub(crate) fn tool_row_texts(name: &str, args: &str) -> (String, String, Option<
             .filter(|s| !s.is_empty())
             .map(|s| s.lines().next().unwrap_or("").to_string())
     };
+    let path_pick = pick(&["file_path", "path"]);
     match name {
-        "shell" => (
+        "shell" | "bash" => (
             "Bash".into(),
             pick(&["command"]).unwrap_or_else(|| first_line(args)),
             None,
+        ),
+        "read" => ("读取".into(), path_pick.clone().unwrap_or_else(|| first_line(args)), path_pick),
+        "write" | "edit" => {
+            let title = if name == "write" { "写入" } else { "编辑" };
+            (title.into(), path_pick.clone().unwrap_or_else(|| first_line(args)), path_pick)
+        }
+        "read_image" => (
+            "读取图片".into(),
+            path_pick.clone().unwrap_or_else(|| first_line(args)),
+            path_pick,
         ),
         "web_fetch" => (
             "网页获取".into(),

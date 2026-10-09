@@ -1054,3 +1054,71 @@ mod collapse_timing_tests {
         assert!(fold_now_on_next_input(NextInput));
     }
 }
+
+// ---- read 工具输出信封解析（上游 formatReadOutput 形 → 卡片行集）----
+
+/// 解析 read 工具结果信封（`<path>`/`<type>file</type>`/`<content>` 包裹
+/// 的 `N: text` 行号体 + 分页 footer）为卡片可用行集；非信封文本返回
+/// None（渲染回退原样）。行内容的 `N: ` 前缀剥除（正文含 ": " 不误伤——
+/// 前缀须为纯数字）。
+pub fn parse_read_envelope(text: &str) -> Option<Vec<String>> {
+    let mut lines = text.lines();
+    let first = lines.next()?;
+    if !first.starts_with("<path>") || !first.ends_with("</path>") {
+        return None;
+    }
+    if lines.next()? != "<type>file</type>" {
+        return None;
+    }
+    if lines.next()? != "<content>" {
+        return None;
+    }
+    let rest: Vec<&str> = lines.collect();
+    if rest.last()? != &"</content>" {
+        return None;
+    }
+    let mut body = &rest[..rest.len() - 1];
+    // 倒数第二行是 footer（空文件时体仅 footer——body 为空）；footer 前
+    // 恒有一个空行分隔（上游 lines.join + 空行 + footer），剥掉一个——
+    // 文件末空行的编号条目（"N: " → ""）仍保留
+    if body.last().is_some_and(|l| l.starts_with('(') && l.ends_with(')')) {
+        body = &body[..body.len() - 1];
+        if body.last() == Some(&"") {
+            body = &body[..body.len() - 1];
+        }
+    }
+    Some(
+        body.iter()
+            .map(|l| match l.split_once(": ") {
+                Some((n, t)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => t.to_string(),
+                _ => l.to_string(),
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod read_envelope_tests {
+    use super::*;
+
+    #[test]
+    fn envelope_parses_to_clean_lines() {
+        let full = "<path>E:/x/a.rs</path>\n<type>file</type>\n<content>\n1: fn main() {\n2:     let s = \"k: v\";\n4: }\n\n(End of file - total 4 lines)\n</content>";
+        assert_eq!(
+            parse_read_envelope(full),
+            Some(vec!["fn main() {".to_string(), "    let s = \"k: v\";".to_string(), "}".to_string()])
+        );
+        // 分页 footer 同样剥除
+        let windowed = "<path>a</path>\n<type>file</type>\n<content>\n50: x\n51: y\n\n(Showing lines 50-51 of 80. Use offset=52 to continue.)\n</content>";
+        assert_eq!(
+            parse_read_envelope(windowed),
+            Some(vec!["x".to_string(), "y".to_string()])
+        );
+        // 空文件：体仅 footer → 空行集
+        let empty = "<path>a</path>\n<type>file</type>\n<content>\n(End of file - total 0 lines)\n</content>";
+        assert_eq!(parse_read_envelope(empty), Some(Vec::new()));
+        // 非信封（fs op 形原始文本 / 错误文本）→ None
+        assert_eq!(parse_read_envelope("raw file text"), None);
+        assert_eq!(parse_read_envelope("read failed: x"), None);
+    }
+}

@@ -283,6 +283,22 @@ pub struct DirLevel {
     pub truncated: bool,
 }
 
+/// markdown 预览判定（#7 documentpreview markdown 格式）：预览面板走
+/// MarkdownBlock 富渲染（TextView）而非行号文本——扩展名表与聊天
+/// FileKind::Markdown 分类同源。
+pub fn is_markdown_preview(path: &str) -> bool {
+    let lower = path.rsplit(['/', '\\']).next().unwrap_or(path).to_ascii_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    if matches!(ext, "md" | "mdx" | "markdown") {
+        return true;
+    }
+    // README/CHANGELOG 等无扩展名的惯用文档名（classify 同表）
+    matches!(
+        lower.as_str(),
+        "readme" | "changelog" | "contributing" | "authors" | "license" | "notice"
+    )
+}
+
 /// 聊天图片大图查看器状态（#24 image.open「查看大图」）：tile 点击开、
 /// 遮罩点击关——状态机抽 lib 以便单测（渲染为全窗遮罩 contain 位图）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1241,5 +1257,23 @@ mod image_viewer_tests {
         v.close();
         v.open("");
         assert_eq!(v.source(), None);
+    }
+}
+
+#[cfg(test)]
+mod markdown_preview_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_routes_to_rich_render() {
+        assert!(is_markdown_preview("E:/ws/README.md"));
+        assert!(is_markdown_preview("docs/PLAN.MARKDOWN"));
+        assert!(is_markdown_preview("notes.mdx"));
+        assert!(is_markdown_preview("E:/ws/readme"));
+        assert!(is_markdown_preview("LICENSE"));
+        // 非文档走行号文本
+        assert!(!is_markdown_preview("E:/ws/main.rs"));
+        assert!(!is_markdown_preview("E:/ws/Cargo.toml"));
+        assert!(!is_markdown_preview("noext"));
     }
 }

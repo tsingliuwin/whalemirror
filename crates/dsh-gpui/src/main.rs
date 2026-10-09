@@ -2349,6 +2349,17 @@ impl AppView {
             // 图片预览（上游 documentpreview image 体）：体直接渲染位图，
             // 不走文本分页
             preview.eof = true;
+        } else if dsh_gpui::is_markdown_preview(&preview.path) {
+            // markdown 预览（上游 documentpreview markdown 体）：富渲染
+            // 整文档（TextView），不分页——循环读页到 eof
+            if let Some(root) = self.preview_root() {
+                while !preview.eof {
+                    Self::load_preview_page(&root, &mut preview);
+                }
+            } else {
+                preview.failure =
+                    Some(dsh_gpui::PreviewErrorKind::Unavailable("会话没有工作区目录。".into()));
+            }
         } else {
             match self.preview_root() {
                 Some(root) => Self::load_preview_page(&root, &mut preview),
@@ -2379,6 +2390,8 @@ impl AppView {
             preview.eof = true;
             return;
         }
+        // markdown 的分页加载是全量循环的组成步（open/reload 时循环到
+        // eof），此处不做特判——「读取更多」按钮对 md 不显示（渲染分支）
         match dsh_gpui::read_text_page(root, &preview.path, preview.loaded_through) {
             Ok(page) => {
                 preview.lines.extend(page.text.split('\n').map(str::to_string));
@@ -2425,11 +2438,19 @@ impl AppView {
             p.eof = false;
             p.failure = None;
             match &root {
-                Some(r) => Self::load_preview_page(r, p),
+                Some(r) => {
+                    Self::load_preview_page(r, p);
+                    // markdown 全量（富渲染整文档；其余单页起步续读）
+                    if dsh_gpui::is_markdown_preview(&p.path) {
+                        while !p.eof {
+                            Self::load_preview_page(r, p);
+                        }
+                    }
+                }
                 None => {
                     p.failure = Some(dsh_gpui::PreviewErrorKind::Unavailable(
                         "会话没有工作区目录。".into(),
-                    ));
+                    ))
                 }
             }
         }
@@ -6502,6 +6523,33 @@ impl AppView {
                             .text_color(theme::t().text_2),
                     ),
             );
+        // markdown 预览体（上游 documentpreview markdown）：TextView 富
+        // 渲染整文档（标题/列表/代码卡——与聊天流同一 MarkdownBlock）；
+        // 行号列不显示，头部 wrap 钮保留（对 md 无效但无害，同图片）
+        if dsh_gpui::is_markdown_preview(&f.path) {
+            let text: String = if f.lines.is_empty() {
+                match &f.failure {
+                    Some(e) => dsh_gpui::preview_failure_line(e),
+                    None => "正在读取…".into(),
+                }
+            } else {
+                f.lines.join("
+")
+            };
+            return header.child(
+                div()
+                    .id(SharedString::from(format!("dock-md-{fi}")))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(16.0))
+                    .child(widgets::MarkdownBlock {
+                        text,
+                        id: 900_000 + fi,
+                        parse_delay: None,
+                    }),
+            );
+        }
         // 图片预览体（上游 documentpreview image：居中 contain 位图）
         if dsh_gpui::is_image_preview(&f.path) {
             let img_path = std::path::PathBuf::from(&f.path);

@@ -211,3 +211,116 @@ async fn child_session_persists_and_parent_logs_catalog() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 恒文本适配器（settlement e2e 的子 agent 驱动：首请求即终报）。
+#[derive(Default)]
+struct PlainAdapter {
+    calls: Mutex<Vec<GenerateOptions>>,
+}
+
+#[async_trait]
+impl LlmAdapter for PlainAdapter {
+    fn provider_info(&self, _provider: &str) -> LlmProviderInfo {
+        LlmProviderInfo { id: "mock".into(), name: "Mock".into() }
+    }
+
+    async fn stream(&self, options: GenerateOptions) -> Result<BoxStream, LlmError> {
+        self.calls.lock().unwrap().push(options);
+        let chunks = vec![
+            StreamChunk::BlockStart { index: 0, block_type: ContentBlockType::Text },
+            StreamChunk::TextDelta { index: 0, text: "child report".into() },
+            StreamChunk::Finish { reason: FinishReason::Stop, replay_state: None },
+        ];
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+}
+
+#[tokio::test]
+async fn settlement_notice_lands_in_parent_log() {
+    // #4 settlement：子任务正常完成后父日志落 subagent-settled
+    // user/message（notifySettlement 语义——与 subagent/catalog 并存）
+    let dir = std::env::temp_dir().join(format!("dsh-subagent-settle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let events = EventBus::new();
+    let llm = Arc::new(LlmRuntime::with_events(events.clone()));
+    let adapter = Arc::new(PlainAdapter::default());
+    let _reg = llm
+        .register_adapter(&["mock".to_string()], Arc::clone(&adapter) as Arc<dyn LlmAdapter>)
+        .unwrap();
+    let subagent = dsh_subagent::SubagentTool::new(
+        Arc::clone(&llm),
+        Arc::new(ToolRegistry::new()),
+        Arc::new(dsh_system_prompt::SystemPrompt::new()),
+        "mock",
+        "mock",
+    )
+    .with_projections(Arc::new(dsh_session_projection::SessionProjections::default()));
+    let parent = Arc::new(ReactLoopAgent::new(
+        dsh_llm::types::SessionId::new("session-parent"),
+        AgentOptions {
+            provider: "mock".into(),
+            model: "mock".into(),
+            max_tokens: None,
+            system_prompt: None,
+            compaction: Default::default(),
+            workdir: Default::default(),
+            attachments_root: None,
+        },
+        Arc::clone(&llm),
+        Arc::new(ToolRegistry::new()),
+        Arc::new(dsh_system_prompt::SystemPrompt::new()),
+        Arc::new(dsh_session_projection::SessionProjections::default()),
+        events,
+    ));
+    subagent.set_parent_link(Arc::clone(&parent));
+    // child_sink 在场才启用子会话耐久化+catalog 面（与宿主接线同条件）
+    let sink_dir = dir.clone();
+    subagent.set_child_sink(Arc::new(move |id: &LlmSessionId, event: &SessionEvent| {
+        let _ = &sink_dir;
+        let _ = id;
+        let _ = event;
+    }));
+
+    use dsh_tools::Tool as _;
+    let input = dsh_tools::ToolExecutionInput::with_raw_arguments(
+        CallId("s1".into()),
+        "subagent".into(),
+        r#"{"description": "demo task", "prompt": "Say hello."}"#.to_string(),
+    );
+    let r = subagent.execute(&input).await;
+    let _ = r;
+    let _ = &dir;
+
+    // 父日志（内存会话）同时含 subagent/catalog 与 subagent-settled notice
+    let session = parent.session();
+    let session = session.lock().unwrap();
+    let has_catalog = session
+        .entries()
+        .iter()
+        .any(|e| matches!(&e.event, SessionEvent::SubagentCatalog { .. }));
+    assert!(has_catalog, "catalog event in parent log");
+    let notice = session
+        .entries()
+        .iter()
+        .find_map(|e| match &e.event {
+            SessionEvent::UserMessage(m) if matches!(&m.source, dsh_llm::MessageSource::Context { context_kind, form, .. } if context_kind == "subagent-settled" && form.as_deref() == Some("notice")) => Some(m.clone()),
+            _ => None,
+        })
+        .expect("settlement notice user/message in parent log");
+    let notice_text: String = notice
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notice_text.contains("Background subagent ") && notice_text.contains(" finished. It cannot receive follow-up messages."),
+        "{notice_text}"
+    );
+    assert!(
+        notice_text.contains("It left no closing message.") || notice_text.contains("Its closing message:"),
+        "{notice_text}"
+    );
+}

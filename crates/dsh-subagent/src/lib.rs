@@ -287,52 +287,47 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
         child.followup(prompt);
         let waited = tokio::time::timeout(self.timeout, child.when_idle()).await;
         self.depth.fetch_sub(1, Ordering::SeqCst);
-        match waited {
-            Err(_) => {
-                child.cancel();
-                ToolExecutionResult::error(format!(
-                    "subagent timed out after {}s; its work was cancelled",
-                    self.timeout.as_secs()
-                ))
+        let text = final_assistant_text(&child.session().lock().unwrap());
+        // settlement 通知（上游 notifySettlement）：子任务结束（完成/超时/
+        // 无消息）都向父日志落 subagent-settled user/message——三路径复用
+        //（超时=aborted 形；无消息仍 completed+It left no closing message.
+        // 形——上游 error 形仅在结果本身失败时走，此处 final report 工具
+        // 结果已各自携带失败语义，通知只记结束事实）
+        let stop = if waited.is_err() { SettlementStop::Aborted } else { SettlementStop::Completed };
+        if waited.is_err() {
+            child.cancel();
+        }
+        let cid = child_id.as_str();
+        {
+            let notice = settlement_notice_text(cid, stop, text.as_deref());
+            let notice_msg = dsh_llm::Message::new(
+                dsh_llm::Role::User,
+                vec![dsh_llm::ContentBlock::text(notice)],
+                dsh_llm::MessageSource::Context {
+                    context_kind: "subagent-settled".into(),
+                    plugin: None,
+                    form: Some("notice".into()),
+                    summary: Some(settlement_summary_line(cid, stop)),
+                    changes_paths: Vec::new(),
+                    reference_labels: Vec::new(),
+                    name: None,
+                },
+            );
+            if let Some(parent) = self.parent.lock().unwrap().upgrade() {
+                parent.append_session_event(dsh_session::SessionEvent::UserMessage(
+                    notice_msg,
+                ));
             }
-            Ok(()) => {
-                let text = final_assistant_text(&child.session().lock().unwrap());
-                // settlement 通知（上游 notifySettlement：子任务结束时向父
-                // 会话落一条 subagent-settled user/message——context 行呈现，
-                // 结束摘要 + closing 文本两形；final report 工具结果保持不变）。
-                // 经 parent link 落父日志（同 subagent/catalog 的路由）
-                let cid = child_id.as_str();
-                let stop = SettlementStop::Completed;
-                {
-                    let notice = settlement_notice_text(cid, stop, text.as_deref());
-                    let notice_msg = dsh_llm::Message::new(
-                        dsh_llm::Role::User,
-                        vec![dsh_llm::ContentBlock::text(notice)],
-                        dsh_llm::MessageSource::Context {
-                            context_kind: "subagent-settled".into(),
-                            plugin: None,
-                            form: Some("notice".into()),
-                            summary: Some(settlement_summary_line(cid, stop)),
-                            changes_paths: Vec::new(),
-                            reference_labels: Vec::new(),
-                            name: None,
-                        },
-                    );
-                    if let Some(parent) = self.parent.lock().unwrap().upgrade() {
-                        parent.append_session_event(dsh_session::SessionEvent::UserMessage(
-                            notice_msg,
-                        ));
-                    }
-                }
-                match text {
-                    Some(text) => {
-                        ToolExecutionResult::text(format!(
-                            "Subagent ({description}) final report:\n\n{text}"
-                        ))
-                    }
-                    None => ToolExecutionResult::error("subagent produced no final message"),
-                }
-            }
+        }
+        match (waited, text) {
+            (Err(_), _) => ToolExecutionResult::error(format!(
+                "subagent timed out after {}s; its work was cancelled",
+                self.timeout.as_secs()
+            )),
+            (Ok(()), Some(text)) => ToolExecutionResult::text(format!(
+                "Subagent ({description}) final report:\n\n{text}"
+            )),
+            (Ok(()), None) => ToolExecutionResult::error("subagent produced no final message"),
         }
     }
 }

@@ -4529,6 +4529,12 @@ impl AppView {
     fn set_route(&mut self, provider: &str, model: &str) {
         self.agent.set_provider_and_model(provider, model);
         self.subagent.set_route(provider, model);
+        // #5 5c：模型快照跟随——运行中的 runtime 一并换路由（上游每会话
+        // agent 的模型选择是共享 Host 配置；runtime 轮内请求的下一次组装
+        // 即用新路由）
+        for runtime in self.session_runtimes.values() {
+            runtime.set_provider_and_model(provider, model);
+        }
     }
 
     /// 权限预设切换（上游 PermissionPresetService.apply 的写路径）：写

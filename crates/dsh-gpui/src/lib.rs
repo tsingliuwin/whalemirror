@@ -736,6 +736,34 @@ mod process_title_tests {
     }
 }
 
+// ---- 侧栏会话列表增量收敛（subagent 子会话等新落盘会话的即时收录）----
+
+/// 侧栏会话列表行（宿主 SessionMeta 的纯数据投影）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionListRow {
+    pub id: String,
+    pub title: String,
+    pub time_label: String,
+    pub cwd: Option<String>,
+    pub blank: bool,
+}
+
+/// 把新落盘会话追加进列表尾部（id 未出现过者；出现过的条目保持原位
+/// 原标题——运行中的标题/时间标签不跳动）。返回追加条数。
+pub fn merge_new_sessions(list: &mut Vec<SessionListRow>, incoming: Vec<SessionListRow>) -> usize {
+    let known: std::collections::HashSet<String> =
+        list.iter().map(|m| m.id.clone()).collect();
+    let mut added = 0;
+    for row in incoming {
+        if known.contains(&row.id) {
+            continue;
+        }
+        list.push(row);
+        added += 1;
+    }
+    added
+}
+
 // ---- 计划卡片数据面（上游 ui-plan plan.ts submittedPlan 同语义）----
 
 /// 一份已提交计划（来自日志中的 exit_plan_mode 工具调用）。
@@ -847,5 +875,41 @@ mod submitted_plan_tests {
     fn non_call_events_are_ignored() {
         let ev = serde_json::json!({"type":"tool/result","data":{"message":{"role":"tool"}}});
         assert!(submitted_plan(&ev).is_none());
+    }
+}
+
+#[cfg(test)]
+mod session_list_merge_tests {
+    use super::*;
+
+    fn row(id: &str) -> SessionListRow {
+        SessionListRow {
+            id: id.into(),
+            title: "t".into(),
+            time_label: "刚刚".into(),
+            cwd: Some("/tmp/ws".into()),
+            blank: false,
+        }
+    }
+
+    #[test]
+    fn appends_only_unseen_ids_in_order() {
+        let mut list = vec![row("a"), row("b")];
+        let added = merge_new_sessions(
+            &mut list,
+            vec![row("b"), row("c"), row("a"), row("d")],
+        );
+        assert_eq!(added, 2);
+        let ids: Vec<&str> = list.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c", "d"], "new rows keep incoming order at the tail");
+    }
+
+    #[test]
+    fn empty_incoming_is_noop_and_repeat_is_idempotent() {
+        let mut list = vec![row("a")];
+        assert_eq!(merge_new_sessions(&mut list, vec![]), 0);
+        assert_eq!(merge_new_sessions(&mut list, vec![row("x")]), 1);
+        assert_eq!(merge_new_sessions(&mut list, vec![row("x")]), 0, "idempotent");
+        assert_eq!(list.len(), 2);
     }
 }

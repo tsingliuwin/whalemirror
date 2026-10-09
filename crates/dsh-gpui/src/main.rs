@@ -1588,6 +1588,27 @@ pub(crate) struct AppView {
 /// web contextProvenance/contextForm 投影：标题（注入/召回）+ 生产者
 /// 标签（changes[].path / plugin / name / references[].label / kind 兜底）
 /// + notice 形态的 120 字符摘要。
+/// 会话文件 mtime → 侧栏相对时间标签（「刚刚 / 6分钟 / 8天」）。
+fn relative_time_label(modified: std::time::SystemTime) -> String {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let secs = now_secs.saturating_sub(
+        modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default(),
+    );
+    match secs {
+        s if s < 60 => "刚刚".into(),
+        s if s < 3600 => format!("{}分钟", s / 60),
+        s if s < 86400 => format!("{}小时", s / 3600),
+        s if s < 86400 * 30 => format!("{}天", s / 86400),
+        _ => format!("{}个月", secs / 86400 / 30),
+    }
+}
+
 fn context_info(
     kind: &str,
     plugin: &Option<String>,
@@ -1919,6 +1940,69 @@ impl AppView {
         cx.notify();
     }
 
+    /// 侧栏会话列表增量收敛：把本轮新落盘的会话（subagent 子会话等）
+    /// 追加进列表（merge_new_sessions 纯函数判定新增），已有条目原位不动。
+    /// 轮终调用——子任务会话免重启即入列。
+    fn absorb_new_sessions(&mut self, cx: &mut Context<Self>) {
+        let known: Vec<dsh_gpui::SessionListRow> = self
+            .sessions
+            .iter()
+            .map(|m| dsh_gpui::SessionListRow {
+                id: m.id.as_str().to_string(),
+                title: m.title.clone(),
+                time_label: String::new(),
+                cwd: m.cwd.clone(),
+                blank: m.blank,
+            })
+            .collect();
+        let entries = match self.recorder.list() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let web_titles: std::collections::HashMap<String, String> =
+            load_web_session_metas().into_iter().collect();
+        let incoming: Vec<dsh_gpui::SessionListRow> = entries
+            .iter()
+            .map(|e| {
+                let title = e
+                    .cwd
+                    .as_deref()
+                    .and_then(|c| self.recorder.title_of(&e.id, c))
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| web_titles.get(e.id.as_str()).cloned())
+                    .unwrap_or_else(|| "新会话".into());
+                let blank = self
+                    .recorder
+                    .load(&e.id, e.cwd.as_deref())
+                    .map(|(s, _)| session_is_blank(&s))
+                    .unwrap_or(false);
+                dsh_gpui::SessionListRow {
+                    id: e.id.as_str().to_string(),
+                    title,
+                    time_label: relative_time_label(e.modified),
+                    cwd: e.cwd.clone(),
+                    blank,
+                }
+            })
+            .collect();
+        let mut merged = known;
+        let added = dsh_gpui::merge_new_sessions(&mut merged, incoming);
+        if added == 0 {
+            return;
+        }
+        for row in merged.iter().skip(merged.len() - added) {
+            self.sessions.push(SessionMeta {
+                id: SessionId::new(row.id.clone()),
+                title: row.title.clone(),
+                time_label: row.time_label.clone(),
+                cwd: row.cwd.clone(),
+                blank: row.blank,
+            });
+        }
+        self.refresh_sidebar(cx);
+        cx.notify();
+    }
+
     /// 会话重命名（web Rows 菜单 rename → session.rename）：
     /// 更新列表元数据并落 SessionTitle 事件（读侧 latest-wins）。
     fn rename_session(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
@@ -2011,6 +2095,10 @@ impl AppView {
             // 侧栏是数据推送制（不随 notify 自动重算）：运行态状态点与行的
             // 运行标记要在边界上显式刷新，否则点要么不出、要么不消失
             self.refresh_sidebar(cx);
+            // 轮终增量收录本轮新落盘的会话（subagent 子会话等）——免重启
+            if matches!(ev, dsh_agent_loop::AgentEvent::TurnEnded { .. }) {
+                self.absorb_new_sessions(cx);
+            }
         }
         let app_level = if self.view_split().routes_to_view() {
             self.chat.update(cx, |c, cx| {
@@ -6521,29 +6609,9 @@ fn main() {
     // --- 会话持久化：与 web 完全共享（--key--/sid/session.jsonl.zstd）---
     let recorder = Arc::new(SessionRecorder::new(sessions_dir()));
     let entries = recorder.list().unwrap_or_default();
-    // 相对时间
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    let rel = |modified: std::time::SystemTime| -> String {
-        let secs = now_secs
-            .saturating_sub(
-                modified
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or_default(),
-            );
-        match secs {
-            s if s < 60 => "刚刚".into(),
-            s if s < 3600 => format!("{}分钟", s / 60),
-            s if s < 86400 => format!("{}小时", s / 3600),
-            s if s < 86400 * 30 => format!("{}天", s / 86400),
-            _ => format!("{}个月", secs / 86400 / 30),
-        }
-    };
     let web_titles: std::collections::HashMap<String, String> =
         load_web_session_metas().into_iter().collect();
+    let rel = relative_time_label;
     let mut sessions_meta: Vec<SessionMeta> = entries
         .iter()
         .map(|e| {

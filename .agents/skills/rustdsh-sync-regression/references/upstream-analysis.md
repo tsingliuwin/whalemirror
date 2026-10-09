@@ -123,7 +123,10 @@
 - MessageSource::Plugin 旧形消费（Message::system 等仅 plugin 字段）不变；新形 form/summary/sections 仅在 producer 显式供给时落盘（当前唯 model-selection notice）。
 - 撕裂尾帧：上游部分解码恢复完整记录+写侧截断重写；rustdsh 逐帧独立解压，损坏尾帧整帧不返回——两者在"未确认 durable 批次不交付"语义上等价，边缘崩溃场景不另行实施。
 - StateDot idle/unloading 五态目录：消费面（插件库存页）rustdsh 无镜像；state_dot 色值由调用方供给，不扩枚举。
-- 模型切换公告显示形态：上游在转录里渲染为折叠摘要行（notice summary 骑行）；rustdsh 无 ContextInjectionRow 折叠行组件，公告按既有用户消息渲染面显示（互通面已 1:1，视觉形态偏差）。
+- 模型切换公告显示形态（10-09 更新）：上游在转录里渲染为折叠摘要行；rustdsh 现以 context 行渲染（非 user source 的 user/message 一律 context 行——内存 Plugin 形经 context_entry_from 同映射，与重载回放同形；标签=上游 contextProducer default 的 kind 原文）。
+- 非 user source 落盘形（10-09 修复）：V4 admission 拒绝 plugin 包装源（assertV4SourceRowAdmission：retired syntax）。写侧 user/message 与 system/message 的 Plugin source 重写为 producer-owned kind（producer_kind：'@deepseek-ai/dsh-system-prompt'→'system-prompt'（role 敏感）、'plan-mode'/'model-selection' 等同名直映、其余 'plugin:<name>'）。0.1.7 同步轮只在迁移器（v2.rs）做了该重写、live 写路径漏掉——本轮接线（原 plugin_source_v4 死代码转正）。读侧非 user kind 一律还原 Context{context_kind} 开放词汇。
+- plan-mode notice 投递（10-09 对齐 inject）：set_plan_mode 的 narration 走收件箱（next-step，无唤醒），下一次认领（空闲期=下一轮 step 1，先于用户文本）随批落盘；原直写日志会让 notice 游离轮间、被记到上一轮名下（上游日志形不符）。偏差：mid-turn 切换的 plan/mode 事件 rustdsh 立即落盘，上游挂 pendingIntents 等下一个被接受的 in-turn pre-step（可观察面极小，暂不追）。
+- agent/inbox/spliced 持久收件箱事件 rustdsh 未落（收件箱纯内存）：上游 waking/turn-trigger 判定与轨迹收件箱投影依赖它——独立面，等 goal/followup 等非人类唤醒面一并评估（见 backlog 5d）。
 - dsh-shell 端到端 cmd 编码测试（cmd_non_utf8_stderr_is_readable）弱化为编码无关断言：cmd 子进程输出字节随父链 console 输出代码页漂移且偶发尾字节截断（65001/936 间歇），强语义由 GBK 纯字节解码单测固定覆盖——2026-09-08 定时轮 #3 发现并修复（曾致 cargo test 中止后续 suite、总数波动 80/88/93）。
 
 - V3 system prompt 面：上游 in-history 路线（provider 适配器声明能力）变化时 append 新节点；rustdsh 路线走请求 system 参数（非 in-history）→ 归一化 replace head。读取多节点 v3 日志（in-history 写形）时 rustdsh 线性显示每条 system/message，不做 surface 替换折叠。

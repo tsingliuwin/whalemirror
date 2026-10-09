@@ -136,6 +136,34 @@ pub(crate) fn attachment_image_object_path(
     Some(root.join("objects").join(&hex[..2]).join(hex))
 }
 
+/// 非 user source 消息的 context 行投影（上游非 user source 的 user/message
+/// 一律 context 呈现，v4 已退役 plugin 包装）。内存 `MessageSource::Plugin`
+/// 落盘即 producer-owned kind（plugin_source_v4），标签同上游
+/// contextProducer default 取 kind 原文；user source 与空文本返回 None。
+pub(crate) fn context_entry_from(m: &dsh_llm::Message) -> Option<(crate::ContextInfo, String)> {
+    let text: String = m
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    if text.is_empty() {
+        return None;
+    }
+    let info = match &m.source {
+        MessageSource::Context { context_kind, plugin, form, summary, changes_paths, reference_labels, name } => {
+            crate::context_info(context_kind, plugin, form, summary, changes_paths, reference_labels, name)
+        }
+        MessageSource::Plugin { plugin, form, summary, .. } => {
+            crate::context_info(plugin, &None, form, summary, &[], &[], &None)
+        }
+        _ => return None,
+    };
+    Some((info, text))
+}
+
 /// composer 下方统计 pill 的数据（web StatsPills 的 WindowStats + token
 /// 投影聚合；rustdsh 数值为实时窗口累计）。
 #[derive(Clone, Default)]
@@ -859,11 +887,10 @@ impl ChatView {
                     if text.is_empty() && attachments.is_empty() {
                         continue;
                     }
-                    // 生产者注入的上下文 → ContextInjectionRow（非用户气泡）
-                    if let MessageSource::Context { context_kind, plugin, form, summary, changes_paths, reference_labels, name } =
-                        &m.source
-                    {
-                        let info = crate::context_info(context_kind, plugin, form, summary, changes_paths, reference_labels, name);
+                    // 生产者注入的上下文 → ContextInjectionRow（非用户气泡；
+                    // 上游非 user source 一律 context 呈现——含 plan-mode /
+                    // model-switch notice，plugin 包装内存形同映射）
+                    if let Some((info, text)) = context_entry_from(m) {
                         self.entries.push(ChatEntry {
                             step: None,
                             step_duration_ms: None,
@@ -1274,6 +1301,13 @@ step: None,
 step_duration_ms: None, role: Role::Notice, blocks: vec![], done: true, elapsed: None, usage: None, ended_at_ms: None, turn: self.ui_turn, context: None,
 open: false,
 });
+            }
+            // 非 user source 的耐久上下文消息随批落盘（认领的注入通知、
+            // model-switch 公告）→ context 行（与重载回放同形）
+            AgentEvent::ContextMessage { message } => {
+                if let Some((info, text)) = context_entry_from(&message) {
+                    self.push_context_entry(info, text);
+                }
             }
         }
         // 智能吸底：只有用户本来就贴在底部时才跟随滚动（web 同款行为）；

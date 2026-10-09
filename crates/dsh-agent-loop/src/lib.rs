@@ -136,6 +136,10 @@ pub enum AgentEvent {
     TurnEnded { turn: u64, reason: TurnEndReason },
     /// 压缩事务完成：影子区前 `shadowed_messages` 条消息已由检查点替换。
     Compacted { shadowed_messages: usize },
+    /// 非 user source 的耐久上下文消息已随批落盘（认领的注入通知、
+    /// model-switch 公告）：UI 侧以 context 行呈现（上游非 user source
+    /// 一律 context 呈现的语义）；user source 消息由 composer 自行入列。
+    ContextMessage { message: Message },
     Error { message: String, code: String },
 }
 
@@ -350,7 +354,10 @@ impl ReactLoopAgent {
                     sections: None,
                 },
             );
-            self.append_event(SessionEvent::UserMessage(msg));
+            // 上游 agent.inject：通知进收件箱（不唤醒），下一次认领（空闲期
+            // 为下一轮 step 1）随批落盘——直写会让 notice 游离在轮间、被记
+            // 到上一轮名下（上游日志形不符）。
+            self.inject(msg);
         }
     }
 
@@ -727,6 +734,11 @@ impl ReactLoopAgent {
             }
             for m in &messages {
                 self.append_event(SessionEvent::UserMessage(m.clone()));
+                // 非 user source（认领的注入通知、model-switch 公告）随批
+                // 落盘的同时实时入列 UI（context 行）；重载回放走日志同形。
+                if !matches!(m.source, dsh_llm::MessageSource::User) {
+                    self.emit_ui(AgentEvent::ContextMessage { message: m.clone() });
+                }
             }
 
             let step_end = self.run_step(turn, step, &assembly, &signal).await;

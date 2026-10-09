@@ -35,6 +35,7 @@ fn main() {
                         dsh_session::SessionEvent::PermissionPreset { .. } => "permission/preset",
                         dsh_session::SessionEvent::SandboxModeSwitch { .. } => "sandbox/mode",
                         dsh_session::SessionEvent::ApprovalPolicy { .. } => "approval/policy",
+                        dsh_session::SessionEvent::PlanMode { .. } => "plan/mode",
                     };
                     *counts.entry(k).or_insert(0) += 1;
                 }

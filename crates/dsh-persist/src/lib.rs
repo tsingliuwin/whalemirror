@@ -951,11 +951,13 @@ fn producer_kind(plugin: &str, role: Option<&str>) -> String {
 }
 
 /// MessageSource::Plugin 的 V4 序列化（kind = producer 名，plugin 字段删除；
-/// form/summary 等附属字段原样保留）。
+/// form/summary 等附属字段原样保留）。V4 admission 拒绝 plugin 包装源
+/// （上游 assertV4SourceRowAdmission：retired syntax）。
 fn plugin_source_v4(
     plugin: &str,
     form: &Option<String>,
     summary: &Option<String>,
+    sections: &Option<Vec<dsh_llm::ContextSnapshotSection>>,
     role: Option<&str>,
 ) -> serde_json::Value {
     let mut o = serde_json::Map::new();
@@ -965,6 +967,16 @@ fn plugin_source_v4(
     }
     if let Some(s) = summary {
         o.insert("summary".into(), serde_json::json!(s));
+    }
+    if let Some(ss) = sections {
+        o.insert(
+            "sections".into(),
+            serde_json::Value::Array(
+                ss.iter()
+                    .map(|s| serde_json::json!({"name": s.name, "text": s.text}))
+                    .collect(),
+            ),
+        );
     }
     serde_json::Value::Object(o)
 }
@@ -1535,6 +1547,12 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
             //（kind 即生产者名，plugin 字段删除）；注入类（context kind）原样
             let source = match &m.source {
                 MessageSource::User => serde_json::json!({"kind": "user"}),
+                MessageSource::Plugin { plugin, form, summary, sections } => {
+                    // V4 退役 plugin 包装：producer-owned source kind
+                    //（kind 即生产者名，plugin 字段删除；ContextFormed
+                    // 附属原样保留——上游 producer-owned sources 重构）
+                    plugin_source_v4(plugin, form, summary, sections, Some("user"))
+                }
                 MessageSource::Context {
                     context_kind,
                     plugin,
@@ -1779,8 +1797,15 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
                     "message": {
                         "id": message.id.0,
                         "role": "system",
-                        "source": serde_json::to_value(&message.source)
-                            .unwrap_or(serde_json::json!({"kind": "plugin", "plugin": "@deepseek-ai/dsh-system-prompt"})),
+                        // producer-owned kind：system-prompt（plugin 包装
+                        // 同为 V4 retired syntax）
+                        "source": match &message.source {
+                            MessageSource::Plugin { plugin, form, summary, sections } => {
+                                plugin_source_v4(plugin, form, summary, sections, Some("system"))
+                            }
+                            other => serde_json::to_value(other)
+                                .unwrap_or(serde_json::json!({"kind": "system-prompt"})),
+                        },
                         "content": blocks_to_web(&message.content),
                     },
                 }),
@@ -1862,6 +1887,49 @@ mod tests {
         assert_eq!(row["rows"]["title"]["val"], "你好");
         assert_eq!(row["rows"]["title"]["ver"], 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v4_write_maps_plugin_wrappers_to_producer_owned_kinds() {
+        // V4 admission 拒绝 kind:'plugin'（retired syntax，上游
+        // assertV4SourceRowAdmission）：user/system 两处 plugin 包装源在
+        // 落盘时必须重写为 producer-owned kind（producer-owned sources）
+        let notice = dsh_llm::Message::new(
+            dsh_llm::Role::User,
+            vec![dsh_llm::ContentBlock::text("notice text")],
+            MessageSource::Plugin {
+                plugin: "plan-mode".into(),
+                form: Some("notice".into()),
+                summary: Some("notice text".into()),
+                sections: None,
+            },
+        );
+        let row = event_to_web_line(&SessionEvent::UserMessage(notice), 7, 100).unwrap();
+        let source = &row["data"]["source"];
+        assert_eq!(source["kind"], "plan-mode");
+        assert_eq!(source["form"], "notice");
+        assert_eq!(source["summary"], "notice text");
+        assert!(source.get("plugin").is_none(), "plugin field must be dropped");
+
+        let system = dsh_llm::Message::new(
+            dsh_llm::Role::System,
+            vec![dsh_llm::ContentBlock::text("system prompt")],
+            MessageSource::Plugin {
+                plugin: "@deepseek-ai/dsh-system-prompt".into(),
+                form: None,
+                summary: None,
+                sections: None,
+            },
+        );
+        let row = event_to_web_line(
+            &SessionEvent::SystemMessage { turn: 1, step: 1, message: system, replace: None },
+            8,
+            100,
+        )
+        .unwrap();
+        let source = &row["data"]["message"]["source"];
+        assert_eq!(source["kind"], "system-prompt", "role-sensitive mapping");
+        assert!(source.get("plugin").is_none());
     }
 
     #[test]

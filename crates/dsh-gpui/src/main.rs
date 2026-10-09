@@ -1503,6 +1503,8 @@ pub(crate) struct AppView {
     /// 归档会话确认（删除是破坏性动作：整份日志文件移除，不可恢复——
     /// 上游 web 无删除动作仅有归档，此为用户定向的本地功能）。
     confirm_session_delete: Option<(String, String)>,
+    /// 聊天图片大图查看器（#24 image.open：tile 点击开、遮罩点击关）
+    image_viewer: dsh_gpui::ImageViewer,
     renaming_session: Option<String>,
     /// hero「选择工作区」菜单开合
     hero_ws_menu: bool,
@@ -1776,6 +1778,7 @@ impl AppView {
             sb_col_bounds,
             renaming_workspace: None,
             confirm_session_delete: None,
+            image_viewer: dsh_gpui::ImageViewer::default(),
             renaming_session: None,
             hero_ws_menu: false,
             model_menu: false,
@@ -4699,6 +4702,37 @@ impl Render for AppView {
                                             .child("删除")
                                     }),
                             ),
+                    ),
+            );
+        }
+        // #24 image.open「查看大图」：全窗遮罩（黑 65%）居中 contain，
+        // 点击任意处关闭（上游 lightbox 语义）
+        if let Some(src) = self.image_viewer.source().map(str::to_string) {
+            let t_close = this.clone();
+            root = root.child(
+                div()
+                    .id("image-viewer-mask")
+                    .absolute()
+                    .size_full()
+                    .top_0()
+                    .left_0()
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::hsla(0.0, 0.0, 0.0, 0.65))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        t_close.update(cx, |v, cx| {
+                            v.image_viewer.close();
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        gpui::img(std::path::PathBuf::from(src))
+                            .max_w(px(self.viewport * 0.9))
+                            .max_h(px(900.0))
+                            .object_fit(gpui::ObjectFit::Contain),
                     ),
             );
         }

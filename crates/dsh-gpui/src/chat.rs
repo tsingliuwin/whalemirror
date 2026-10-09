@@ -56,27 +56,49 @@ pub(crate) struct TurnFold {
 fn render_chat_attachment(
     attach: &crate::ChatAttachment,
     compact: bool,
+    t_app: &Entity<crate::AppView>,
 ) -> gpui::AnyElement {
     let _ = compact;
     match attach {
-        crate::ChatAttachment::ImageTile { path } => {
-            let mut tile = div()
+        crate::ChatAttachment::ImageTile { path } => match path {
+            Some(p) => {
+                // #24 image.open「查看大图」：tile 点击开全窗遮罩
+                let t_open = t_app.clone();
+                let p_open = p.clone();
+                div()
+                    .id(SharedString::from(format!("img-tile-{}", p.display())))
+                    .flex_none()
+                    .size(px(64.0))
+                    .overflow_hidden()
+                    .rounded(px(16.0))
+                    .border(px(0.5))
+                    .border_color(theme::t().border_l2)
+                    .bg(theme::t().hover)
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        let p = p_open.clone();
+                        t_open.update(cx, |v, cx| {
+                            v.image_viewer.open(&p.to_string_lossy());
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        gpui::img(p.clone())
+                            .size(px(64.0))
+                            .object_fit(gpui::ObjectFit::Cover),
+                    )
+                    .into_any_element()
+            }
+            None => div()
                 .flex_none()
                 .size(px(64.0))
                 .overflow_hidden()
                 .rounded(px(16.0))
                 .border(px(0.5))
                 .border_color(theme::t().border_l2)
-                .bg(theme::t().hover);
-            if let Some(p) = path {
-                tile = tile.child(
-                    gpui::img(p.clone())
-                        .size(px(64.0))
-                        .object_fit(gpui::ObjectFit::Cover),
-                );
-            }
-            tile.into_any_element()
-        }
+                .bg(theme::t().hover)
+                .into_any_element(),
+        },
         crate::ChatAttachment::FileCard { name, bytes } => div()
             .flex_none()
             .w(px(240.0))
@@ -2246,6 +2268,7 @@ open: false,
                             row = row.child(render_chat_attachment(
                                 attach,
                                 attach_count > 1,
+                                &self.app,
                             ));
                         }
                     }

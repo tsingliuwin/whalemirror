@@ -283,6 +283,30 @@ pub struct DirLevel {
     pub truncated: bool,
 }
 
+/// 聊天图片大图查看器状态（#24 image.open「查看大图」）：tile 点击开、
+/// 遮罩点击关——状态机抽 lib 以便单测（渲染为全窗遮罩 contain 位图）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImageViewer {
+    source: Option<String>,
+}
+
+impl ImageViewer {
+    /// 打开一张图（空路径反查失败的 tile 不开——点击无动作）。
+    pub fn open(&mut self, path: &str) {
+        if !path.is_empty() {
+            self.source = Some(path.to_string());
+        }
+    }
+    /// 关闭（遮罩点击）。
+    pub fn close(&mut self) {
+        self.source = None;
+    }
+    /// 当前展示源（位图对象路径）。
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+}
+
 /// 图片预览判定（#7 documentpreview image 格式切片）：按扩展名判定
 /// 预览面板走位图渲染（居中 contain）而非文本分页——与聊天附件 tile
 /// 的 FileKind::Image 分类同一张扩展名表。
@@ -1200,5 +1224,22 @@ mod image_preview_tests {
         assert!(!is_image_preview("E:/ws/main.rs"));
         assert!(!is_image_preview("E:/ws/Cargo.toml"));
         assert!(!is_image_preview("noext"));
+    }
+}
+
+#[cfg(test)]
+mod image_viewer_tests {
+    use super::*;
+
+    #[test]
+    fn viewer_opens_on_click_and_closes_on_mask() {
+        let mut v = ImageViewer::default();
+        assert_eq!(v.source(), None, "closed initially");
+        v.open("C:/dsh/objects/ab/abcd.png");
+        assert_eq!(v.source(), Some("C:/dsh/objects/ab/abcd.png"));
+        // 空路径（反查失败 tile）不开——点击无动作
+        v.close();
+        v.open("");
+        assert_eq!(v.source(), None);
     }
 }

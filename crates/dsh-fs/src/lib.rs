@@ -447,6 +447,153 @@ impl Tool for WriteTool {
     }
 }
 
+/// 上游 `edit` 工具（tool-fs/edit.ts：字面替换原语）：old_string →
+/// new_string，replace_all=false 时要求恰好一次匹配。行尾归一化匹配
+/// （CRLF 文件按 LF 匹配、写回保留原行尾）；diff presentation 与 write
+/// 同形（FileDiff oldText=编辑前全文/newText=编辑后全文，渲染侧算 hunk）。
+/// 偏差：上游默认 fs-observation-policy 强制 read-before-edit，rustdsh
+/// 仅提示词引导不做硬门（见 backlog）。
+pub struct EditTool {
+    policy: Arc<dyn FsPolicy>,
+    workdir: dsh_tools::Workdir,
+}
+
+impl EditTool {
+    pub fn new(policy: Arc<dyn FsPolicy>, workdir: dsh_tools::Workdir) -> Self {
+        Self { policy, workdir }
+    }
+}
+
+/// 行尾归一化（上游 normalizeLineEndings：CRLF → LF）。
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+#[derive(Debug)]
+struct EditInput {
+    path: String,
+    old_string: String,
+    new_string: String,
+    replace_all: bool,
+}
+
+/// 上游 parseEditArgs 校验（file_path/path 容错为 rustdsh 侧扩展）。
+fn parse_edit_args(args: &serde_json::Value) -> Result<EditInput, String> {
+    let path = args
+        .get("file_path")
+        .or_else(|| args.get("path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if path.is_empty() {
+        return Err("file_path must be a non-empty string".into());
+    }
+    let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+    if old_string.is_empty() {
+        return Err("old_string must be a non-empty string".into());
+    }
+    let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    if old_string == new_string {
+        return Err("old_string and new_string must differ".into());
+    }
+    let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+    Ok(EditInput { path, old_string: old_string.into(), new_string: new_string.into(), replace_all })
+}
+
+/// 字面替换核心（上游 fsio.applyLiteralEdit）：归一化后计数，0 处报未
+/// 找到、多处且未 replace_all 报歧义；返回编辑后内容与替换次数。
+fn apply_literal_edit(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    display_path: &str,
+) -> Result<(String, usize), String> {
+    let old_norm = normalize_line_endings(old_string);
+    let new_norm = normalize_line_endings(new_string);
+    let replacements = content.matches(&old_norm).count();
+    if replacements == 0 {
+        return Err(format!("old_string was not found in \"{display_path}\""));
+    }
+    if !replace_all && replacements > 1 {
+        return Err(format!(
+            "old_string matched {replacements} times in \"{display_path}\"; provide a more specific old_string or set replace_all to true"
+        ));
+    }
+    let edited = if replace_all {
+        content.replace(&old_norm, &new_norm)
+    } else {
+        content.replacen(&old_norm, &new_norm, 1)
+    };
+    Ok((edited, replacements))
+}
+
+#[async_trait]
+impl Tool for EditTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "edit".into(),
+            description: "Edit an existing UTF-8 text file by replacing literal text.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "Path to edit, resolved by the filesystem backend. Provide `file_path` before `old_string` and `new_string` in the arguments." },
+                    "old_string": { "type": "string", "description": "Literal text to replace." },
+                    "new_string": { "type": "string", "description": "Literal replacement text. Use an empty string to delete the match." },
+                    "replace_all": { "type": "boolean", "description": "Replace all matches. Defaults to false; when false, old_string must appear exactly once." }
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        let parsed = match parse_edit_args(&input.arguments) {
+            Ok(v) => v,
+            Err(e) => return ToolExecutionResult::error(e),
+        };
+        let path = self.workdir.resolve(Path::new(&parsed.path));
+        if !self.policy.allow_write(&path) {
+            return ToolExecutionResult::error(self.policy.deny_reason());
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) => return ToolExecutionResult::error(format!("edit failed: {e}")),
+        };
+        // CRLF 文件按 LF 匹配与编辑，写回保留原行尾（上游 normalize/restore）
+        let crlf = raw.contains("\r\n");
+        let display = path.display().to_string();
+        let content = if crlf { normalize_line_endings(&raw) } else { raw.clone() };
+        let (edited, _replacements) =
+            match apply_literal_edit(&content, &parsed.old_string, &parsed.new_string, parsed.replace_all, &display) {
+                Ok(v) => v,
+                Err(e) => return ToolExecutionResult::error(e),
+            };
+        let out = if crlf { edited.replace('\n', "\r\n") } else { edited };
+        if let Err(e) = std::fs::write(&path, &out) {
+            return ToolExecutionResult::error(format!("edit failed: {e}"));
+        }
+        let text = if parsed.replace_all {
+            format!("The file {display} has been updated. All occurrences were successfully replaced.")
+        } else {
+            format!("The file {display} has been updated successfully.")
+        };
+        let presentation = serde_json::json!({
+            "card": "diff",
+            "diffs": [{
+                "path": display,
+                "oldText": content,
+                "newText": normalize_line_endings(&out),
+            }],
+        });
+        ToolExecutionResult {
+            presentation: Some(presentation),
+            ..ToolExecutionResult::text(text)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +765,100 @@ l3");
         // 缺 content
         let r = write.execute(&input(r#"{"file_path": "x.txt"}"#)).await;
         assert!(text_of(&r).contains("content is required"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_replaces_single_match_with_diff_presentation() {
+        let dir = std::env::temp_dir().join(format!("dsh-fs-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "alpha\nbeta\ngamma").unwrap();
+        let wd = dsh_tools::Workdir::new();
+        wd.set(dir.clone());
+        let edit = EditTool::new(Arc::new(AllowAllPolicy), wd);
+
+        let r = edit
+            .execute(&input(
+                r#"{"file_path": "a.txt", "old_string": "beta", "new_string": "BETA"}"#,
+            ))
+            .await;
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "alpha\nBETA\ngamma");
+        let text = text_of(&r);
+        assert!(text.contains("has been updated successfully"), "{text}");
+        let diff = r.presentation.expect("diff presentation");
+        assert_eq!(diff["card"], "diff");
+        assert_eq!(diff["diffs"][0]["oldText"], "alpha\nbeta\ngamma");
+        assert_eq!(diff["diffs"][0]["newText"], "alpha\nBETA\ngamma");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_error_paths_match_upstream_wording() {
+        let dir = std::env::temp_dir().join(format!("dsh-fs-edit-e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "x\nx\ny").unwrap();
+        let wd = dsh_tools::Workdir::new();
+        wd.set(dir.clone());
+        let edit = EditTool::new(Arc::new(AllowAllPolicy), wd);
+
+        // 未找到
+        let r = edit
+            .execute(&input(r#"{"file_path": "a.txt", "old_string": "zzz", "new_string": "q"}"#))
+            .await;
+        assert!(text_of(&r).contains("old_string was not found in"), "{}", text_of(&r));
+        // 多处且未 replace_all
+        let r = edit
+            .execute(&input(r#"{"file_path": "a.txt", "old_string": "x", "new_string": "q"}"#))
+            .await;
+        let text = text_of(&r);
+        assert!(
+            text.contains("old_string matched 2 times") && text.contains("replace_all to true"),
+            "{text}"
+        );
+        // replace_all=true：全部替换 + All occurrences 文案
+        let r = edit
+            .execute(&input(
+                r#"{"file_path": "a.txt", "old_string": "x", "new_string": "q", "replace_all": true}"#,
+            ))
+            .await;
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "q\nq\ny");
+        assert!(text_of(&r).contains("All occurrences were successfully replaced"));
+        // old == new / 空 old_string
+        let r = edit
+            .execute(&input(r#"{"file_path": "a.txt", "old_string": "q", "new_string": "q"}"#))
+            .await;
+        assert!(text_of(&r).contains("must differ"));
+        let r = edit
+            .execute(&input(r#"{"file_path": "a.txt", "old_string": "", "new_string": "q"}"#))
+            .await;
+        assert!(text_of(&r).contains("old_string must be a non-empty string"));
+        // path 容错
+        let r = edit
+            .execute(&input(r#"{"path": "a.txt", "old_string": "q", "new_string": "z", "replace_all": true}"#))
+            .await;
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "z\nz\ny");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_normalizes_crlf_matching_and_restores_line_endings() {
+        // CRLF 文件：old_string 用 LF 匹配；写回保留 CRLF
+        let dir = std::env::temp_dir().join(format!("dsh-fs-edit-crlf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("w.txt"), "a\r\nb\r\nc").unwrap();
+        let wd = dsh_tools::Workdir::new();
+        wd.set(dir.clone());
+        let edit = EditTool::new(Arc::new(AllowAllPolicy), wd);
+
+        let r = edit
+            .execute(&input(r#"{"file_path": "w.txt", "old_string": "a\nb", "new_string": "A\nB"}"#))
+            .await;
+        assert!(text_of(&r).contains("has been updated successfully"), "{}", text_of(&r));
+        let content = std::fs::read_to_string(dir.join("w.txt")).unwrap();
+        assert_eq!(content, "A\r\nB\r\nc", "CRLF must be preserved");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

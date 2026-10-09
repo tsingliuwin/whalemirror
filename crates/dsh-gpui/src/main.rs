@@ -6611,7 +6611,10 @@ fn main() {
     // 工具」名引用，缺注册时模型直呼名会吃 no tool "read"（miaocr 会话
     // 实测回归）；共享同一 FsTool（沙箱/workdir 同路）
     let _read = tools.register(Arc::new(dsh_fs::ReadTool::new(fs_tool.clone()))).unwrap();
-    let _write = tools.register(Arc::new(dsh_fs::WriteTool::new(fs_tool))).unwrap();
+    let _write = tools.register(Arc::new(dsh_fs::WriteTool::new(fs_tool.clone()))).unwrap();
+    // edit（上游 tool-fs/edit.ts 同名工具）：字面替换原语，沙箱/工作目录
+    // 与 fs 原面同路；diff presentation 供改动审阅卡
+    let _edit = tools.register(Arc::new(dsh_fs::EditTool::new(fs_sandbox.clone(), workdir.clone()))).unwrap();
     let _shell = tools.register(Arc::new(ShellTool::default().with_workdir(workdir.clone()))).unwrap();
     let _web = tools.register(Arc::new(WebTool::new())).unwrap();
     let _grep = tools.register(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone()))).unwrap();
@@ -6620,6 +6623,13 @@ fn main() {
     // 审阅流与 plan-mode 状态机留待后续（偏差固化 backlog #2）
     let _exit_plan = tools.register(Arc::new(dsh_tools::ExitPlanModeTool)).unwrap();
     let prompt = Arc::new(SystemPrompt::new());
+    // tool:edit section（上游 applyEditTool 同文）：read-before-edit 引导；
+    // 偏差：上游默认 fs-observation-policy 硬门未实装，仅提示词引导
+    let _edit_section = prompt.add_section(dsh_system_prompt::PromptSection {
+        name: "tool:edit".into(),
+        order: prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolEdit),
+        text: "Read a file before editing it (the default fs-observation-policy requires it), unless you just created or edited it in this session.".into(),
+    });
     // web_fetch section（alpha.4 sdk-default-web-fetch：fetch 工具进入默认
     // 提示词；与 web_search 的「Follow up with web_fetch」衔接）
     let _web_fetch_section = prompt.add_section(dsh_system_prompt::PromptSection {

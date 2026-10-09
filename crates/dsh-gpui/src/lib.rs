@@ -579,9 +579,10 @@ pub fn process_activity(name: &str, arguments: &str) -> ProcessActivity {
             Some("write") => ProcessActivity::Write,
             _ => ProcessActivity::Tools,
         },
-        // 上游名形别名工具（tool-fs read/write.ts）：直呼名的调用归类同面
+        // 上游名形别名工具（tool-fs read/write/edit.ts）：直呼名的调用归类同面
         "read" => ProcessActivity::Read,
         "write" => ProcessActivity::Write,
+        "edit" => ProcessActivity::Edit,
         "grep" | "glob" => ProcessActivity::Search,
         "shell" | "bash" | "pwsh" => ProcessActivity::Commands,
         "web_search" => ProcessActivity::WebSearch,

@@ -83,8 +83,35 @@ impl DeepSeekAdapter {
         if let Some(system) = &options.system {
             messages.push(json!({ "role": "system", "content": system }));
         }
+        // tool-result 内嵌图片（read_image 等结果）：OpenAI wire 的 tool 角色
+        // 不携带 image_url part——抽出来聚成紧随工具消息组的合成 user 消息
+        //（上游 wire 为 anthropic-messages 形，tool 结果本身走 user 角色，
+        // 图片天然可达；此为 OpenAI 形下的等价承载）
+        let mut pending_image_parts: Vec<Value> = Vec::new();
         for m in &options.messages {
+            let nested_image = matches!(m.role, Role::User)
+                && matches!(
+                    m.content.as_slice(),
+                    [ContentBlock::ToolResult { content, .. }]
+                        if content.iter().any(|b| matches!(b, ContentBlock::Image { .. }))
+                );
+            if !nested_image && !pending_image_parts.is_empty() {
+                messages.push(json!({ "role": "user", "content": pending_image_parts }));
+                pending_image_parts = Vec::new();
+            }
+            if nested_image
+                && let [ContentBlock::ToolResult { content, .. }] = m.content.as_slice()
+            {
+                for block in content {
+                    if let ContentBlock::Image { attachment, .. } = block {
+                        self.push_image_part(&mut pending_image_parts, attachment);
+                    }
+                }
+            }
             messages.push(self.map_message(m));
+        }
+        if !pending_image_parts.is_empty() {
+            messages.push(json!({ "role": "user", "content": pending_image_parts }));
         }
 
         let mut body = json!({
@@ -123,6 +150,36 @@ impl DeepSeekAdapter {
     }
 
     /// Map one provider-neutral [`Message`] onto DeepSeek's wire message.
+    /// 一个图片块的 wire 投影：前置文本句柄 part + data URL（字节反查
+    /// 失败降级占位文本）。user 消息顶层与 tool-result 嵌套图片共用。
+    fn push_image_part(&self, parts: &mut Vec<Value>, attachment: &dsh_llm::ImageAttachmentRef) {
+        parts.push(json!({
+            "type": "text",
+            "text": format!(
+                "{}Image {}; request preview {}x{}px. It may be resized or re-encoded; source dimensions, format, and byte size may differ.",
+                if parts.is_empty() { "" } else { "\n" },
+                attachment.attachment_id,
+                attachment.width,
+                attachment.height,
+            ),
+        }));
+        let bytes = self.image_fetcher.as_ref().and_then(|f| f(attachment));
+        match bytes {
+            Some(data) => {
+                use base64::Engine as _;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{};base64,{}", attachment.media_type, b64) },
+                }))
+            }
+            None => parts.push(json!({
+                "type": "text",
+                "text": format!("[image {} unavailable]", attachment.attachment_id),
+            })),
+        }
+    }
+
     fn map_message(&self, m: &Message) -> Value {
         match m.role {
             Role::System => json!({ "role": "system", "content": Self::blocks_to_text(&m.content) }),
@@ -138,40 +195,13 @@ impl DeepSeekAdapter {
                     // parts 数组，每个 Image 前有文本句柄 part，图转 data URL；
                     // 字节反查失败降级占位文本。Files API file 通道未实现（偏差）。
                     let mut parts: Vec<Value> = Vec::new();
-                    let mut n = 0usize;
                     for block in &m.content {
                         match block {
                             ContentBlock::Text { text: t } if !t.is_empty() => {
                                 parts.push(json!({ "type": "text", "text": t }))
                             }
                             ContentBlock::Image { attachment, .. } => {
-                                n += 1;
-                                parts.push(json!({
-                                    "type": "text",
-                                    "text": format!(
-                                        "{}Image {}; request preview {}x{}px. It may be resized or re-encoded; source dimensions, format, and byte size may differ.",
-                                        if parts.is_empty() { "" } else { "
-" },
-                                        attachment.attachment_id,
-                                        attachment.width,
-                                        attachment.height,
-                                    ),
-                                }));
-                                let bytes = self.image_fetcher.as_ref().and_then(|f| f(attachment));
-                                match bytes {
-                                    Some(data) => {
-                                        use base64::Engine as _;
-                                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                                        parts.push(json!({
-                                            "type": "image_url",
-                                            "image_url": { "url": format!("data:{};base64,{}", attachment.media_type, b64) },
-                                        }))
-                                    }
-                                    None => parts.push(json!({
-                                        "type": "text",
-                                        "text": format!("[image {} unavailable]", attachment.attachment_id),
-                                    })),
-                                }
+                                self.push_image_part(&mut parts, attachment);
                             }
                             _ => {}
                         }

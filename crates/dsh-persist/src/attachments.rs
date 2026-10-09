@@ -293,9 +293,11 @@ mod tests {
     }
 }
 
-/// 图片像素尺寸（PNG IHDR / JPEG SOF 扫描）；不支持或损坏返回 None。
-/// 附件捕获面（composer 图片路径）用——上游图片规范化流水线的最小等价
-/// （只测尺寸，不做 resize/重编码）。
+/// 图片像素尺寸（PNG IHDR / JPEG SOF 扫描 / GIF 逻辑屏 / WEBP VP8X
+/// 画布）；不支持或损坏返回 None。附件捕获面（composer 图片路径）与
+/// read_image 工具用——上游图片规范化流水线的最小等价（只测尺寸，
+/// 不做 resize/重编码）。WEBP 仅扩展格式 VP8X 头（基础 VP8/VP8L 无
+/// 画布块，回落 None 由调用方报不支持）。
 pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() >= 24
         && bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
@@ -325,6 +327,25 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             }
             i += 2 + seg;
         }
+    }
+    // GIF：头 6 字节（GIF87a/GIF89a）+ 逻辑屏描述符（宽高各 LE u16）
+    if bytes.len() >= 10
+        && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"))
+    {
+        let w = u16::from_le_bytes([bytes[6], bytes[7]]) as u32;
+        let h = u16::from_le_bytes([bytes[8], bytes[9]]) as u32;
+        return Some((w, h));
+    }
+    // WEBP：RIFF 头 + "WEBP"，首块为 VP8X 时画布尺寸为 3 字节 LE 的
+    // width-1 / height-1（chunk 数据内偏移 8）
+    if bytes.len() >= 30
+        && &bytes[0..4] == b"RIFF"
+        && &bytes[8..12] == b"WEBP"
+        && &bytes[12..16] == b"VP8X"
+    {
+        let w = 1 + u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]);
+        let h = 1 + u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]);
+        return Some((w, h));
     }
     None
 }
@@ -361,5 +382,35 @@ mod dimension_tests {
         assert_eq!(image_dimensions(b"plain text"), None);
         assert_eq!(image_dimensions(&[]), None);
         assert_eq!(image_dimensions(&[0x89, b'P', b'N', b'G']), None);
+    }
+
+    #[test]
+    fn gif_and_webp_dimensions_read() {
+        // GIF 逻辑屏（宽高 LE u16，头 6 字节后）
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&320u16.to_le_bytes());
+        gif.extend_from_slice(&240u16.to_le_bytes());
+        gif.push(0);
+        assert_eq!(image_dimensions(&gif), Some((320, 240)));
+        // WEBP VP8X 画布（width-1/height-1 各 3 字节 LE，RIFF 偏移 24/27）
+        let mut webp: Vec<u8> = Vec::new();
+        webp.extend_from_slice(b"RIFF");
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBPVP8X");
+        webp.extend_from_slice(&[10, 0, 0, 0]); // chunk size
+        webp.push(0); // flags
+        webp.extend_from_slice(&[0, 0, 0]); // reserved
+        let put24 = |v: u32| -> Vec<u8> {
+            let x = v - 1;
+            vec![(x & 0xFF) as u8, ((x >> 8) & 0xFF) as u8, ((x >> 16) & 0xFF) as u8]
+        };
+        webp.extend_from_slice(&put24(800));
+        webp.extend_from_slice(&put24(600));
+        assert_eq!(image_dimensions(&webp), Some((800, 600)));
+        // 基础 VP8（无 VP8X 块）：无画布可读 → None（调用方报不支持）
+        let mut vp8: Vec<u8> = b"RIFF".to_vec();
+        vp8.extend_from_slice(&[0, 0, 0, 0]);
+        vp8.extend_from_slice(b"WEBPVP8 ");
+        assert_eq!(image_dimensions(&vp8), None);
     }
 }

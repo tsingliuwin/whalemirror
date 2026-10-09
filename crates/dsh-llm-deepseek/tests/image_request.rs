@@ -153,3 +153,61 @@ async fn plain_text_keeps_string_content() {
     assert_eq!(body["messages"][0]["content"], "hi");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[tokio::test]
+async fn tool_result_nested_image_becomes_followup_user_message() {
+    // read_image 等工具结果的嵌套图片：tool 消息保持文本结果（OpenAI wire
+    // 的 tool 角色不带 image_url part），图片拆为紧随的合成 user 消息
+    //（handle text + image_url parts）；后续消息仍按原序跟随
+    let dir = std::env::temp_dir().join(format!("dsh-img-tool-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = spawn_mock(&dir);
+
+    let png = vec![0x89, b'P', b'N', b'G'];
+    let adapter = DeepSeekAdapter::with_base_url("test-key", base)
+        .with_image_fetcher(std::sync::Arc::new(move |_| Some(png.clone())));
+
+    let tool_result = Message::new(
+        dsh_llm::Role::User,
+        vec![ContentBlock::tool_result(
+            dsh_llm::CallId("c1".into()),
+            vec![
+                ContentBlock::text("read the screenshot"),
+                ContentBlock::Image {
+                    offloaded: false,
+                    attachment: image_ref(),
+                },
+            ],
+            false,
+        )],
+        dsh_llm::MessageSource::Tool {
+            call_id: dsh_llm::CallId("c1".into()),
+        },
+    );
+    let followup = Message::user_text("what do you see?");
+    let options = GenerateOptions::new("deepseek", "deepseek-flash", vec![tool_result, followup]);
+    let _ = adapter.stream(options).await;
+
+    let body = parse_request(&dir);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3, "tool text + synthetic image user + followup");
+    // ① tool 消息：纯文本结果
+    assert_eq!(messages[0]["role"], "tool");
+    assert_eq!(messages[0]["tool_call_id"], "c1");
+    assert_eq!(messages[0]["content"], "read the screenshot");
+    // ② 合成 user 图片消息（紧随工具消息组之后）
+    assert_eq!(messages[1]["role"], "user");
+    let parts = messages[1]["content"].as_array().unwrap();
+    assert_eq!(parts.len(), 2, "handle + image_url");
+    let handle = parts[0]["text"].as_str().unwrap();
+    assert!(handle.contains("request preview 32x32px"), "{handle}");
+    assert_eq!(parts[1]["type"], "image_url");
+    assert!(parts[1]["image_url"]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/png;base64,"));
+    // ③ 后续消息原序跟随
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"], "what do you see?");
+    std::fs::remove_dir_all(&dir).ok();
+}

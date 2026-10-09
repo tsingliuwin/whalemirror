@@ -122,7 +122,9 @@ fn render_chat_attachment(
     }
 }
 
-/// 图片附件对象路径：`attachments/v1/objects/<hex[0..2]>/<hex>`
+/// 图片附件对象路径：`attachments/v1/file-objects/<hex[0..2]>/<hex>`（与
+/// AttachmentStore::object_path 同布局——曾误读 objects/（不存在），
+/// tile 静默失效）
 /// （web attachment-local 布局；attachments_root 不可用或 id 非法 → None）
 pub(crate) fn attachment_image_object_path(
     root: Option<&std::path::Path>,
@@ -133,7 +135,7 @@ pub(crate) fn attachment_image_object_path(
     if hex.len() < 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    Some(root.join("objects").join(&hex[..2]).join(hex))
+    Some(root.join("file-objects").join(&hex[..2]).join(hex))
 }
 
 /// 非 user source 消息的 context 行投影（上游非 user source 的 user/message
@@ -862,7 +864,7 @@ impl ChatView {
                         })
                         .collect();
                     // v2 混合附件：文件卡 / 图片 tile（图片字节按
-                    // sha256 反查附件存储 objects/<2hex>/<hex>）
+                    // sha256 反查附件存储 file-objects/<2hex>/<hex>）
                     let mut attachments: Vec<MsgBlock> = Vec::new();
                     for b in &m.content {
                         match b {

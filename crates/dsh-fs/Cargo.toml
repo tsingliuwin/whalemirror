@@ -8,6 +8,7 @@ description.workspace = true
 [dependencies]
 dsh-tools = { path = "../dsh-tools" }
 dsh-llm = { path = "../dsh-llm" }
+dsh-persist = { path = "../dsh-persist" }
 serde_json.workspace = true
 async-trait.workspace = true
 [dev-dependencies]

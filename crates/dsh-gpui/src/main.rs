@@ -6792,6 +6792,15 @@ fn main() {
     // edit（上游 tool-fs/edit.ts 同名工具）：字面替换原语，沙箱/工作目录
     // 与 fs 原面同路；diff presentation 供改动审阅卡
     let _edit = tools.register(Arc::new(dsh_fs::EditTool::new(fs_sandbox.clone(), workdir.clone()))).unwrap();
+    // read_image（上游 tool-fs/read-image.ts 同名）：模型看图（vision）；
+    // 附件存储与 composer 同根（内容寻址共享）
+    let _read_image = tools.register(Arc::new(dsh_fs::ReadImageTool::new(
+        fs_sandbox.clone(),
+        workdir.clone(),
+        Some(Arc::new(dsh_persist::AttachmentStore::new(
+            dsh_persist::attachments_root_from_sessions_root(&sessions_dir()),
+        ))),
+    ))).unwrap();
     let _shell = tools.register(Arc::new(ShellTool::default().with_workdir(workdir.clone()))).unwrap();
     let _web = tools.register(Arc::new(WebTool::new())).unwrap();
     let _grep = tools.register(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone()))).unwrap();

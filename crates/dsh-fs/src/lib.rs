@@ -594,6 +594,170 @@ impl Tool for EditTool {
     }
 }
 
+/// 上游 `read_image` 工具（tool-fs/read-image.ts）：读 PNG/JPEG/WebP/GIF
+/// 文件并把图片本身交还模型——扩展名声明 + 魔数嗅探定媒体类型，字节
+/// 入附件存储（内容寻址，先持久再返回），结果为 [envelope 文本, image
+/// 块]（图片随 tool/result 落盘；请求序列化把嵌套图片拆为紧随的合成
+/// user 消息——OpenAI wire 的 tool 角色不带 image_url part）。
+/// 偏差：无 route 能力门（上游对非 vision 路由提前拒）；无字节/像素
+/// 上限与规范化（上游 attachment service 面）；WEBP 仅 VP8X 画布可测。
+pub struct ReadImageTool {
+    policy: Arc<dyn FsPolicy>,
+    workdir: dsh_tools::Workdir,
+    store: Option<Arc<dsh_persist::AttachmentStore>>,
+}
+
+impl ReadImageTool {
+    pub fn new(
+        policy: Arc<dyn FsPolicy>,
+        workdir: dsh_tools::Workdir,
+        store: Option<Arc<dsh_persist::AttachmentStore>>,
+    ) -> Self {
+        Self { policy, workdir, store }
+    }
+}
+
+/// 上游 IMAGE_EXTENSIONS：扩展名 → 声明媒体类型。
+fn image_media_type_for_path(path: &str) -> Option<&'static str> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())?;
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// 魔数嗅探（上游 sniffImageMediaType）：PNG/JPEG/GIF/WEBP 签名。
+fn sniff_image_media_type(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+#[async_trait]
+impl Tool for ReadImageTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "read_image".into(),
+            description: "Read a PNG/JPEG/WebP/GIF file and return the image itself. \
+                Large images are downscaled automatically; do not install image libraries \
+                or create thumbnails to inspect an image."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "Path to the image file, resolved by the filesystem backend." }
+                },
+                "required": ["file_path"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        let raw_path = input
+            .arguments
+            .get("file_path")
+            .or_else(|| input.arguments.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if raw_path.is_empty() {
+            return ToolExecutionResult::error("file_path must be a non-empty string");
+        }
+        let declared = image_media_type_for_path(raw_path);
+        let has_extension = std::path::Path::new(raw_path).extension().is_some();
+        if declared.is_none() && has_extension {
+            let ext = std::path::Path::new(raw_path)
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+            return ToolExecutionResult::error(format!(
+                "cannot read \"{raw_path}\": the .{ext} extension does not declare a supported \
+                 image format; read_image accepts PNG/JPEG/WebP/GIF files, including \
+                 extension-less files in those formats"
+            ));
+        }
+        let Some(store) = self.store.clone() else {
+            return ToolExecutionResult::error(format!(
+                "cannot read \"{raw_path}\" as an image: no attachment service is mounted"
+            ));
+        };
+        let path = self.workdir.resolve(Path::new(raw_path));
+        if !self.policy.allow_read(&path) {
+            return ToolExecutionResult::error(self.policy.deny_reason());
+        }
+        let data = match std::fs::read(&path) {
+            Ok(v) => v,
+            Err(e) => return ToolExecutionResult::error(format!("read_image failed: {e}")),
+        };
+        let display = path.display().to_string();
+        let media_type = match declared.or_else(|| sniff_image_media_type(&data)) {
+            Some(t) => t,
+            None => {
+                return ToolExecutionResult::error(format!(
+                    "cannot read \"{display}\": the file content is not a supported image \
+                     format; read_image accepts PNG/JPEG/WebP/GIF files"
+                ))
+            }
+        };
+        let Some((width, height)) = dsh_persist::image_dimensions(&data) else {
+            return ToolExecutionResult::error(format!(
+                "cannot read \"{display}\": the {media_type} image dimensions could not be \
+                 determined (basic VP8/VP8L WebP is unsupported); convert it to a standard \
+                 WebP or a PNG/JPEG and retry"
+            ));
+        };
+        let name = std::path::Path::new(raw_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| raw_path.to_string());
+        // 先持久再返回：image 块引用的对象在 tool/result 落盘前必须已提交
+        let reference = match store.save_file_verbatim(&data, Some(&name)) {
+            Ok(r) => r,
+            Err(e) => return ToolExecutionResult::error(format!("read_image failed: {e}")),
+        };
+        let attachment = dsh_llm::ImageAttachmentRef {
+            attachment_id: reference.attachment_id,
+            name: Some(reference.name),
+            media_type: media_type.to_string(),
+            bytes: reference.bytes,
+            width,
+            height,
+            original_dimensions: None,
+        };
+        // 上游 imageReadContent 双块：模型可见 envelope + 图片本体
+        let envelope = format!(
+            "<path>{display}</path>\n<type>image</type>\n<content>\n{media_type} image, \
+             {width}x{height} px, {bytes} bytes\n</content>",
+            bytes = attachment.bytes,
+        );
+        let result = ToolExecutionResult {
+            content: vec![
+                ContentBlock::text(envelope),
+                ContentBlock::Image { attachment, offloaded: false },
+            ],
+            is_error: false,
+            concludes_turn: false,
+            presentation: Some(json!({ "path": display })),
+        };
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,5 +1075,129 @@ l3");
         assert_eq!(meta["diffs"][0]["oldText"], "hi");
         assert_eq!(meta["diffs"][0]["newText"], "bye");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod read_image_tests {
+    use super::*;
+    use dsh_llm::ContentBlock;
+
+    fn input(args: &str) -> ToolExecutionInput {
+        ToolExecutionInput::with_raw_arguments(
+            dsh_llm::CallId("c1".to_string()),
+            "read_image".to_string(),
+            args.to_string(),
+        )
+    }
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v
+    }
+
+    fn tool(dir: &std::path::Path) -> ReadImageTool {
+        let wd = dsh_tools::Workdir::new();
+        wd.set(dir.to_path_buf());
+        let store = dsh_persist::AttachmentStore::new(dir.join("attachments"));
+        ReadImageTool::new(Arc::new(AllowAllPolicy), wd, Some(Arc::new(store)))
+    }
+
+    fn text_of(r: &ToolExecutionResult) -> String {
+        r.content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn read_image_returns_envelope_and_image_block_persisted() {
+        let dir = std::env::temp_dir().join(format!("dsh-fs-ri-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shot.png"), png(320, 200)).unwrap();
+        let t = tool(&dir);
+
+        let r = t.execute(&input(r#"{"file_path": "shot.png"}"#)).await;
+        assert!(!r.is_error);
+        // 双块：envelope 文本 + 图片本体
+        assert_eq!(r.content.len(), 2);
+        let text = text_of(&r);
+        assert!(text.contains("<path>"), "{text}");
+        assert!(text.contains("image/png image, 320x200 px"), "{text}");
+        assert!(text.contains(&format!("{} bytes", png(320, 200).len())), "{text}");
+        match &r.content[1] {
+            ContentBlock::Image { attachment, offloaded: false } => {
+                assert_eq!(attachment.width, 320);
+                assert_eq!(attachment.height, 200);
+                assert_eq!(attachment.media_type, "image/png");
+                assert_eq!(attachment.name.as_deref(), Some("shot.png"));
+                // 字节已持久（内容寻址对象真实存在）
+                let hex = attachment.attachment_id.trim_start_matches("sha256:");
+                let obj = dir.join("attachments").join("file-objects").join(&hex[..2]).join(hex);
+                assert!(obj.exists(), "object must be committed: {}", obj.display());
+                assert_eq!(std::fs::read(&obj).unwrap(), png(320, 200));
+            }
+            other => panic!("expected image block, got {other:?}"),
+        }
+        // presentation：{path}（上游 presentationMeta）
+        assert_eq!(r.presentation.as_ref().unwrap()["path"], dir.join("shot.png").display().to_string());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_image_error_paths_match_upstream_wording() {
+        let dir = std::env::temp_dir().join(format!("dsh-fs-ri-e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.png"), png(1, 1)).unwrap();
+        std::fs::write(dir.join("note.txt"), b"plain text").unwrap();
+        let t = tool(&dir);
+
+        // 非图片扩展名
+        let r = t.execute(&input(r#"{"file_path": "note.txt"}"#)).await;
+        let text = text_of(&r);
+        assert!(
+            text.contains("the .txt extension does not declare a supported image format"),
+            "{text}"
+        );
+        // 扩展名无、内容非图片
+        std::fs::write(dir.join("noext"), b"not an image").unwrap();
+        let r = t.execute(&input(r#"{"file_path": "noext"}"#)).await;
+        assert!(text_of(&r).contains("the file content is not a supported image format"), "{}", text_of(&r));
+        // 空 file_path
+        let r = t.execute(&input("{}")).await;
+        assert!(text_of(&r).contains("file_path must be a non-empty string"));
+        // 无附件存储
+        let wd = dsh_tools::Workdir::new();
+        wd.set(dir.to_path_buf());
+        let bare = ReadImageTool::new(Arc::new(AllowAllPolicy), wd, None);
+        let r = bare.execute(&input(r#"{"file_path": "a.png"}"#)).await;
+        assert!(text_of(&r).contains("no attachment service is mounted"));
+        // path 容错
+        let r = t.execute(&input(r#"{"path": "a.png"}"#)).await;
+        assert!(!r.is_error);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_image_sniffs_extensionless_png() {
+        let dir = std::env::temp_dir().join(format!("dsh-fs-ri-s-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("blob"), png(4, 4)).unwrap();
+        let t = tool(&dir);
+        let r = t.execute(&input(r#"{"file_path": "blob"}"#)).await;
+        assert!(!r.is_error, "{}", text_of(&r));
+        match &r.content[1] {
+            ContentBlock::Image { attachment, .. } => assert_eq!(attachment.media_type, "image/png"),
+            other => panic!("expected image block, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

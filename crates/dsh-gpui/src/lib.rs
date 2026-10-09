@@ -583,6 +583,7 @@ pub fn process_activity(name: &str, arguments: &str) -> ProcessActivity {
         "read" => ProcessActivity::Read,
         "write" => ProcessActivity::Write,
         "edit" => ProcessActivity::Edit,
+        "read_image" => ProcessActivity::ReadImage,
         "grep" | "glob" => ProcessActivity::Search,
         "shell" | "bash" | "pwsh" => ProcessActivity::Commands,
         "web_search" => ProcessActivity::WebSearch,

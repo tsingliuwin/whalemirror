@@ -1547,6 +1547,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dsh-llm",
+ "dsh-persist",
  "dsh-tools",
  "serde_json",
  "tokio",

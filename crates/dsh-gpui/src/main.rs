@@ -2342,11 +2342,17 @@ impl AppView {
             wrap: false,
             failure: None,
         };
-        match self.preview_root() {
-            Some(root) => Self::load_preview_page(&root, &mut preview),
-            None => {
-                preview.failure =
-                    Some(dsh_gpui::PreviewErrorKind::Unavailable("会话没有工作区目录。".into()));
+        if dsh_gpui::is_image_preview(&preview.path) {
+            // 图片预览（上游 documentpreview image 体）：体直接渲染位图，
+            // 不走文本分页
+            preview.eof = true;
+        } else {
+            match self.preview_root() {
+                Some(root) => Self::load_preview_page(&root, &mut preview),
+                None => {
+                    preview.failure =
+                        Some(dsh_gpui::PreviewErrorKind::Unavailable("会话没有工作区目录。".into()));
+                }
             }
         }
         self.dock.files.push(preview);
@@ -2366,6 +2372,10 @@ impl AppView {
 
     /// 读一页接进预览（根 = 视图会话的工作区 cwd，与文件树同源）。
     fn load_preview_page(root: &str, preview: &mut FilePreview) {
+        if dsh_gpui::is_image_preview(&preview.path) {
+            preview.eof = true;
+            return;
+        }
         match dsh_gpui::read_text_page(root, &preview.path, preview.loaded_through) {
             Ok(page) => {
                 preview.lines.extend(page.text.split('\n').map(str::to_string));
@@ -6458,6 +6468,27 @@ impl AppView {
                             .text_color(theme::t().text_2),
                     ),
             );
+        // 图片预览体（上游 documentpreview image：居中 contain 位图）
+        if dsh_gpui::is_image_preview(&f.path) {
+            let img_path = std::path::PathBuf::from(&f.path);
+            return header.child(
+                div()
+                    .id(SharedString::from(format!("dock-img-{fi}")))
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .p(px(12.0))
+                    .child(
+                        gpui::img(img_path)
+                            .max_w_full()
+                            .max_h_full()
+                            .object_fit(gpui::ObjectFit::Contain),
+                    ),
+            );
+        }
         let mut rows: Vec<AnyElement> = Vec::new();
         if f.lines.is_empty() {
             rows.push(

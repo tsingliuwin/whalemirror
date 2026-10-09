@@ -283,6 +283,19 @@ pub struct DirLevel {
     pub truncated: bool,
 }
 
+/// 图片预览判定（#7 documentpreview image 格式切片）：按扩展名判定
+/// 预览面板走位图渲染（居中 contain）而非文本分页——与聊天附件 tile
+/// 的 FileKind::Image 分类同一张扩展名表。
+pub fn is_image_preview(path: &str) -> bool {
+    let lower = path.rsplit(['/', '\\']).next().unwrap_or(path).to_ascii_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    matches!(
+        ext,
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "avif" | "bmp" | "ico" | "tif" | "tiff"
+            | "heic" | "heif"
+    )
+}
+
 /// 目录层签名（#9 fs watch：检测外部变更）——名字序 + 每项 kind。
 /// 纯函数对比签名即可判层是否变更（轮询泵每 5s 对展开层做一次）。
 pub fn dir_level_signature(level: &DirLevel) -> Vec<(String, u8)> {
@@ -1169,5 +1182,23 @@ mod dir_watch_tests {
         assert!(any_level_changed(&loaded, &removed), "deleted entry = change");
         // 载入层消失（目录被删）也算
         assert!(any_level_changed(&loaded, &[]));
+    }
+}
+
+#[cfg(test)]
+mod image_preview_tests {
+    use super::*;
+
+    #[test]
+    fn image_extensions_route_to_bitmap_preview() {
+        assert!(is_image_preview("E:/ws/shot.png"));
+        assert!(is_image_preview("E:/ws/photo.JPG"));
+        assert!(is_image_preview("logo.svg"));
+        assert!(is_image_preview("anim.webp"));
+        assert!(is_image_preview("icon.ico"));
+        // 非图片走文本分页
+        assert!(!is_image_preview("E:/ws/main.rs"));
+        assert!(!is_image_preview("E:/ws/Cargo.toml"));
+        assert!(!is_image_preview("noext"));
     }
 }

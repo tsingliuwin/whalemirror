@@ -1828,6 +1828,11 @@ impl AppView {
             viewport: 1280.0,
             selected_tool: None,
         };
+        // 启动即同步当前工作区（初始会话的归属；无归属/新装保持
+        // 「选择工作区」）——与切换/新建会话的同步规则一致
+        view.current_workspace = view
+            .workspace_of_session(&view.agent.session().lock().unwrap().id)
+            .map(|w| w.id.clone());
         // 历史回放 + 列表初始同步（ChatView 内部完成）
         view.chat.update(cx, |c, cx| {
             c.rebuild_from_session();
@@ -1861,8 +1866,7 @@ impl AppView {
         }
     }
 
-    /// 会话属于哪个工作区（预留：后续会话移动用）。
-    #[allow(dead_code)]
+    /// 会话属于哪个工作区（切换/新建时同步 current_workspace 用）。
     fn workspace_of_session(&self, id: &SessionId) -> Option<&WorkspaceInfo> {
         self.workspaces
             .iter()
@@ -2741,6 +2745,9 @@ impl AppView {
             self.view_only_switch(id, cx);
             return;
         }
+        // 会话切换同步当前工作区：hero chip/锁定判定/侧栏高亮都读它——
+        // 侧栏选中带工作区的会话后应显示归属而非「选择工作区」
+        self.current_workspace = self.workspace_of_session(&id).map(|w| w.id.clone());
         let cwd_hint = self
             .sessions
             .iter()
@@ -2824,6 +2831,9 @@ impl AppView {
             return;
         };
         let ws = Some(ws_id.clone());
+        // 新会话落定即成为当前工作区（chip 显示归属、composer 解锁——
+        // 原停在「选择工作区」锁定态，需重选工作区才能输入）
+        self.current_workspace = ws.clone();
         // web connectWorkspace 语义：目标工作区已有空白会话则复用之，
         // 绝不每次点击都新建（否则空会话灌满列表）
         if let Some(blank) = self.blank_session_in(&cwd) {
@@ -2893,6 +2903,8 @@ impl AppView {
     /// 零工作区的纯草稿（web sessions.clear() 同语义）：内存会话、
     /// 不落盘、不进列表；工作目录 = 进程 cwd（工具仍有执行基准）。
     fn enter_blank_draft(&mut self, cx: &mut Context<Self>) {
+        // 纯草稿不属任何工作区：清掉可能残留的显式选择，chip 回「选择工作区」
+        self.current_workspace = None;
         self.agent.set_session(Session::new(self.alloc_session_id()));
         self.selected_tool = None;
         self.selected_message = None;

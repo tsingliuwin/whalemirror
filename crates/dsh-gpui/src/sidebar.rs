@@ -33,7 +33,7 @@ pub(crate) struct SidebarView {
     /// 当前列表高亮的会话 id（= 视图会话：peek 时指向被查看的会话）
     current_id: dsh_llm::SessionId,
     /// 运行中会话 id（agent 会话且 agent_busy；运行态状态点）
-    running_id: Option<dsh_llm::SessionId>,
+    running_ids: std::collections::HashSet<dsh_llm::SessionId>,
     current_workspace: Option<String>,
     /// 布局镜像（AppView::sidebar_collapsed / sidebar_width）
     layout_collapsed: bool,
@@ -83,7 +83,7 @@ impl SidebarView {
             workspaces: Vec::new(),
             archived: Default::default(),
             current_id: dsh_llm::SessionId::new(String::new()),
-            running_id: None,
+            running_ids: Default::default(),
             current_workspace: None,
             layout_collapsed: false,
             layout_width: layout::SIDEBAR_DEFAULT,
@@ -109,7 +109,7 @@ impl SidebarView {
             loop {
                 Timer::after(Duration::from_millis(125)).await;
                 let Some(view) = this.upgrade() else { return };
-                let Ok(running) = view.update(&mut cx, |v, _| v.running_id.is_some()) else {
+                let Ok(running) = view.update(&mut cx, |v, _| !v.running_ids.is_empty()) else {
                     return;
                 };
                 if running && view.update(&mut cx, |_, cx| cx.notify()).is_err() {
@@ -129,7 +129,7 @@ impl SidebarView {
         workspaces: Vec<WorkspaceInfo>,
         archived: HashSet<String>,
         current_id: dsh_llm::SessionId,
-        running_id: Option<dsh_llm::SessionId>,
+        running_ids: Vec<dsh_llm::SessionId>,
         current_workspace: Option<String>,
         layout_collapsed: bool,
         layout_width: f32,
@@ -138,7 +138,7 @@ impl SidebarView {
         self.workspaces = workspaces;
         self.archived = archived;
         self.current_id = current_id;
-        self.running_id = running_id;
+        self.running_ids = running_ids.into_iter().collect();
         self.current_workspace = current_workspace;
         self.layout_collapsed = layout_collapsed;
         self.layout_width = layout_width;
@@ -258,7 +258,7 @@ impl Render for SidebarView {
                     let active = meta.id == current_id;
                     all_rows.push(anchored_row(
                         key,
-                        session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_id.as_ref().is_some_and(|r| r == &meta.id), move |_, _, cx| {
+                        session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_ids.contains(&meta.id), move |_, _, cx| {
                             let id = id.clone();
                             t_sw.update(cx, |v, cx| { v.switch_session(id, cx); });
                         }, move |click, _, cx| {
@@ -443,7 +443,7 @@ impl Render for SidebarView {
                                 let slot = row_bounds.clone();
                                 all_rows.push(anchored_row(
                                     key,
-                                    session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_id.as_ref().is_some_and(|r| r == &meta.id), move |_, _, cx| {
+                                    session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_ids.contains(&meta.id), move |_, _, cx| {
                                         let id = id.clone();
                                         t_sw.update(cx, |v, cx| { v.switch_session(id, cx); });
                                     }, move |click, _, cx| {
@@ -488,7 +488,7 @@ impl Render for SidebarView {
                     let slot = row_bounds.clone();
                     all_rows.push(anchored_row(
                         key,
-                        session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_id.as_ref().is_some_and(|r| r == &meta.id), move |_, _, cx| {
+                        session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_ids.contains(&meta.id), move |_, _, cx| {
                             let id = id.clone();
                             t_sw.update(cx, |v, cx| { v.switch_session(id, cx); });
                         }, move |click, _, cx| {

@@ -283,6 +283,47 @@ pub struct DirLevel {
     pub truncated: bool,
 }
 
+/// 多会话运行路由（#5 真并发数据面）：运行集合 + 视图会话 → 事件
+/// 按属主路由（属主=视图会话才进视图；其余仅落盘与侧栏状态）。
+/// ViewSplit 的单 agent 版语义由此泛化。
+#[derive(Clone, Debug, Default)]
+pub struct MultiSessionGate {
+    running: std::collections::HashSet<String>,
+    viewed: String,
+}
+
+impl MultiSessionGate {
+    /// 视图切到某会话（空 = 无视图会话，仅守卫期）。
+    pub fn view(&mut self, id: impl Into<String>) {
+        self.viewed = id.into();
+    }
+    /// 当前视图会话。
+    pub fn viewed(&self) -> &str {
+        &self.viewed
+    }
+    /// 某会话开跑（TurnStarted）。
+    pub fn mark_running(&mut self, id: impl Into<String>) {
+        self.running.insert(id.into());
+    }
+    /// 某会话停（TurnEnded/Error）。返回全局是否仍无运行中会话。
+    pub fn mark_idle(&mut self, id: &str) -> bool {
+        self.running.remove(id);
+        self.running.is_empty()
+    }
+    /// 事件属主是否该进视图（属主=视图会话）。
+    pub fn routes_to_view(&self, ev_owner: &str) -> bool {
+        !self.viewed.is_empty() && ev_owner == self.viewed
+    }
+    /// 某会话是否运行中。
+    pub fn is_running(&self, id: &str) -> bool {
+        self.running.contains(id)
+    }
+    /// 运行中会话 id 集（侧栏状态点）。
+    pub fn running_ids(&self) -> Vec<String> {
+        self.running.iter().cloned().collect()
+    }
+}
+
 /// html 预览判定（#7 documentpreview html 格式）：预览面板走
 /// TextView::html 富渲染（vendor 基础 HTML 标签内容阅读器——无 CSS）。
 pub fn is_html_preview(path: &str) -> bool {
@@ -1297,5 +1338,37 @@ mod html_preview_tests {
         assert!(is_html_preview("doc.xhtml"));
         assert!(!is_html_preview("E:/ws/main.rs"));
         assert!(!is_html_preview("style.css"));
+    }
+}
+
+#[cfg(test)]
+mod multi_session_gate_tests {
+    use super::*;
+
+    #[test]
+    fn events_route_only_to_viewed_owner() {
+        let mut g = MultiSessionGate::default();
+        g.view("session-b");
+        g.mark_running("session-a");
+        g.mark_running("session-b");
+        assert!(!g.routes_to_view("session-a"), "a's events stay out of view");
+        assert!(g.routes_to_view("session-b"), "b's events enter view");
+        // 视图切换重路由
+        g.view("session-a");
+        assert!(g.routes_to_view("session-a"));
+        assert!(!g.routes_to_view("session-b"));
+    }
+
+    #[test]
+    fn running_set_tracks_sessions_independently() {
+        let mut g = MultiSessionGate::default();
+        g.mark_running("a");
+        g.mark_running("b");
+        assert_eq!(g.running_ids().len(), 2);
+        assert!(g.is_running("a"));
+        assert!(!g.mark_idle("a"), "b still running");
+        assert!(!g.is_running("a"));
+        assert!(g.mark_idle("b"), "all idle now");
+        assert!(g.running_ids().is_empty());
     }
 }

@@ -874,7 +874,7 @@ impl ChatView {
                                     },
                                 ));
                             }
-                            ContentBlock::Image { attachment } => {
+                            ContentBlock::Image { attachment, .. } => {
                                 attachments.push(MsgBlock::Attachment(
                                     crate::ChatAttachment::ImageTile {
                                         path: attachment_image_object_path(

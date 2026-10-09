@@ -11,6 +11,7 @@ pub mod assistant_stream;
 pub mod content;
 pub mod error;
 pub mod events;
+pub mod image_offload;
 pub mod message;
 pub mod types;
 

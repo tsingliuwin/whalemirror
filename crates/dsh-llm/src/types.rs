@@ -127,6 +127,12 @@ pub enum ContentBlock {
     },
     Image {
         attachment: ImageAttachmentRef,
+        /// Durable image-offload decision（上游 ImageBlock.offloaded）：
+        /// 由日志 image/offload 选择派生或消息重写保留；请求组装把此类
+        /// 块替换为占位文本（project_offloaded_images）。wire 形仅在
+        /// true 时携带（上游可选 true），false 缺省与旧日志互通。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        offloaded: bool,
     },
     /// A verbatim stored file reference. Providers never receive file bytes:
     /// request assembly replaces every file block (including nested tool

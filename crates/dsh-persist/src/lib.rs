@@ -896,6 +896,7 @@ fn blocks_from_web(arr: Option<&serde_json::Value>) -> Vec<ContentBlock> {
             "image" => {
                 if let Some(a) = b.get("attachment") {
                     out.push(ContentBlock::Image {
+                        offloaded: b.get("offloaded").and_then(|v| v.as_bool()).unwrap_or(false),
                         attachment: serde_json::from_value(a.clone()).unwrap_or_else(|_| {
                             dsh_llm::ImageAttachmentRef {
                                 attachment_id: String::new(),
@@ -1003,9 +1004,14 @@ fn blocks_to_web(blocks: &[ContentBlock]) -> serde_json::Value {
                 "content":blocks_to_web(content),
                 "isError":is_error.unwrap_or(false)
             }),
-            ContentBlock::Image { attachment } => serde_json::json!({
-                "type": "image", "attachment": attachment
-            }),
+            ContentBlock::Image { attachment, offloaded } => {
+                // 上游 wire 形：offloaded 仅 true 时携带（可选 true）
+                let mut o = serde_json::json!({ "type": "image", "attachment": attachment });
+                if *offloaded {
+                    o["offloaded"] = serde_json::json!(true);
+                }
+                o
+            }
             ContentBlock::File { attachment } => serde_json::json!({
                 "type": "file", "attachment": attachment
             }),

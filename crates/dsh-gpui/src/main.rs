@@ -3525,7 +3525,7 @@ impl AppView {
         for d in &self.attachments {
             if let DraftUpload::Ready { reference } = &d.state {
                 if let Some(image) = &d.image {
-                    blocks.push(ContentBlock::Image { attachment: image.clone() });
+                    blocks.push(ContentBlock::Image { attachment: image.clone(), offloaded: false });
                     let hex = image.attachment_id.strip_prefix("sha256:").unwrap_or(&image.attachment_id);
                     cards.push(ChatAttachment::ImageTile {
                         path: Some(self.attachment_store.object_path(hex)),

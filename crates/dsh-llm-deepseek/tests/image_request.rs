@@ -78,6 +78,7 @@ async fn user_image_serializes_as_image_url_parts() {
     let msg = Message::user(vec![
         ContentBlock::text("看这张图"),
         ContentBlock::Image {
+            offloaded: false,
             attachment: image_ref(),
         },
     ]);
@@ -116,6 +117,7 @@ async fn image_fetch_failure_degrades_to_placeholder() {
         .with_image_fetcher(std::sync::Arc::new(|_| None));
 
     let msg = Message::user(vec![ContentBlock::Image {
+        offloaded: false,
         attachment: image_ref(),
     }]);
     let options = GenerateOptions::new("deepseek", "deepseek-flash", vec![msg]);

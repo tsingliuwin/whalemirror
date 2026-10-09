@@ -144,7 +144,7 @@ impl DeepSeekAdapter {
                             ContentBlock::Text { text: t } if !t.is_empty() => {
                                 parts.push(json!({ "type": "text", "text": t }))
                             }
-                            ContentBlock::Image { attachment } => {
+                            ContentBlock::Image { attachment, .. } => {
                                 n += 1;
                                 parts.push(json!({
                                     "type": "text",

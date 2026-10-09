@@ -17,6 +17,10 @@ pub struct ToolBlock {
     pub collapsed_groups: Vec<usize>,
     /// 调用时长（调用所在 message → tool/result；轨迹台账时间列工具行）
     pub duration_ms: Option<u64>,
+    /// 工具结果 UI 元数据（上游 output.presentationMeta 投影：diff 卡的
+    /// FileDiff {path, oldText, newText} 等）；live 从会话日志回读、回放从
+    /// tool/result 事件取——#1 UI 面的转录承载。
+    pub presentation: Option<serde_json::Value>,
 }
 
 /// 台账行高规格（上游 TrajectoryCell/TrajectoryTurnHeader module.css 实值）。

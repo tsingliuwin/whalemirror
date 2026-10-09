@@ -884,6 +884,100 @@ pub(crate) fn read_card(
 /// 差异卡（web DiffBlock，fs write 单 hunk：oldText = null → 全 + 行，
 /// 路径头 600 weight，复制钮悬浮右上，footer `└ +A -R · N 个文件`，
 /// mono 13/22，8 行上限折叠）。
+/// 双色 diff 卡（上游 DiffResultView：FileDiff oldText/newText）——
+/// 路径头 + `-` 删行（红）/ `+` 增行（绿）全量序列，8 行上限切头尾。
+/// None oldText = 新文件（纯 + 行）；None newText = 删除（纯 - 行）。
+pub(crate) fn unified_diff_card(
+    uid: u64,
+    path: &str,
+    old_text: &str,
+    new_text: &str,
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static + Clone,
+) -> Div {
+    let old_lines: Vec<&str> = if old_text.is_empty() {
+        Vec::new()
+    } else {
+        old_text.strip_suffix('\n').unwrap_or(old_text).split('\n').collect()
+    };
+    let new_lines: Vec<&str> = if new_text.is_empty() {
+        Vec::new()
+    } else {
+        new_text.strip_suffix('\n').unwrap_or(new_text).split('\n').collect()
+    };
+    // 行序列 = [路径头, -旧…, +新…]
+    let total = 1 + old_lines.len() + new_lines.len();
+    let hidden = total.saturating_sub(CARD_MAX_LINES);
+    let capped = hidden > 0 && !expanded;
+    let (head, tail) = if capped {
+        (CARD_MAX_LINES - CARD_MAX_LINES / 2, CARD_MAX_LINES / 2)
+    } else {
+        (total, 0)
+    };
+    let mut body = div()
+        .id(SharedString::from(format!("udiff-body-{uid}")))
+        .p(px(12.0))
+        .overflow_x_scroll()
+        .font_family(theme_mono())
+        .text_size(px(13.0))
+        .line_height(px(22.0));
+    let path_row = || {
+        div()
+            .min_h(px(22.0))
+            .whitespace_nowrap()
+            .pr(px(56.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme::t().text)
+            .child(path.to_string())
+    };
+    let del_row = |text: &str| {
+        div()
+            .min_h(px(22.0))
+            .whitespace_nowrap()
+            .text_color(theme::t().error)
+            .child(format!("- {text}"))
+    };
+    let add_row = |text: &str| {
+        div()
+            .min_h(px(22.0))
+            .whitespace_nowrap()
+            .text_color(theme::t().green)
+            .child(format!("+ {text}"))
+    };
+    let row_for = |i: usize| -> Div {
+        if i == 0 {
+            path_row()
+        } else if i <= old_lines.len() {
+            del_row(old_lines[i - 1])
+        } else {
+            add_row(new_lines[i - 1 - old_lines.len()])
+        }
+    };
+    for i in 0..head {
+        body = body.child(row_for(i));
+    }
+    if hidden > 0 {
+        body = body.child(fold_toggle(uid, hidden, expanded, on_toggle.clone()));
+    }
+    if tail > 0 {
+        for i in (total - tail)..total {
+            body = body.child(row_for(i));
+        }
+    }
+    let mut card = div()
+        .relative()
+        .ml_1()
+        .mt_1()
+        .w_full()
+        .overflow_hidden()
+        .rounded(px(12.0))
+        .border(px(0.5))
+        .border_color(theme::t().border_l2)
+        .bg(theme::t().code_bg)
+        .child(body);
+    card
+}
+
 pub(crate) fn diff_card(
     uid: u64,
     path: &str,

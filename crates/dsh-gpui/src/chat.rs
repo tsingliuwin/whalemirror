@@ -808,6 +808,7 @@ impl ChatView {
                                     open: false,
                                     expanded: false,
                                     collapsed_groups: Vec::new(),
+                                    presentation: None,
                                 }));
                             }
                             _ => {}
@@ -969,7 +970,7 @@ impl ChatView {
                         anchor_ms = Some(*t);
                     }
                 }
-                SessionEvent::ToolResult { message, time_ms, .. } => {
+                SessionEvent::ToolResult { message, time_ms, presentation, .. } => {
                     if let Some(ContentBlock::ToolResult { tool_call_id, content, is_error }) =
                         message.content.first()
                     {
@@ -980,7 +981,7 @@ impl ChatView {
                                 _ => None,
                             })
                             .collect();
-                        attach_tool_result(self.entries.last_mut(), &tool_call_id.0, &result_text, is_error.unwrap_or(false));
+                        attach_tool_result(self.entries.last_mut(), &tool_call_id.0, &result_text, is_error.unwrap_or(false), presentation.clone());
                         // 时间列工具行：调用所在 message → 本 result 的窗
                         if let (Some(t), Some(owner)) = (time_ms, last_msg_time) {
                             if let Some(e) = self.entries.last_mut() {
@@ -1248,6 +1249,7 @@ open: false,
                     open: false,
                     expanded: false,
                     collapsed_groups: Vec::new(),
+                    presentation: None,
                 }));
             }
             AgentEvent::ToolResult { tool_call_id, is_error } => {
@@ -1268,10 +1270,11 @@ open: false,
                         }
                     }
                 }
-                // 实时结果文本从会话日志回读（事件本身只带 id/error）。
-                let result = self.latest_tool_result_text(&tool_call_id.0);
+                // 实时结果文本与 presentation 从会话日志回读（事件本身只
+                // 带 id/error）。
+                let (result, presentation) = self.latest_tool_result(&tool_call_id.0);
                 let last = self.entries.last_mut();
-                attach_tool_result(last, &tool_call_id.0, result.0.as_str(), is_error);
+                attach_tool_result(last, &tool_call_id.0, result.0.as_str(), is_error, presentation);
             }
             AgentEvent::AssistantMessage { usage, .. } => {
                 self.stats_steps += 1;
@@ -1444,10 +1447,16 @@ open: false,
 
     /// 从会话日志回读指定工具调用的最新结果文本。
     fn latest_tool_result_text(&self, call_id: &str) -> (String, bool) {
+        self.latest_tool_result(call_id).0
+    }
+
+    /// 最新工具结果的 (文本, error, presentation)——presentation 为工具
+    /// presentationMeta 投影（diff 卡 FileDiff 等）。
+    fn latest_tool_result(&self, call_id: &str) -> ((String, bool), Option<serde_json::Value>) {
         let session = self.session_handle();
         let session = session.lock().unwrap();
         for entry in session.entries().iter().rev() {
-            if let SessionEvent::ToolResult { message, .. } = &entry.event
+            if let SessionEvent::ToolResult { message, presentation, .. } = &entry.event
                 && let Some(ContentBlock::ToolResult { tool_call_id, content, is_error }) =
                     message.content.first()
                 && tool_call_id.0 == call_id
@@ -1459,10 +1468,10 @@ open: false,
                         _ => None,
                     })
                     .collect();
-                return (text, is_error.unwrap_or(false));
+                return ((text, is_error.unwrap_or(false)), presentation.clone());
             }
         }
-        (String::new(), false)
+        ((String::new(), false), None)
     }
 
     /// 轮次过程折叠派生（web turn-process Definition 语义，1:1）：
@@ -1939,6 +1948,76 @@ open: false,
                             )
                             .into_any_element()
                         }
+                        // 名形 write/edit（上游 DiffResultView）：结果带
+                        // presentation FileDiff {path, oldText, newText} →
+                        // 双色 diff 卡（- 删/+ 增行）；无 presentation 回退 io 卡
+                        "write" | "edit" if !tool.error && tool.result.is_some() => {
+                            let path = {
+                                let p = arg_str("file_path");
+                                if p.is_empty() { arg_str("path") } else { p }
+                            };
+                            let shown = widgets::display_path(&path, &self.cwd);
+                            let diff = tool.presentation.as_ref().and_then(|p| {
+                                let diffs = p.get("diffs")?.as_array()?;
+                                diffs.first().cloned()
+                            });
+                            match diff {
+                                Some(diff) => {
+                                    let old_text = diff
+                                        .get("oldText")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let new_text = diff
+                                        .get("newText")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let t_fold = this.clone();
+                                    widgets::unified_diff_card(
+                                        uid,
+                                        &shown,
+                                        &old_text,
+                                        &new_text,
+                                        tool.expanded,
+                                        move |_, _, cx| {
+                                            t_fold.update(cx, |v, cx| {
+                                                if let Some(MsgBlock::Tool(tool)) =
+                                                    v.entries.get_mut(ei).and_then(|e| e.blocks.get_mut(bi))
+                                                {
+                                                    tool.expanded = !tool.expanded;
+                                                }
+                                                v.invalidate_chat_heights_range(ei..ei + 1);
+                                                cx.notify();
+                                            });
+                                        },
+                                    )
+                                    .into_any_element()
+                                }
+                                None => widgets::io_card(
+                                    uid,
+                                    &pretty_args,
+                                    tool.result.as_deref(),
+                                    tool.error,
+                                    tool.expanded,
+                                    {
+                                        let t_fold = this.clone();
+                                        move |_, _, cx| {
+                                            t_fold.update(cx, |v, cx| {
+                                                if let Some(MsgBlock::Tool(tool)) =
+                                                    v.entries.get_mut(ei).and_then(|e| e.blocks.get_mut(bi))
+                                                {
+                                                    tool.expanded = !tool.expanded;
+                                                }
+                                                v.invalidate_chat_heights_range(ei..ei + 1);
+                                                cx.notify();
+                                            });
+                                        }
+                                    },
+                                )
+                                .into_any_element(),
+                            }
+                        }
                         "fs" if !tool.error && tool.result.is_some() => {
                             let path = arg_str("path");
                             let shown = widgets::display_path(&path, &self.cwd);
@@ -1975,24 +2054,56 @@ open: false,
                                 "write" => {
                                     let content = arg_str("content");
                                     let t_fold = this.clone();
-                                    widgets::diff_card(
-                                        uid,
-                                        &shown,
-                                        &content,
-                                        tool.expanded,
-                                        move |_, _, cx| {
-                                            t_fold.update(cx, |v, cx| {
-                                                if let Some(MsgBlock::Tool(tool)) =
-                                                    v.entries.get_mut(ei).and_then(|e| e.blocks.get_mut(bi))
-                                                {
-                                                    tool.expanded = !tool.expanded;
+                                    // presentation FileDiff（旧写卡只有 + 行）：
+                                    // 有则升双色卡（- 删/+ 增），无则回退纯增卡
+                                    let diff = tool.presentation.as_ref().and_then(|p| {
+                                        let diffs = p.get("diffs")?.as_array()?;
+                                        diffs.first().cloned()
+                                    });
+                                    let card = match diff {
+                                        Some(diff) => widgets::unified_diff_card(
+                                            uid,
+                                            &shown,
+                                            diff.get("oldText").and_then(|v| v.as_str()).unwrap_or(""),
+                                            diff.get("newText").and_then(|v| v.as_str()).unwrap_or(&content),
+                                            tool.expanded,
+                                            {
+                                                let t_fold = t_fold.clone();
+                                                move |_, _, cx| {
+                                                    t_fold.update(cx, |v, cx| {
+                                                        if let Some(MsgBlock::Tool(tool)) =
+                                                            v.entries.get_mut(ei).and_then(|e| e.blocks.get_mut(bi))
+                                                        {
+                                                            tool.expanded = !tool.expanded;
+                                                        }
+                                                        v.invalidate_chat_heights_range(ei..ei + 1);
+                                                        cx.notify();
+                                                    });
                                                 }
-                                                // 折叠/展开改了条目高度：列表须重测
-                                                v.invalidate_chat_heights_range(ei..ei + 1);
-                                                cx.notify();
-                                            });
-                                        },
-                                    )
+                                            },
+                                        ),
+                                        None => widgets::diff_card(
+                                            uid,
+                                            &shown,
+                                            &content,
+                                            tool.expanded,
+                                            {
+                                                let t_fold = t_fold.clone();
+                                                move |_, _, cx| {
+                                                    t_fold.update(cx, |v, cx| {
+                                                        if let Some(MsgBlock::Tool(tool)) =
+                                                            v.entries.get_mut(ei).and_then(|e| e.blocks.get_mut(bi))
+                                                        {
+                                                            tool.expanded = !tool.expanded;
+                                                        }
+                                                        v.invalidate_chat_heights_range(ei..ei + 1);
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            },
+                                        ),
+                                    };
+                                    card
                                     .into_any_element()
                                 }
                                 _ => widgets::io_card(
@@ -4476,12 +4587,14 @@ fn attach_tool_result(
     call_id: &str,
     result: &str,
     error: bool,
+    presentation: Option<serde_json::Value>,
 ) {
     if let Some(entry) = last
         && let Some(MsgBlock::Tool(tool)) = entry.blocks.iter_mut().rev().find(|b| matches!(b, MsgBlock::Tool(t) if t.id == call_id))
     {
         tool.result = Some(result.to_string());
         tool.error = error;
+        tool.presentation = presentation;
     }
 }
 

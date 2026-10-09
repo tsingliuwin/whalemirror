@@ -36,7 +36,7 @@
 | 7 | documentpreview 富渲染器 | 0.1.5-alpha.2 | 侧栏预览 html/pdf/markdown/image 体（当前纯文本+行号）；pdf 文本层旋转（afe85c1cfd） | pdf/html 渲染在 GPUI 需自绘/嵌方案，逐格式评估 | 待办（逐格式拆） |
 | 8 | 语法高亮（代码块/预览） | 0.1.5-rc.1（Mermaid 系列 revert 后净态外的持续面） | vendor TextView 代码块无 shiki 级高亮；上游 CodeBlock 高亮 + code-file-icon 的语言着色 | vendor TextView 扩展或自绘代码块（8b 行渲染已有底座） | 待办 |
 | 9 | fs watch 变更通告 | 0.1.5-alpha.2 | 文件树 changed/reloadNow 条（外部改动检测 + 一键重载） | 需 notify 类 crate 或轮询 mtime | 待办 |
-| 10 | 会话统计持久投影 | 0.1.5-alpha.1 | session-stats/token-meter 投影：统计数值走整日志投影（跨重载/分页一致），替代窗口累计；TTFT/decode 精确计时 | 数据面迁移，UI 不变 | 待办 |
+| 10 | 会话统计持久投影 | 0.1.5-alpha.1 | session-stats 投影。**已落（10-09）**：dsh-session session_stats_fold 整日志四项（turns=含闭合 step/end 的轮【上游口径——空轮不计】/steps=step/end 计数【含失败取消 MaxTokens】/llmMs=step/start→assistant/message 墙钟/toolMs=call→result 按 callId 配对；轮终清 pending）+ 2 单测；rebuild 换投影（stats_turns/steps/session_llm_time/session_tool_time 跨重载一致——原回放 turns=turn/start 计数、时间恒 0）。顺带修实锤互通缺口：tool/call 事件写臂缺失（事件被静默丢弃——真实 v4 日志无 tool/call 行、web 读侧缺工具行、回放 stats_tools 恒 0）——补写读两臂 + ToolCall.time_ms serde-skip 内存回传（envelope time） | TTFT/decode 不可回放（rustdsh 流块无时间戳——上游流块带时间；live 窗口计时为准）；live 窗口口径与投影略有差异（TurnStart 计数 vs 闭合步）——重载后收敛 | **已完成**（TTFT/decode 流块时间戳承载留观察） |
 | 11 | openResource 资源地址体系 | 0.1.5-alpha.2 | Session/绝对路径文件资源地址统一（支撑 #1/#6/#7 的「在侧边栏打开」动作） | 纯内部缝 | 待办（随 #1 落） |
 
 ## 批次三（长尾/观察）

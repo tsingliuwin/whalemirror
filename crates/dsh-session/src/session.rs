@@ -112,6 +112,10 @@ pub enum SessionEvent {
         call_id: dsh_llm::CallId,
         name: String,
         arguments: String,
+        /// 信封 time 的回传承载（内存态；serde skip 不入 wire——写侧
+        /// envelope time 仍为权威）。session_stats_fold 的 toolMs 配对用。
+        #[serde(skip)]
+        time_ms: Option<u64>,
     },
     /// `plan/mode`（log-only，最后者赢）：plan 模式开关状态（上游
     /// plan-mode 包折叠语义——无此事件折叠为未激活）。
@@ -407,6 +411,74 @@ impl Session {
     }
 }
 
+/// 整日志会话统计（上游 session-stats 投影的 rustdsh fold）：跨重载/
+/// 分页一致的四项——turns 按上游口径为「至少含一个闭合 step/end 的轮」
+/// （拒绝/空轮不计）；steps 计 step/end（每进入的步恰一条，含失败/
+/// 取消/MaxTokens）；llm_ms 为 step/start→assistant/message 墙钟和；
+/// tool_ms 为 tool/call→tool/result 按 callId 配对墙钟和。TTFT/decode
+/// 不可恢复（rustdsh 流块无时间戳承载——偏差，live 窗口计时为准）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionStatsTotals {
+    /// 至少含一个闭合 step/end 的不同轮数。
+    pub turns: u64,
+    /// 闭合步数（step/end 计数）。
+    pub steps: u64,
+    /// 有消息组装的步的模型墙钟和（ms）。
+    pub llm_ms: u64,
+    /// 配对工具调用的墙钟和（ms）。
+    pub tool_ms: u64,
+}
+
+/// 整日志统计折叠（上游 sessionStats 投影 apply 的等价 fold；事件时间
+/// 取自 time_ms 回传承载，缺承载的项跳过计时不跳计数）。
+pub fn session_stats_fold(entries: &[SessionEntry]) -> SessionStatsTotals {
+    let mut totals = SessionStatsTotals::default();
+    let mut last_turn: Option<u64> = None;
+    let mut open_step: Option<(u64, u64, u64)> = None; // (turn, step, start_ms)
+    let mut pending: std::collections::HashMap<String, u64> = Default::default();
+    for entry in entries {
+        match &entry.event {
+            SessionEvent::StepStart { turn, step, time_ms: Some(start) } => {
+                open_step = Some((*turn, *step, *start));
+            }
+            SessionEvent::AssistantMessage { turn, step, time_ms: Some(end), .. } => {
+                if let Some((t0, s0, start)) = open_step
+                    && t0 == *turn
+                    && s0 == *step
+                {
+                    totals.llm_ms += end.saturating_sub(start);
+                    open_step = None;
+                }
+            }
+            SessionEvent::ToolCall { call_id, time_ms: Some(dispatch), .. } => {
+                pending.insert(call_id.0.clone(), *dispatch);
+            }
+            SessionEvent::ToolResult { message, time_ms: Some(end), .. } => {
+                if let Some(dsh_llm::ContentBlock::ToolResult { tool_call_id, .. }) =
+                    message.content.first()
+                    && let Some(dispatch) = pending.remove(&tool_call_id.0)
+                {
+                    totals.tool_ms += end.saturating_sub(dispatch);
+                }
+            }
+            SessionEvent::StepEnd { turn, .. } => {
+                totals.steps += 1;
+                if last_turn != Some(*turn) {
+                    totals.turns += 1;
+                    last_turn = Some(*turn);
+                }
+                open_step = None;
+            }
+            // 上游：结果必落在本轮内——轮终丢弃未配对调用，防状态增长
+            SessionEvent::TurnEnd { .. } => {
+                pending.clear();
+            }
+            _ => {}
+        }
+    }
+    totals
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +568,117 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::User);
         assert!(matches!(&msgs[0].content[0], ContentBlock::ToolResult { .. }));
+    }
+}
+
+#[cfg(test)]
+mod session_stats_tests {
+    use super::*;
+    use dsh_llm::{CallId, ContentBlock, Message, MessageSource, TokenUsage};
+
+    fn ev(seq: u64, time: u64, event: SessionEvent) -> SessionEntry {
+        SessionEntry { seq, event }
+    }
+
+    fn step_start(turn: u64, step: u64, time: u64) -> SessionEvent {
+        SessionEvent::StepStart { turn, step, time_ms: Some(time) }
+    }
+
+    fn step_end(turn: u64) -> SessionEvent {
+        SessionEvent::StepEnd { turn, step: 1 }
+    }
+
+    fn assistant(turn: u64, step: u64, time: u64) -> SessionEvent {
+        SessionEvent::AssistantMessage {
+            turn,
+            step,
+            message: Message::assistant(vec![], "p", "m"),
+            interrupted: false,
+            usage: None,
+            time_ms: Some(time),
+        }
+    }
+
+    fn call(turn: u64, step: u64, id: &str, time: u64) -> SessionEvent {
+        SessionEvent::ToolCall {
+            turn,
+            step,
+            call_id: CallId(id.into()),
+            name: "fs".into(),
+            arguments: "{}".into(),
+            time_ms: Some(time),
+        }
+    }
+
+    fn result(turn: u64, step: u64, id: &str, time: u64) -> SessionEvent {
+        SessionEvent::ToolResult {
+            turn,
+            step,
+            message: Message::new(
+                dsh_llm::Role::User,
+                vec![ContentBlock::tool_result(CallId(id.into()), vec![], false)],
+                MessageSource::Tool { call_id: CallId(id.into()) },
+            ),
+            time_ms: Some(time),
+            presentation: None,
+        }
+    }
+
+    #[test]
+    fn fold_counts_closed_steps_and_distinct_turns() {
+        // 上游口径：turns=至少一个闭合 step/end 的轮；空轮（无 step/end）不计
+        let entries = vec![
+            ev(0, 100, SessionEvent::TurnStart { turn: 1 }),
+            ev(1, 110, SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }),
+            ev(2, 120, SessionEvent::TurnStart { turn: 2 }),
+            ev(3, 130, step_start(2, 1, 130)),
+            ev(4, 200, step_end(2)),
+            ev(5, 210, SessionEvent::TurnEnd { turn: 2, reason: TurnEndReason::Completed }),
+        ];
+        let t = session_stats_fold(&entries);
+        assert_eq!((t.turns, t.steps), (1, 1));
+        // 同轮多步：turns 仍 1
+        let entries2 = vec![
+            ev(0, 100, step_start(3, 1, 100)),
+            ev(1, 150, step_end(3)),
+            ev(2, 160, step_start(3, 2, 160)),
+            ev(3, 220, step_end(3)),
+        ];
+        let t2 = session_stats_fold(&entries2);
+        assert_eq!((t2.turns, t2.steps), (1, 2));
+    }
+
+    #[test]
+    fn fold_pairs_llm_and_tool_wall_times() {
+        let entries = vec![
+            ev(0, 100, step_start(1, 1, 100)),
+            ev(1, 130, call(1, 1, "c1", 130)),
+            ev(2, 180, result(1, 1, "c1", 180)),
+            ev(3, 250, assistant(1, 1, 250)),
+            ev(4, 260, step_end(1)),
+        ];
+        let t = session_stats_fold(&entries);
+        assert_eq!(t.llm_ms, 150, "step 100→assistant 250");
+        assert_eq!(t.tool_ms, 50, "call 130→result 180");
+        // 未配对调用（无 result）：不计 toolMs；轮终清 pending
+        let entries2 = vec![
+            ev(0, 100, call(1, 1, "cX", 100)),
+            ev(1, 150, SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }),
+            ev(2, 200, result(1, 1, "cX", 200)),
+        ];
+        let t2 = session_stats_fold(&entries2);
+        assert_eq!(t2.tool_ms, 0, "unmatched after turn end stays uncounted");
+        // 无时间承载（time_ms None）：跳过计时不跳计数
+        let entries3 = vec![
+            ev(0, 100, SessionEvent::StepStart { turn: 9, step: 1, time_ms: None }),
+            ev(1, 150, SessionEvent::AssistantMessage {
+                turn: 9, step: 1,
+                message: Message::assistant(vec![], "p", "m"),
+                interrupted: false, usage: None, time_ms: None,
+            }),
+            ev(2, 160, SessionEvent::StepEnd { turn: 9, step: 1 }),
+        ];
+        let t3 = session_stats_fold(&entries3);
+        assert_eq!((t3.steps, t3.llm_ms), (1, 0));
     }
 }

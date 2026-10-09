@@ -985,6 +985,16 @@ open: false,
                 _ => {}
             }
         }
+        // 整日志统计投影（上游 sessionStats：跨重载一致）——turns=含闭合
+        // step/end 的轮、steps=step/end 计数、llm/tool 墙钟配对；token 统计
+        // 仍在事件循环里累计（usage 承载）
+        {
+            let totals = dsh_session::session_stats_fold(session.entries());
+            self.stats_turns = totals.turns;
+            self.stats_steps = totals.steps;
+            self.session_llm_time = Duration::from_millis(totals.llm_ms);
+            self.session_tool_time = Duration::from_millis(totals.tool_ms);
+        }
         self.ui_turn = cur_turn;
         self.replay_unfinished_turn = unfinished.then_some(cur_turn);
         self.replay_turn_anchor_ms = if unfinished { anchor_ms } else { None };

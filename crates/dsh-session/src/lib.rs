@@ -9,5 +9,5 @@ pub mod session;
 
 pub use session::{
     CancelCause, EpochHeader, HeaderReason, PresentedFile, RequestContext, Session, SessionEntry,
-    SessionEvent, TurnEndReason,
+    SessionEvent, SessionStatsTotals, TurnEndReason, session_stats_fold,
 };

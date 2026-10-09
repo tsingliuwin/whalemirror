@@ -923,6 +923,9 @@ impl ReactLoopAgent {
                 call_id: id.clone(),
                 name: name.clone(),
                 arguments: arguments.clone(),
+                // live 无回传承载（写侧 envelope time 为权威；重载时读侧
+                // 塞回）——session_stats_fold 的 toolMs 配对用
+                time_ms: None,
             });
 
             let input =

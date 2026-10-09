@@ -1140,6 +1140,31 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 time_ms: env_time,
             })
         }
+        "tool/call" => {
+            let d = data?;
+            Some(SessionEvent::ToolCall {
+                turn: num(data, "turn"),
+                step: num(data, "step"),
+                call_id: dsh_llm::CallId(
+                    d.get("callId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                name: d
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                arguments: d
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                // 信封 time 回传（toolMs 配对的 dispatch 时刻）
+                time_ms: env_time,
+            })
+        }
         "tool/result" => {
             let d = data?;
             // v2 形：{turn, step, message:{content, source:{kind:'tool', callId}}}
@@ -1846,6 +1871,21 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
             }
             Some(row("subagent/catalog", data))
         }
+        SessionEvent::ToolCall { turn, step, call_id, name, arguments, .. } => {
+            // v2 处置表：{turn, step, callId, name, arguments}（rustdsh 此前
+            // 无写臂——事件被静默丢弃，web 读侧缺工具行、回放 stats_tools
+            // 恒 0、toolMs 无配对源；本臂补齐）
+            Some(row(
+                "tool/call",
+                serde_json::json!({
+                    "turn": turn,
+                    "step": step,
+                    "callId": call_id.0,
+                    "name": name,
+                    "arguments": arguments,
+                }),
+            ))
+        }
         SessionEvent::PresentedFiles { turn, call_id, files } => {
             // 上游 tool-present：present 成功结果落盘（含嵌套调用）。
             // files = [{path, description?}]（PresentedFile，description 缺省省略）
@@ -2441,9 +2481,15 @@ mod tests {
             ),
         )
         .unwrap();
-        // 已知未映射 + 存储记录 + ignorable 未知：都能加载（各自跳过）
+        // ignorable 未知：跳过；tool/call 行此前被丢弃（无读臂——回放
+        // stats_tools 恒 0、web 读侧缺工具行），现有读臂：恰好一条事件
         let (session, _) = rec.load(&id, Some("/tmp/ws")).unwrap();
-        assert!(session.entries().is_empty());
+        let tool_calls = session
+            .entries()
+            .iter()
+            .filter(|e| matches!(&e.event, SessionEvent::ToolCall { .. }))
+            .count();
+        assert_eq!(tool_calls, 1, "tool/call row now parses (was silently dropped)");
 
         // 未知且必读：拒绝解释整份日志
         rec.append_frame(

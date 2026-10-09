@@ -68,8 +68,10 @@ impl Tool for ShellTool {
                    not `cd` first, and use Windows-style paths.",
         };
         ToolDefinition {
-            name: "shell".into(),
-            description: format!("Run a shell command and return its combined stdout and stderr. {shell_line}"),
+            // 上游 tool-bash name 'bash'：模型按上游习惯直呼名（同 read/write
+            // 名形对齐）；旧会话日志 name="shell" 的调用回放归类双名兼容
+            name: "bash".into(),
+            description: format!("Execute a bash command and return its combined stdout and stderr. {shell_line}"),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -274,7 +276,14 @@ mod tests {
     use dsh_llm::types::CallId;
 
     fn input(raw: &str) -> ToolExecutionInput {
-        ToolExecutionInput::with_raw_arguments(CallId("t".into()), "shell".into(), raw.into())
+        ToolExecutionInput::with_raw_arguments(CallId("t".into()), "bash".into(), raw.into())
+    }
+
+    #[test]
+    fn tool_name_is_upstream_bash() {
+        // 上游名形对齐锁：tool-bash name 'bash'（曾为 'shell'——模型直呼
+        // bash 会吃 no tool）
+        assert_eq!(ShellTool::default().definition().name, "bash");
     }
 
     #[tokio::test]

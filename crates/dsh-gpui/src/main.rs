@@ -1084,7 +1084,7 @@ pub(crate) fn default_permission_preset() -> String {
         .to_string()
 }
 
-/// tool:shell 提示词节文本：cwd 已是工作区根（免 cd）+ 长命令先落盘再检视
+/// tool:bash 提示词节文本：cwd 已是工作区根（免 cd）+ 长命令先落盘再检视
 /// 的纪律 + 按 shell 实际风味给语法提示。回应真实会话里的两类浪费：
 /// bash 语法经 cmd /C 碎裂（; / 引号 / %）、cargo test 重跑 3 遍只为换
 /// 视角看输出。末尾按权限预设档位注入叙述（上游 prompt narration 的
@@ -1096,12 +1096,12 @@ fn shell_section_text(root: &str, mode: dsh_fs::FsMode) -> String {
     }
     text.push_str(match dsh_shell::shell_kind() {
         "bash" => {
-            "The shell tool runs each command through bash with its working directory already \
+            "The bash tool runs each command through bash with its working directory already \
              set to the workspace root: do not `cd` first. Bash syntax (pipes, `;`, `$()`, \
              quotes, POSIX paths) works naturally."
         }
         _ => {
-            "The shell tool runs each command through `cmd /C` (NOT bash) with its working \
+            "The bash tool runs each command through `cmd /C` (NOT bash) with its working \
              directory already set to the workspace root: do not `cd` first, and use \
              Windows-style paths (`E:\\dir\\file.rs`), not POSIX-style (`/e/...`). cmd does NOT \
              understand bash syntax: use `&&` instead of `;`, avoid `$()`, avoid `%` in format \
@@ -1150,7 +1150,7 @@ struct AppDeps {
     llm: Arc<LlmRuntime>,
     /// 系统提示词句柄（工作区切换时重建 workspace 相关 section）
     prompt: Arc<dsh_system_prompt::SystemPrompt>,
-    /// tool:shell section 句柄（调用 = 移除；随工作区切换重建）
+    /// tool:bash section 句柄（调用 = 移除；随工作区切换重建）
     shell_section: std::cell::RefCell<Option<dsh_llm::Disposer>>,
     /// 工作区指令（AGENTS.md）section 句柄（随工作区切换重建）
     workspace_instructions: std::cell::RefCell<Option<dsh_llm::Disposer>>,
@@ -1461,7 +1461,7 @@ pub(crate) struct AppView {
     fs_sandbox: Arc<dsh_fs::SwitchablePolicy>,
     /// 系统提示词句柄（工作区切换时重建 workspace 相关 section）
     prompt: Arc<dsh_system_prompt::SystemPrompt>,
-    /// tool:shell section 句柄（随工作区切换重建）
+    /// tool:bash section 句柄（随工作区切换重建）
     shell_section: std::cell::RefCell<Option<dsh_llm::Disposer>>,
     /// 工作区指令（AGENTS.md）section 句柄（随工作区切换重建）
     workspace_instructions: std::cell::RefCell<Option<dsh_llm::Disposer>>,
@@ -4126,14 +4126,14 @@ impl AppView {
     }
 
     /// 工作区切换时重建 workspace 相关提示词节（dispose 旧节再注册）：
-    /// tool:shell（工作区根 + shell 纪律）与工作区指令（AGENTS.md 兼容文件，
+    /// tool:bash（工作区根 + shell 纪律）与工作区指令（AGENTS.md 兼容文件，
     /// 无指令源时置空）。
     fn refresh_workspace_sections(&self, root: &str) {
         if let Some(dispose) = self.shell_section.borrow_mut().take() {
             dispose();
         }
         *self.shell_section.borrow_mut() = Some(self.prompt.add_section(dsh_system_prompt::PromptSection {
-            name: "tool:shell".into(),
+            name: "tool:bash".into(),
             order: self.prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolBash),
             text: shell_section_text(root, self.fs_sandbox.mode()),
         }));
@@ -6860,10 +6860,10 @@ fn main() {
         order: prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolGlob),
         text: "Use the glob tool — not shell find — to discover files by path pattern. A pattern with no \"/\" matches basenames at any depth, so \"*\" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, while a larger one keeps the modification-time-ordered head.".into(),
     });
-    // tool:shell section：cwd 已是工作区根（免 cd、Windows 路径风格）+ 长命令
+    // tool:bash section：cwd 已是工作区根（免 cd、Windows 路径风格）+ 长命令
     // 先落盘再检视的纪律；随工作区切换经 AppView::sync_fs_sandbox 重建
     let shell_section = std::cell::RefCell::new(Some(prompt.add_section(dsh_system_prompt::PromptSection {
-        name: "tool:shell".into(),
+        name: "tool:bash".into(),
         order: prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolBash),
         text: shell_section_text(
             &workdir.get().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),

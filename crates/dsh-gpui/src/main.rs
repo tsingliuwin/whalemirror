@@ -1510,6 +1510,9 @@ pub(crate) struct AppView {
     plan_review: dsh_gpui::PlanReviewPanel,
     /// 审阅应答通道（Some=已接线；面板回答走它——AppView 构造后宿主回填）
     plan_review_tx: Option<std::sync::mpsc::Sender<dsh_tools::PlanReviewDecision>>,
+    /// 审阅自定义反馈输入（上游 QuestionComposer 的 custom 反馈路径：
+    /// 「要求修改」时把输入文本回给模型）
+    plan_feedback: Entity<InputState>,
     /// #5 真并发：非当前会话的运行时表（发送时按需 spawn、轮终 reap）。
     /// 主 agent 恒代表「当前」会话；查看其它会话时在其上发消息 → 经此
     /// 表取/建该会话的独立 runtime（事件泵带会话标签按属主路由）。
@@ -1766,6 +1769,7 @@ impl AppView {
             workdir,
             persist_cwd,
             sessions,
+            plan_feedback: input.clone(),
             input,
             api_input,
             desired_model,
@@ -3822,6 +3826,14 @@ impl AppView {
         }
     }
 
+    /// 「要求修改」带自定义反馈（上游 QuestionComposer 的 custom 路径：
+    /// 输入文本回给模型；空输入=无反馈形态）。应答后清空输入。
+    fn plan_review_request_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let feedback = self.plan_feedback.read_with(cx, |s, _| s.value().trim().to_string());
+        self.plan_feedback.update(cx, |s, cx| s.set_value("", window, cx));
+        self.plan_review_decide(dsh_tools::PlanReviewDecision::RequestChanges { feedback });
+    }
+
     /// #5 真并发：为被查看会话取/建独立 runtime（查看式切换下在其它会话
     /// 发消息）。共享宿主 llm/fs 沙箱/subagent 工具与适配器；workdir=该
     /// 会话 cwd（fs/read/write/edit/bash/grep/glob 全部新建跟 cwd）；事件
@@ -5050,6 +5062,30 @@ impl Render for AppView {
                                     }),
                             )
                             .child(
+                                // 自定义反馈输入（上游 custom 路径）：空即无反馈
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .h(px(34.0))
+                                    .px(px(10.0))
+                                    .rounded(px(10.0))
+                                    .border(px(0.5))
+                                    .border_color(theme::t().border_l2)
+                                    .bg(theme::t().bg_base)
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .line_height(px(18.0))
+                                            .text_color(theme::t().text_3)
+                                            .flex_none()
+                                            .child("反馈"),
+                                    )
+                                    .child(
+                                        Input::new(&self.plan_feedback).w_full(),
+                                    ),
+                            )
+                            .child(
                                 div()
                                     .flex()
                                     .justify_end()
@@ -5071,13 +5107,9 @@ impl Render for AppView {
                                             .text_color(theme::t().text)
                                             .cursor_pointer()
                                             .hover(|st| st.bg(theme::t().hover))
-                                            .on_click(move |_, _, cx| {
+                                            .on_click(move |_, window, cx| {
                                                 t_discuss.update(cx, |v, cx| {
-                                                    v.plan_review_decide(
-                                                        dsh_tools::PlanReviewDecision::RequestChanges {
-                                                            feedback: String::new(),
-                                                        },
-                                                    );
+                                                    v.plan_review_request_changes(window, cx);
                                                     cx.notify();
                                                 });
                                             })

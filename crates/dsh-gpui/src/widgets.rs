@@ -62,69 +62,6 @@ fn split_markdown(md: &str) -> Vec<MdSegment> {
     segments
 }
 
-/// 代码块完整卡片（web CodeBlock .block/.banner/.pre 对齐）：
-/// banner = 语言 mono 标签 + 复制按钮，content = 代码本体。
-fn code_block_card(uid: usize, lang: &str, code: &str) -> Div {
-    let text = code.to_string();
-    let mut hasher = std::hash::DefaultHasher::new();
-    std::hash::Hash::hash(&text, &mut hasher);
-    let copy_id: SharedString =
-        format!("code-copy-{uid}-{:x}", std::hash::Hasher::finish(&hasher)).into();
-    let lang_display = if lang.is_empty() { "text".to_string() } else { lang.to_string() };
-    div()
-        .v_flex()
-        .rounded(px(12.0))
-        .overflow_hidden()
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(px(14.0))
-                .py(px(9.0))
-                .bg(theme::t().code_banner)
-                .child(
-                    div()
-                        .font_family(theme_mono())
-                        .text_size(px(12.0))
-                        .line_height(px(18.0))
-                        .text_color(theme::t().text_3)
-                        .child(lang_display),
-                )
-                .child(
-                    div()
-                        .id(copy_id)
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .px(px(6.0))
-                        .py(px(2.0))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .text_color(theme::t().text_3)
-                        .hover(|s| s.text_color(theme::t().text).bg(theme::t().hover))
-                        .tooltip(tip("复制代码"))
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
-                        })
-                        .child(Icon::new(IconName::Copy).size(px(12.0)))
-                        .child(div().text_size(px(11.0)).line_height(px(14.0)).child("复制")),
-                ),
-        )
-        .child(
-            div()
-                .w_full()
-                .p_4()
-                .bg(theme::t().code_bg)
-                .font_family(theme_mono())
-                .text_size(px(13.0))
-                .line_height(px(22.0))
-                .text_color(theme::t().text)
-                .child(code.to_string()),
-        )
-}
-
 /// 用 `TextView::markdown` 渲染一段 markdown，样式对齐 web 版
 /// MarkdownText.module.css + 字号标尺。
 #[derive(IntoElement)]
@@ -175,7 +112,67 @@ impl RenderOnce for MarkdownBlock {
                     );
                 }
                 MdSegment::Code { lang, code } => {
-                    col = col.child(code_block_card(self.id * 1000 + i * 2 + 1, &lang, &code));
+                    // #8 语法高亮：代码段交回 TextView 渲染（vendor
+                    // CodeBlock：SyntaxHighlighter 按语言高亮 + 复制钮经
+                    // code_block_actions——上游 web CodeBlock 同形）。
+                    // 以围栏块喂回 markdown 管线（lang 保留高亮路由）
+                    let fenced = if lang.is_empty() {
+                        format!("```
+{code}
+```")
+                    } else {
+                        format!("```{lang}
+{code}
+```")
+                    };
+                    let mut view = TextView::markdown(
+                        self.id * 1000 + i * 2 + 1,
+                        fenced,
+                        window,
+                        cx,
+                    );
+                    view = view.code_block_actions(|block, _window, cx| {
+                        let text = block.code().to_string();
+                        let mut btn = div()
+                            .id(SharedString::from(format!("md-code-copy-{}", block.code().len())))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .text_color(theme::t().text_3)
+                            .hover(|st| st.text_color(theme::t().text).bg(theme::t().hover))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    text.to_string(),
+                                ));
+                            })
+                            .child(Icon::new(IconName::Copy).size(px(12.0)))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .line_height(px(14.0))
+                                    .child("复制"),
+                            );
+                        if let Some(lang) = block.lang() {
+                            btn = btn.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .line_height(px(14.0))
+                                    .text_color(theme::t().text_3)
+                                    .child(lang.to_string()),
+                            );
+                        }
+                        let _ = cx;
+                        btn
+                    });
+                    col = col.child(
+                        view.text_size(px(13.0))
+                            .line_height(px(22.0))
+                            .font_family(theme_mono()),
+                    );
                 }
             }
         }

@@ -1449,6 +1449,9 @@ pub(crate) struct DockState {
     pub root: Option<String>,
     pub levels: HashMap<String, Result<dsh_gpui::DirLevel, (dsh_gpui::FilesErrorKind, String)>>,
     pub expanded: HashSet<String>,
+    /// 文件树检测到外部变更（mtime 轮询比对层签名；变更条显示，
+    /// 「重新读取」清位重载——上游 dirty/setAutomatic 语义的轮询等价）
+    pub files_stale: bool,
 }
 
 pub(crate) struct AppView {
@@ -1831,6 +1834,7 @@ impl AppView {
                 files: Vec::new(),
                 root: None,
                 levels: HashMap::new(),
+            files_stale: false,
                 expanded: HashSet::new(),
             },
             selected_message: None,
@@ -2264,6 +2268,7 @@ impl AppView {
         if changed {
             self.dock.levels.clear();
             self.dock.expanded.clear();
+            self.dock.files_stale = false;
         }
         if self.dock.open {
             self.dock_open_root();
@@ -2455,8 +2460,40 @@ impl AppView {
     fn dock_reload_tree(&mut self) {
         let paths: Vec<String> = self.dock.expanded.iter().cloned().collect();
         self.dock.levels.clear();
+        self.dock.files_stale = false;
         for p in &paths {
             self.dock_load(p);
+        }
+    }
+
+    /// fs watch 检测（#9）：对展开层重读一次，比对层签名——任一变化
+    /// 置 files_stale（变更条显示；上游 dirty 节点的轮询等价）。轮询泵
+    /// 在 dock 打开期间每 5s 调用。
+    fn dock_poll_files_stale(&mut self) {
+        if !self.dock.open || self.dock.files_stale {
+            return;
+        }
+        let Some(root) = self.dock.root.clone() else { return };
+        let loaded: Vec<(String, Vec<(String, u8)>)> = self
+            .dock
+            .levels
+            .iter()
+            .map(|(p, r)| {
+                let sig = r.as_ref().map(dsh_gpui::dir_level_signature).unwrap_or_default();
+                (p.clone(), sig)
+            })
+            .collect();
+        let current: Vec<(String, Vec<(String, u8)>)> = self
+            .dock
+            .levels
+            .keys()
+            .filter_map(|p| {
+                let r = dsh_gpui::list_dir(&root, p).ok()?;
+                Some((p.clone(), dsh_gpui::dir_level_signature(&r)))
+            })
+            .collect();
+        if dsh_gpui::any_level_changed(&loaded, &current) {
+            self.dock.files_stale = true;
         }
     }
 
@@ -2542,6 +2579,54 @@ impl AppView {
                             cx.notify();
                         });
                     })
+            // #9 fs watch 变更条（上游 dirty 节点 + reload=「重新读取」）：
+            // mtime 轮询检出外部变更时显示，点击重载清位
+            .when(self.dock.files_stale, |col| {
+                let t = this.clone();
+                col.child(
+                    div()
+                        .id("dock-files-stale")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(10.0))
+                        .h(px(30.0))
+                        .mt(px(4.0))
+                        .rounded(px(8.0))
+                        .bg(theme::t().hover)
+                        .cursor_pointer()
+                        .hover(|st| st.bg(theme::t().active))
+                        .on_click(move |_, _, cx| {
+                            t.update(cx, |v, cx| {
+                                v.dock_reload_tree();
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(14.0))
+                                .text_color(theme::t().caption),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::FONT_TAB))
+                                .line_height(px(theme::FONT_ROW_LEADING))
+                                .text_color(theme::t().text_2)
+                                .child("目录已在外部变更"),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(theme::FONT_TAB))
+                                .line_height(px(theme::FONT_ROW_LEADING))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::t().text)
+                                .child("重新读取"),
+                        ),
+                )
+            })
                     .child(
                         svg()
                             .path("icons/refresh.svg")
@@ -7269,6 +7354,23 @@ fn main() {
                                 v.on_child_activity(id, cx);
                             });
                         }
+                    }
+                })
+                .detach();
+
+                // #9 fs watch 轮询泵：dock 打开期间每 5s 对展开层做一次
+                // 签名比对（上游 watch→dirty 的轮询等价；面板关闭/已置
+                // stale 时方法自空转）
+                let poll_view = app.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        let _ = cx.update_entity(&poll_view, |v: &mut AppView, cx| {
+                            v.dock_poll_files_stale();
+                            if v.dock.files_stale {
+                                cx.notify();
+                            }
+                        });
                     }
                 })
                 .detach();

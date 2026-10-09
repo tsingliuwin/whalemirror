@@ -283,6 +283,31 @@ pub struct DirLevel {
     pub truncated: bool,
 }
 
+/// 目录层签名（#9 fs watch：检测外部变更）——名字序 + 每项 kind。
+/// 纯函数对比签名即可判层是否变更（轮询泵每 5s 对展开层做一次）。
+pub fn dir_level_signature(level: &DirLevel) -> Vec<(String, u8)> {
+    level
+        .entries
+        .iter()
+        .map(|e| (e.name.clone(), match e.kind { DirEntryKind::Directory => 1, DirEntryKind::File => 2, DirEntryKind::Other => 3 }))
+        .collect()
+}
+
+/// 逐层对比载入形与当前实读形的签名：任一层不同 → 有外部变更。
+pub fn any_level_changed(
+    loaded: &[(String, Vec<(String, u8)>)],
+    current: &[(String, Vec<(String, u8)>)],
+) -> bool {
+    for (path, sig) in current {
+        match loaded.iter().find(|(p, _)| p == path) {
+            Some((_, prev)) if prev == sig => {}
+            _ => return true,
+        }
+    }
+    // 载入层消失（目录被删/移走）也算变更
+    loaded.len() != current.len()
+}
+
 /// 目录列表失败（上游 workspace-file/* 代码）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesErrorKind {
@@ -1120,5 +1145,29 @@ mod read_envelope_tests {
         // 非信封（fs op 形原始文本 / 错误文本）→ None
         assert_eq!(parse_read_envelope("raw file text"), None);
         assert_eq!(parse_read_envelope("read failed: x"), None);
+    }
+}
+
+#[cfg(test)]
+mod dir_watch_tests {
+    use super::*;
+
+    fn sig(entries: &[(&str, u8)]) -> Vec<(String, u8)> {
+        entries.iter().map(|(n, k)| (n.to_string(), *k)).collect()
+    }
+
+    #[test]
+    fn level_change_detection_by_signature() {
+        let loaded = vec![("E:/ws".to_string(), sig(&[("a", 1), ("b", 2)]))];
+        let same = vec![("E:/ws".to_string(), sig(&[("a", 1), ("b", 2)]))];
+        assert!(!any_level_changed(&loaded, &same), "identical signature = no change");
+        let added = vec![("E:/ws".to_string(), sig(&[("a", 1), ("b", 2), ("c", 2)]))];
+        assert!(any_level_changed(&loaded, &added), "new file = change");
+        let kind_flip = vec![("E:/ws".to_string(), sig(&[("a", 2), ("b", 2)]))];
+        assert!(any_level_changed(&loaded, &kind_flip), "kind flip = change");
+        let removed = vec![("E:/ws".to_string(), sig(&[("a", 1)]))];
+        assert!(any_level_changed(&loaded, &removed), "deleted entry = change");
+        // 载入层消失（目录被删）也算
+        assert!(any_level_changed(&loaded, &[]));
     }
 }

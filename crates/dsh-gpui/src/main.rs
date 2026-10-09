@@ -1505,6 +1505,11 @@ pub(crate) struct AppView {
     confirm_session_delete: Option<(String, String)>,
     /// 聊天图片大图查看器（#24 image.open：tile 点击开、遮罩点击关）
     image_viewer: dsh_gpui::ImageViewer,
+    /// plan 审阅面板（#2：exit_plan_mode 提交后弹全窗卡等用户决定——
+    /// Approve/RequestChanges+反馈/Dismissed；答案经通道回阻塞中的工具）
+    plan_review: dsh_gpui::PlanReviewPanel,
+    /// 审阅应答通道（Some=已接线；面板回答走它——AppView 构造后宿主回填）
+    plan_review_tx: Option<std::sync::mpsc::Sender<dsh_tools::PlanReviewDecision>>,
     /// #5 真并发：非当前会话的运行时表（发送时按需 spawn、轮终 reap）。
     /// 主 agent 恒代表「当前」会话；查看其它会话时在其上发消息 → 经此
     /// 表取/建该会话的独立 runtime（事件泵带会话标签按属主路由）。
@@ -1783,6 +1788,8 @@ impl AppView {
             renaming_workspace: None,
             confirm_session_delete: None,
             image_viewer: dsh_gpui::ImageViewer::default(),
+            plan_review: dsh_gpui::PlanReviewPanel::default(),
+            plan_review_tx: None,
             session_runtimes: std::collections::HashMap::new(),
             running_sessions: dsh_gpui::MultiSessionGate::default(),
             renaming_session: None,
@@ -3807,6 +3814,14 @@ impl AppView {
     /// 组装并发送本轮用户消息：附件块在前、文本在后（上游 sendSession 的
     /// content 顺序），附件-only 发送合法。v2 落盘：FileBlock 随 user/
     /// message 进日志，请求组装投影为带只读路径的 handle 文本。
+    /// plan 审阅应答：关面板并经 answer 通道回阻塞中的工具。
+    fn plan_review_decide(&mut self, decision: dsh_tools::PlanReviewDecision) {
+        self.plan_review.close();
+        if let Some(tx) = &self.plan_review_tx {
+            let _ = tx.send(decision);
+        }
+    }
+
     /// #5 真并发：为被查看会话取/建独立 runtime（查看式切换下在其它会话
     /// 发消息）。共享宿主 llm/fs 沙箱/subagent 工具与适配器；workdir=该
     /// 会话 cwd（fs/read/write/edit/bash/grep/glob 全部新建跟 cwd）；事件
@@ -4948,6 +4963,152 @@ impl Render for AppView {
                                             })
                                             .child("删除")
                                     }),
+                            ),
+                    ),
+            );
+        }
+        // #2 plan 审阅面板（上游 PlanReviewPanel）：计划待审卡——
+        // 标题+首段摘要 + 要求修改（拒）/ 同意执行两钮；点答即关面板
+        // 并经 answer 通道回阻塞中的 exit_plan_mode 工具
+        if let Some(plan) = self.plan_review.plan().map(str::to_string) {
+            let title = plan
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('#')
+                .trim()
+                .to_string();
+            let desc: String = plan
+                .trim()
+                .lines()
+                .skip(1)
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let t_approve = this.clone();
+            let t_discuss = this.clone();
+            root = root.child(
+                div()
+                    .id("plan-review-mask")
+                    .absolute()
+                    .size_full()
+                    .top_0()
+                    .left_0()
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::hsla(0.0, 0.0, 0.0, 0.5))
+                    .child(
+                        div()
+                            .id("plan-review-card")
+                            .w(px(460.0))
+                            .v_flex()
+                            .gap(px(12.0))
+                            .p(px(20.0))
+                            .rounded(px(16.0))
+                            .bg(theme::t().surface)
+                            .shadow(theme::elevation_prominent())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(widgets::state_dot(theme::t().warn_label))
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::FONT_TAB))
+                                            .line_height(px(theme::FONT_ROW_LEADING))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().text_2)
+                                            .child("计划待审"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .gap(px(4.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(17.0))
+                                            .line_height(px(24.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme::t().text)
+                                            .child(title),
+                                    )
+                                    .when(!desc.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .line_height(px(20.0))
+                                                .text_color(theme::t().text_2)
+                                                .child(desc),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .id("plan-review-discuss")
+                                            .h(px(36.0))
+                                            .px(px(14.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(18.0))
+                                            .border(px(0.5))
+                                            .border_color(theme::t().border_l3)
+                                            .text_size(px(theme::FONT_ROW))
+                                            .line_height(px(22.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().text)
+                                            .cursor_pointer()
+                                            .hover(|st| st.bg(theme::t().hover))
+                                            .on_click(move |_, _, cx| {
+                                                t_discuss.update(cx, |v, cx| {
+                                                    v.plan_review_decide(
+                                                        dsh_tools::PlanReviewDecision::RequestChanges {
+                                                            feedback: String::new(),
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("要求修改"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("plan-review-approve")
+                                            .h(px(36.0))
+                                            .px(px(14.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(18.0))
+                                            .bg(theme::t().text)
+                                            .text_size(px(theme::FONT_ROW))
+                                            .line_height(px(22.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().bg_base)
+                                            .cursor_pointer()
+                                            .hover(|st| st.opacity(0.9))
+                                            .on_click(move |_, _, cx| {
+                                                t_approve.update(cx, |v, cx| {
+                                                    v.plan_review_decide(
+                                                        dsh_tools::PlanReviewDecision::Approve,
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("同意执行"),
+                                    ),
                             ),
                     ),
             );
@@ -7256,7 +7417,10 @@ fn main() {
     let _glob = tools.register(Arc::new(dsh_search::GlobTool::default().with_workdir(workdir.clone()))).unwrap();
     // exit_plan_mode（上游 plan-mode 包同名工具最小等价）：模型提交计划，
     // 审阅流与 plan-mode 状态机留待后续（偏差固化 backlog #2）
-    let _exit_plan = tools.register(Arc::new(dsh_tools::ExitPlanModeTool)).unwrap();
+    // exit_plan_mode 审阅流（#2）：模型提交计划后经宿主审阅面板等用户
+    // 决定（同意/要求修改/自行回复——上游 userQuestions.ask 单进程等价）
+    let exit_plan_tool = Arc::new(dsh_tools::ExitPlanModeTool::new());
+    let _exit_plan = tools.register(exit_plan_tool.clone()).unwrap();
     let prompt = Arc::new(SystemPrompt::new());
     // tool:edit section（上游 applyEditTool 同文）：read-before-edit 引导；
     // 偏差：上游默认 fs-observation-policy 硬门未实装，仅提示词引导
@@ -7656,6 +7820,69 @@ fn main() {
                 // 不被逐事件 notify，侧栏等兄弟子视图的 element 缓存保持
                 // 有效；peek 中运行会话的事件不进视图（照常落盘）。
                 let view = app.clone();
+                // #2 plan 审阅缝（单进程 userQuestions.ask）：
+                // hook（工具线程）非阻塞投 plan → async 泵弹面板；
+                // UI 三钮答案走 answer_tx（AppView 字段）→ hook 轮询收。
+                // 面板开/关由泵与点击各自收敛；5 分钟无应答按 Dismissed。
+                {
+                    let (open_tx, open_rx) =
+                        std::sync::mpsc::channel::<String>();
+                    let (answer_tx, answer_rx) =
+                        std::sync::mpsc::channel::<dsh_tools::PlanReviewDecision>();
+                    let answer_rx = std::sync::Mutex::new(answer_rx);
+                    let hook_view = view.clone();
+                    let exit_hook: dsh_tools::PlanReviewHook = std::sync::Arc::new(
+                        move |plan: &str, _call: &dsh_llm::CallId| {
+                            let _ = open_tx.send(plan.to_string());
+                            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+                            loop {
+                                let got = answer_rx.lock().unwrap().try_recv();
+                                match got {
+                                    Ok(d) => return d,
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                        if std::time::Instant::now() > deadline {
+                                            return dsh_tools::PlanReviewDecision::Dismissed;
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(250));
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                        return dsh_tools::PlanReviewDecision::Dismissed;
+                                    }
+                                }
+                            }
+                        },
+                    );
+                    exit_plan_tool.set_review_hook(exit_hook);
+                    view.read_with(cx, |v: &AppView, _| {
+                        let _ = v;
+                    });
+                    {
+                        let answer_tx = answer_tx;
+                        let view_set = view.clone();
+                        view_set.update(cx, |v: &mut AppView, _| {
+                            v.plan_review_tx = Some(answer_tx);
+                        });
+                    }
+                    // async 泵：开面板（无答案职责——UI 点击即关即发）
+                    let pump_view = hook_view;
+                    cx.spawn(async move |cx| {
+                        let mut cx = cx.clone();
+                        loop {
+                            match open_rx.try_recv() {
+                                Ok(plan) => {
+                                    let _ = cx.update_entity(&pump_view, |v: &mut AppView, cx: &mut Context<AppView>| {
+                                        v.plan_review.open(plan);
+                                        cx.notify();
+                                    });
+                                }
+                                Err(_) => {}
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        }
+                    })
+                    .detach();
+                }
+
                 // [dsh] 聊天流文件路径点击 → dock 文件预览路由
                 //（上游 Sidebar Browser 的等价承接：GPUI 无 webview，
                 // 真实路径改在侧栏 dock 打开而非系统默认程序）

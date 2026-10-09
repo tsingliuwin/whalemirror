@@ -357,11 +357,55 @@ y");
 }
 
 
-/// `exit_plan_mode`（上游 plan-mode 包同名工具的最小等价）：校验提交的
-/// markdown 计划并返回确认文本。无 plan-mode 状态机与用户审阅流（rustdsh
-/// 无 user-questions 通道——审批交互偏差固化于 backlog #2），注册状态机
-/// 接线后补。
-pub struct ExitPlanModeTool;
+/// 审阅决定（上游 exit_plan_mode 输出 {approved}）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanReviewDecision {
+    /// 同意执行（离开 plan 模式，下一步开始执行）。
+    Approve,
+    /// 要求修改（保持 plan 模式；feedback 原文回给模型——空串=无反馈）。
+    RequestChanges { feedback: String },
+    /// 用户自行回复（dismissed：结束本轮不打扰，{approved:false}；
+    /// 上游 ASK_CANCELLED → concludeTurn 同语义）。
+    Dismissed,
+}
+
+impl PlanReviewDecision {
+    /// approved 输出值。
+    pub fn approved(&self) -> bool {
+        matches!(self, PlanReviewDecision::Approve)
+    }
+}
+
+/// 审阅回调（宿主注入：弹审阅面板等用户决定；阻塞至有答案）。上游
+/// `userQuestions.ask` 的单进程等价——交互面归宿主。
+pub type PlanReviewHook = std::sync::Arc<
+    dyn Fn(&str, &dsh_llm::CallId) -> PlanReviewDecision + Send + Sync,
+>;
+
+/// `exit_plan_mode`（上游 plan-mode 包同名工具的审阅流实装）：提交校验
+/// 后经审阅回调请求用户决定——Approve 输出 {approved:true}（离开 plan
+/// 模式）；RequestChanges 以错误结果回模型（文案同上游 keep planning
+/// 反馈路径）；Dismissed 结束本轮（concludes_turn，不打扰模型等待）。
+pub struct ExitPlanModeTool {
+    review: RwLock<Option<PlanReviewHook>>,
+}
+
+impl ExitPlanModeTool {
+    pub fn new() -> Self {
+        Self { review: RwLock::new(None) }
+    }
+
+    /// 注入审阅回调（宿主 UI；无回调时自动同意——数据面测试缺省）。
+    pub fn set_review_hook(&self, hook: PlanReviewHook) {
+        *self.review.write().unwrap() = Some(hook);
+    }
+}
+
+impl Default for ExitPlanModeTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for ExitPlanModeTool {
@@ -397,9 +441,32 @@ impl Tool for ExitPlanModeTool {
                 "exit_plan_mode requires a non-empty markdown plan starting with a # heading",
             );
         }
-        ToolExecutionResult::text(
-            "Plan approved — plan mode exited; carry out the plan starting with your next step.",
-        )
+        // 审阅流（上游 userQuestions.ask）：回调在场等用户决定；
+        // 无回调（数据面/测试）自动同意
+        let decision = match self.review.read().unwrap().clone() {
+            Some(hook) => hook(&plan, &input.call_id),
+            None => PlanReviewDecision::Approve,
+        };
+        match decision {
+            PlanReviewDecision::Approve => ToolExecutionResult::text(
+                "Plan approved — plan mode exited; carry out the plan starting with your next step.",
+            ),
+            PlanReviewDecision::RequestChanges { feedback } if feedback.is_empty() => {
+                ToolExecutionResult::error(
+                    "The user chose to keep planning; revise the plan and present it again.",
+                )
+            }
+            PlanReviewDecision::RequestChanges { feedback } => ToolExecutionResult::error(format!(
+                "The user chose to keep planning; their feedback: {feedback}"
+            )),
+            // 上游 dismissed：结束本轮不打扰（concludeTurn）
+            PlanReviewDecision::Dismissed => ToolExecutionResult {
+                concludes_turn: true,
+                ..ToolExecutionResult::text(
+                    "The user dismissed the plan review to reply in their own words; plan mode remains active.",
+                )
+            },
+        }
     }
 }
 
@@ -409,25 +476,87 @@ mod exit_plan_tests {
     use super::*;
 
     fn run(plan: &str) -> ToolExecutionResult {
+        run_with(plan, PlanReviewDecision::Approve)
+    }
+
+    fn run_with(plan: &str, decision: PlanReviewDecision) -> ToolExecutionResult {
+        let tool = ExitPlanModeTool::new();
+        tool.set_review_hook(std::sync::Arc::new(move |_plan: &str, _call: &CallId| {
+            decision.clone()
+        }));
         let input = ToolExecutionInput::with_raw_arguments(
             CallId("c1".to_string()),
             "exit_plan_mode".to_string(),
             serde_json::json!({"plan": plan}).to_string(),
         );
-        futures::executor::block_on(ExitPlanModeTool.execute(&input))
+        futures::executor::block_on(tool.execute(&input))
+    }
+
+    fn text_of(r: &ToolExecutionResult) -> String {
+        r.content
+            .iter()
+            .find_map(|b| match b {
+                dsh_llm::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     #[test]
     fn rejects_plan_without_hash_heading() {
         let r = run("just some notes");
         assert!(r.is_error);
-        assert!(format!("{:?}", r.content).contains("# heading"));
+        assert!(text_of(&r).contains("# heading"));
     }
 
     #[test]
     fn accepts_hash_headed_plan() {
-        let r = run("# My Plan\n\nstep one");
+        let r = run("# My Plan
+
+step one");
         assert!(!r.is_error);
-        assert!(format!("{:?}", r.content).contains("Plan approved"));
+        assert!(text_of(&r).contains("Plan approved"));
+    }
+
+    #[test]
+    fn approve_returns_carried_out_text() {
+        let r = run_with("# Plan
+step", PlanReviewDecision::Approve);
+        assert!(!r.is_error);
+        assert!(!r.concludes_turn);
+        assert!(text_of(&r).contains("Plan approved"));
+    }
+
+    #[test]
+    fn request_changes_returns_error_with_feedback() {
+        let r = run_with(
+            "# Plan
+step",
+            PlanReviewDecision::RequestChanges { feedback: "make it smaller".into() },
+        );
+        assert!(r.is_error);
+        assert!(!r.concludes_turn);
+        let text = text_of(&r);
+        assert!(text.contains("keep planning"), "{text}");
+        assert!(text.contains("make it smaller"), "{text}");
+        let r2 = run_with(
+            "# Plan
+step",
+            PlanReviewDecision::RequestChanges { feedback: String::new() },
+        );
+        let text2 = text_of(&r2);
+        assert!(text2.contains("revise the plan and present it again"), "{text2}");
+        assert!(!text2.contains("their feedback"), "{text2}");
+    }
+
+    #[test]
+    fn dismissed_concludes_turn_without_error() {
+        let r = run_with("# Plan
+step", PlanReviewDecision::Dismissed);
+        assert!(!r.is_error);
+        assert!(r.concludes_turn, "dismissed ends the turn (upstream concludeTurn)");
+        let text = text_of(&r);
+        assert!(text.contains("dismissed the plan review"), "{text}");
+        assert!(text.contains("plan mode remains active"), "{text}");
     }
 }

@@ -333,7 +333,7 @@ pub fn build_session_toolkit(
     let _ = tools
         .register(std::sync::Arc::new(dsh_search::GlobTool::default().with_workdir(workdir.clone())))
         .unwrap();
-    let _ = tools.register(std::sync::Arc::new(dsh_tools::ExitPlanModeTool)).unwrap();
+    let _ = tools.register(std::sync::Arc::new(dsh_tools::ExitPlanModeTool::new())).unwrap();
     let _ = tools.register(subagent).unwrap();
     let prompt = std::sync::Arc::new(dsh_system_prompt::SystemPrompt::new());
     let _ = prompt.add_section(dsh_system_prompt::PromptSection {
@@ -420,6 +420,32 @@ pub fn is_markdown_preview(path: &str) -> bool {
         lower.as_str(),
         "readme" | "changelog" | "contributing" | "authors" | "license" | "notice"
     )
+}
+
+/// plan 审阅面板态（#2：上游 PlanReviewPanel 的单进程版）。
+/// `open` 携带提交的计划 markdown；三钮应答后清态。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlanReviewPanel {
+    open: Option<String>,
+}
+
+impl PlanReviewPanel {
+    /// 弹面板（plan markdown）。
+    pub fn open(&mut self, plan: impl Into<String>) {
+        self.open = Some(plan.into());
+    }
+    /// 当前待审计划（None = 面板关）。
+    pub fn plan(&self) -> Option<&str> {
+        self.open.as_deref()
+    }
+    /// 应答即关（三路共用）。
+    pub fn close(&mut self) {
+        self.open = None;
+    }
+    /// 面板是否在展示。
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
 }
 
 /// 聊天图片大图查看器状态（#24 image.open「查看大图」）：tile 点击开、
@@ -1512,5 +1538,21 @@ mod session_toolkit_tests {
         }
         assert!(!tk.prompt.render().contains("Use the web_search tool"));
         assert!(tk2.prompt.render().contains("Use the web_search tool"));
+    }
+}
+
+#[cfg(test)]
+mod plan_review_panel_tests {
+    use super::*;
+
+    #[test]
+    fn panel_open_close_lifecycle() {
+        let mut p = PlanReviewPanel::default();
+        assert!(!p.is_open());
+        p.open("# My Plan\nstep");
+        assert_eq!(p.plan(), Some("# My Plan\nstep"));
+        p.close();
+        assert!(p.plan().is_none());
+        assert!(!p.is_open());
     }
 }

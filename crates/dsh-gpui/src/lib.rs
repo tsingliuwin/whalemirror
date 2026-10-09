@@ -736,6 +736,17 @@ mod process_title_tests {
     }
 }
 
+// ---- 运行中查看子会话：重放节流（子活动高频，250ms 合并窗口）----
+
+/// 被查看子会话此刻是否该重放最新快照（上次重放以来超过节流窗口）。
+pub fn peek_refresh_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+    match last {
+        None => true,
+        Some(t) => now.duration_since(t) >= MIN_INTERVAL,
+    }
+}
+
 // ---- 侧栏会话列表增量收敛（subagent 子会话等新落盘会话的即时收录）----
 
 /// 侧栏会话列表行（宿主 SessionMeta 的纯数据投影）。
@@ -911,5 +922,20 @@ mod session_list_merge_tests {
         assert_eq!(merge_new_sessions(&mut list, vec![row("x")]), 1);
         assert_eq!(merge_new_sessions(&mut list, vec![row("x")]), 0, "idempotent");
         assert_eq!(list.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod peek_refresh_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn first_activity_is_due_and_bursts_merge() {
+        let t0 = std::time::Instant::now();
+        assert!(peek_refresh_due(None, t0), "first activity refreshes");
+        assert!(!peek_refresh_due(Some(t0), t0 + Duration::from_millis(100)));
+        assert!(!peek_refresh_due(Some(t0), t0 + Duration::from_millis(249)));
+        assert!(peek_refresh_due(Some(t0), t0 + Duration::from_millis(250)));
     }
 }

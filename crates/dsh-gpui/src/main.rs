@@ -1480,6 +1480,8 @@ pub(crate) struct AppView {
     /// 运行中「查看式切换」的目标会话（Some = 视图指向非 agent 会话；
     /// 仅运行中可能为 Some，轮终自动收敛回 None）
     peek_session: Option<SessionId>,
+    /// 被查看子会话的最近一次重放时刻（250ms 节流；子活动高频合并）。
+    last_peek_refresh: Option<Instant>,
     /// 侧栏列的窗口 bounds（与 SidebarView 共享的 Rc：root 的
     /// on_children_prepainted 捕获首子元素，侧栏菜单锚定换算消费）
     sb_col_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
@@ -1754,6 +1756,7 @@ impl AppView {
             current_cwd: String::new(),
             agent_busy: false,
             peek_session: None,
+            last_peek_refresh: None,
             sb_col_bounds,
             renaming_workspace: None,
             renaming_session: None,
@@ -2001,6 +2004,56 @@ impl AppView {
         }
         self.refresh_sidebar(cx);
         cx.notify();
+    }
+
+    /// 子任务会话活动（运行中实时查看缝，宿主 child_sink 逐事件转发）：
+    /// 新子会话首次活动即入侧栏（免重启）；正被查看时按节流重放最新
+    /// 快照（上游 SidebarChat 随写随刷的等价承载——重放走磁盘快照，
+    /// 撕裂尾帧整帧不返回，读侧天然安全）。
+    fn on_child_activity(&mut self, id: String, cx: &mut Context<Self>) {
+        if !self.sessions.iter().any(|m| m.id.as_str() == id) {
+            self.absorb_new_sessions(cx);
+        }
+        if !self
+            .peek_session
+            .as_ref()
+            .is_some_and(|p| p.as_str() == id)
+        {
+            return;
+        }
+        let now = Instant::now();
+        if !dsh_gpui::peek_refresh_due(self.last_peek_refresh, now) {
+            return;
+        }
+        self.last_peek_refresh = Some(now);
+        let sid = SessionId::new(id);
+        let cwd_hint = self
+            .sessions
+            .iter()
+            .find(|m| m.id == sid)
+            .and_then(|m| m.cwd.clone());
+        let Ok((session, cwd)) = self.recorder.load(&sid, cwd_hint.as_deref()) else {
+            return;
+        };
+        self.chat.update(cx, |c, cx| {
+            if let Some(cw) = cwd {
+                c.cwd = cw;
+            }
+            // 快照句柄原地换内容（身份不变——工具详情/轨迹等读面同源刷新）；
+            // 展开/折叠态跨重放保留，避免高频刷新把用户展开的轮次收走
+            let handle = match c.display_session.clone() {
+                Some(h) => h,
+                None => return,
+            };
+            *handle.lock().unwrap() = session;
+            let expanded = c.turn_expanded.clone();
+            {
+                let snap = handle.lock().unwrap();
+                c.rebuild_from(&snap);
+            }
+            c.turn_expanded = expanded;
+            cx.notify();
+        });
     }
 
     /// 会话重命名（web Rows 菜单 rename → session.rename）：
@@ -6705,12 +6758,17 @@ fn main() {
     // 子会话耐久化 + 父目录 catalog（backlog #4 数据面）：子会话落同一
     // sessions 根（cwd 取当前会话工作区；标题=description，侧栏可回看），
     // 父日志落 subagent/catalog 发现事实（上游 establishCatalogChild）
+    // 同缝逐事件转发子活动（第二事件泵驱动运行中实时查看，见下）
+    let (child_activity_tx, mut child_activity_rx) =
+        tokio::sync::mpsc::unbounded_channel::<String>();
     subagent_tool.set_child_sink({
         let recorder = Arc::clone(&recorder);
         let cwd_slot = Arc::clone(&cwd_slot_for_view);
+        let child_activity = child_activity_tx.clone();
         Arc::new(move |id: &dsh_llm::types::SessionId, event: &dsh_session::SessionEvent| {
             let cwd = cwd_slot.lock().unwrap().clone();
             let _ = recorder.append(id, &cwd, event);
+            let _ = child_activity.send(id.as_str().to_string());
         })
     });
     subagent_tool.set_parent_link(Arc::clone(&agent));
@@ -6946,6 +7004,21 @@ fn main() {
                                 if v.on_agent_event(ev, cx) {
                                     cx.notify();
                                 }
+                            });
+                        }
+                    }
+                })
+                .detach();
+
+                // 子活动泵：subagent 子会话逐事件驱动运行中实时查看
+                //（父在等子工具期间自身事件流静默——刷新必须由子活动推送）
+                let child_view = app.clone();
+                cx.spawn(move |cx: &mut AsyncApp| {
+                    let mut cx = cx.clone();
+                    async move {
+                        while let Some(id) = child_activity_rx.recv().await {
+                            let _ = cx.update_entity(&child_view, |v: &mut AppView, cx: &mut Context<AppView>| {
+                                v.on_child_activity(id, cx);
                             });
                         }
                     }

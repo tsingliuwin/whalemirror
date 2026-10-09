@@ -986,3 +986,34 @@ mod unclaimed_echo_tests {
         assert!(unclaimed_echoes(&["a".into()], &set(&["a", "b"])).is_empty());
     }
 }
+
+// ---- 会话归属工作区判定（目录即真相；与侧栏分组同口径）----
+
+/// 会话 cwd → 归属工作区 id：project_key 归一后匹配工作区 path。
+/// 名册 session_ids 只用于手动排序，不作为归属依据（web 端创建的会话
+/// 不在本地名册、名册漂移时侧栏仍按 cwd 分组——归属判定同口径才不裂）。
+pub fn workspace_id_of_cwd(workspaces: &[(String, String)], cwd: Option<&str>) -> Option<String> {
+    let cwd = cwd?;
+    let key = dsh_persist::project_key(cwd);
+    workspaces
+        .iter()
+        .find(|(_, path)| dsh_persist::project_key(path) == key)
+        .map(|(id, _)| id.clone())
+}
+
+#[cfg(test)]
+mod workspace_of_cwd_tests {
+    use super::*;
+
+    #[test]
+    fn matches_by_directory_key_across_separator_styles() {
+        // project_key：/ 与 \ 等价折叠为 -、连续分隔符合并、前导修剪；
+        // 大小写与尾分隔符不归一（真实两侧均来自 OS 路径，口径一致）
+        let ws = [("w1".to_string(), "E:/rustproject/miaocr".to_string())];
+        assert_eq!(workspace_id_of_cwd(&ws, Some("E:\\rustproject\\miaocr")), Some("w1".into()));
+        assert_eq!(workspace_id_of_cwd(&ws, Some("E:/rustproject/miaocr")), Some("w1".into()));
+        assert_eq!(workspace_id_of_cwd(&ws, Some("E:\\rustproject\\rustdsh")), None);
+        assert_eq!(workspace_id_of_cwd(&ws, None), None);
+        assert_eq!(workspace_id_of_cwd(&[], Some("E:\\x")), None);
+    }
+}

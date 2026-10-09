@@ -1866,11 +1866,21 @@ impl AppView {
         }
     }
 
-    /// 会话属于哪个工作区（切换/新建时同步 current_workspace 用）。
+    /// 会话属于哪个工作区（目录即真相：会话 cwd 的 project_key 匹配工作
+    /// 区 path——与侧栏分组同口径；名册 session_ids 只用于手动排序。原
+    /// 名册口径会在 web 端创建/名册漂移时判 None，切走后 current_workspace
+    /// 被清空，新建回退按列表序命中最近的空白会话所属——「在 B 点新建
+    /// 却跳到 A 的空白」即此路径）。
     fn workspace_of_session(&self, id: &SessionId) -> Option<&WorkspaceInfo> {
+        let cwd = self
+            .sessions
+            .iter()
+            .find(|m| &m.id == id)
+            .and_then(|m| m.cwd.clone());
+        let key = cwd.as_deref().map(dsh_persist::project_key)?;
         self.workspaces
             .iter()
-            .find(|w| w.session_ids.iter().any(|s| s == id.as_str()))
+            .find(|w| dsh_persist::project_key(&w.path) == key)
     }
 
     /// 新建会话的 id（web 形态）+ 归属当前工作区。
@@ -2877,23 +2887,19 @@ impl AppView {
         cx.notify();
     }
     /// 新会话的目标工作区（web startSession 链）：显式选择 ?? 当前会话
-    /// 所属 ?? 最近工作区（最近会话所属优先，退列首）。
+    /// 所属 ?? 最近工作区（最近会话所属优先，退列首）。归属一律按
+    /// cwd（目录即真相，与侧栏分组同口径——名册缺录的会话不再回退到
+    /// 列表序最近者，否则「B 下新建跳 A 空白」）。
     fn resolve_target_workspace(&self) -> Option<String> {
         if let Some(id) = self.current_workspace.clone() {
             return Some(id);
         }
         let cur = self.current_session_id();
-        if let Some(w) = self
-            .workspaces
-            .iter()
-            .find(|w| w.session_ids.iter().any(|sid| sid == cur.as_str()))
-        {
+        if let Some(w) = self.workspace_of_session(&cur) {
             return Some(w.id.clone());
         }
         for meta in &self.sessions {
-            if let Some(w) = self.workspaces.iter().find(|w| {
-                w.session_ids.iter().any(|sid| sid == meta.id.as_str())
-            }) {
+            if let Some(w) = self.workspace_of_session(&meta.id) {
                 return Some(w.id.clone());
             }
         }

@@ -3,6 +3,22 @@
 //! Based on the `Input` example from the `gpui` crate.
 //! https://github.com/zed-industries/zed/blob/main/crates/gpui/examples/input.rs
 use anyhow::Result;
+
+// [dsh] composer 图片粘贴捕获：粘贴事件里剪贴板含图片时分流到宿主回调
+//（附件流），文本粘贴照常走。回调返回 true = 已消费（不插入文本）。
+static IMAGE_PASTE_HANDLER: std::sync::RwLock<
+    Option<std::sync::Arc<dyn Fn(gpui::Image, &mut gpui::App) -> bool + Send + Sync>>,
+> = std::sync::RwLock::new(None);
+
+#[allow(dead_code)]
+pub fn set_image_paste_handler(
+    handler: Option<
+        std::sync::Arc<dyn Fn(gpui::Image, &mut gpui::App) -> bool + Send + Sync>,
+    >,
+) {
+    *IMAGE_PASTE_HANDLER.write().unwrap() = handler;
+}
+
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
@@ -1448,6 +1464,25 @@ impl InputState {
 
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(clipboard) = cx.read_from_clipboard() {
+            let has_image = clipboard
+                .entries()
+                .iter()
+                .any(|e| matches!(e, gpui::ClipboardEntry::Image(_)));
+            if has_image
+                && let Some(handler) = IMAGE_PASTE_HANDLER.read().unwrap().as_ref()
+            {
+                let mut consumed = false;
+                for entry in clipboard.entries() {
+                    if let gpui::ClipboardEntry::Image(img) = entry {
+                        if handler(img.clone(), cx) {
+                            consumed = true;
+                        }
+                    }
+                }
+                if consumed {
+                    return;
+                }
+            }
             let mut new_text = clipboard.text().unwrap_or_default();
             if !self.mode.is_multi_line() {
                 new_text = new_text.replace('\n', "");

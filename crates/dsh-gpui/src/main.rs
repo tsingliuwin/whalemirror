@@ -3914,6 +3914,71 @@ impl AppView {
         cx.notify();
     }
 
+    /// 粘贴图片入存 + 挂草稿（上游 composer 粘贴捕获：字节 → 附件存储 →
+    /// 图片 tile 草稿，同回形针分流终点）。
+    fn add_pasted_image(&mut self, bytes: Vec<u8>, media_type: &str, cx: &mut Context<Self>) {
+        self.upload_notice = None;
+        // 粘贴图无文件名：image-paste-<纳秒>.png/jpeg
+        let ext = if media_type == "image/jpeg" { "jpeg" } else { "png" };
+        let name = format!(
+            "image-paste-{}.{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            ext
+        );
+        let id = format!("draft-paste-{}", self.attachments.len());
+        self.attachments.push(DraftFile {
+            id: id.clone(),
+            path: std::path::PathBuf::from(&name),
+            name: name.clone(),
+            bytes: bytes.len() as u64,
+            state: DraftUpload::Uploading,
+            image: None,
+        });
+        let store = Arc::clone(&self.attachment_store);
+        let display = name.clone();
+        let display_spawn = name;
+        let media_type_owned = media_type.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let dims = dsh_persist::image_dimensions(&bytes);
+                    store
+                        .save_file_verbatim(&bytes, Some(&display_spawn))
+                        .map(|reference| (reference, dims))
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                if let Some(d) = v.attachments.iter_mut().find(|d| d.id == id) {
+                    match result {
+                        Ok((reference, dims)) => {
+                            d.image = dims.map(|(width, height)| {
+                                dsh_llm::ImageAttachmentRef {
+                                    attachment_id: reference.attachment_id.clone(),
+                                    name: Some(display.clone()),
+                                    media_type: media_type_owned.clone(),
+                                    bytes: reference.bytes,
+                                    width,
+                                    height,
+                                    original_dimensions: None,
+                                }
+                            });
+                            d.state = DraftUpload::Ready { reference };
+                        }
+                        Err(message) => d.state = DraftUpload::Failed { message },
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// plan 模式切换（上游 /plan 命令的 on/off 切换）。
     fn toggle_plan_mode(&mut self, cx: &mut Context<Self>) {
         let active = self.agent.plan_mode_active();
@@ -6759,6 +6824,26 @@ fn main() {
                 // [dsh] 聊天流文件路径点击 → dock 文件预览路由
                 //（上游 Sidebar Browser 的等价承接：GPUI 无 webview，
                 // 真实路径改在侧栏 dock 打开而非系统默认程序）
+                // [dsh] composer 图片粘贴捕获：剪贴板图片 → 附件流（同回形针
+                // 分流；PNG/JPEG 测尺寸入存挂草稿，其他格式返回 false 走文本）
+                let paste_view = app.clone();
+                gpui_component::input::set_image_paste_handler(Some(
+                    std::sync::Arc::new(
+                        move |img: gpui::Image, cx: &mut gpui::App| -> bool {
+                            let format = match img.format {
+                                gpui::ImageFormat::Png => "image/png",
+                                gpui::ImageFormat::Jpeg => "image/jpeg",
+                                _ => return false,
+                            };
+                            let bytes = img.bytes.clone();
+                            let _ = paste_view.update(cx, |v, cx| {
+                                v.add_pasted_image(bytes, format, cx);
+                                cx.notify();
+                            });
+                            true
+                        },
+                    ),
+                ));
                 gpui_component::text::set_relative_file_opener(Some(
                     std::sync::Arc::new({
                         let view = view.clone();

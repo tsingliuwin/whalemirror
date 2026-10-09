@@ -40,6 +40,7 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | C9 | 统计双 pill + 对话框（0.1.5-alpha.1）：composer 下仪表 pill（轮步+TPS）与数据 pill（总 token+缓存命中），点击开互斥对话框（会话统计 / Token 用量），再点关闭 | 跑一轮后看 composer 下方 | pill 数值正确、对话框行与数据一致（模型用时/TTFT/TPS；输入/缓存读/缓存写/输出，缓存写为 0 时该行省略）、互斥开合 |
 | C10 | 附件卡文件类型图标（0.1.5-alpha.2）：回形针选文件/气泡附件卡按扩展名出类色文件底+白 mark 图标（pdf 红/word 蓝/excel 绿/图片紫/代码 deepseek 蓝/其他灰）| 附件 TXT/PDF/PNG/RS 各一张 | 图标随类型变化、未知扩展回落灰 other、双层渲染无错位 |
 | C11 | 计划卡（0.2.1-alpha.1 补缺）：模型调 exit_plan_mode 提交计划后，轮尾出现计划卡（markdown 图标座+标题「计划 · Markdown」描述+打开钮），点击弹 Popover 展示计划全文（等宽块） | 让模型写计划提交 | 卡片出现、标题正确、Popover 展示全文 |
+| C12 | 图片粘贴捕获（0.2.1-alpha.1 补缺子批 3）：剪贴板复制图片后 Ctrl+V → 图片作为附件 tile 出现在 composer 草稿（同回形针流终点），输入框不插入乱码文本；PNG/JPEG 外格式走文本粘贴 | 复制图片→composer 粘贴 | 草稿图片 tile 出现、发送含 image 块 |
 
 ## D. 侧栏（sidebar.rs）
 

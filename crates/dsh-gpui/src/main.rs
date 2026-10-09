@@ -1497,6 +1497,9 @@ pub(crate) struct AppView {
     /// 工作区重命名中的目标 id（弹出小对话框）
     renaming_workspace: Option<String>,
     /// 会话重命名中的目标 id（弹出小对话框；web Rows 菜单 rename）
+    /// 归档会话确认（删除是破坏性动作：整份日志文件移除，不可恢复——
+    /// 上游 web 无删除动作仅有归档，此为用户定向的本地功能）。
+    confirm_session_delete: Option<(String, String)>,
     renaming_session: Option<String>,
     /// hero「选择工作区」菜单开合
     hero_ws_menu: bool,
@@ -1769,6 +1772,7 @@ impl AppView {
             last_peek_refresh: None,
             sb_col_bounds,
             renaming_workspace: None,
+            confirm_session_delete: None,
             renaming_session: None,
             hero_ws_menu: false,
             model_menu: false,
@@ -1962,6 +1966,43 @@ impl AppView {
         if self.current_session_id() == *id {
             // 归档当前会话：留在原地（web 同——归档不影响打开的视图），
             // 仅列表隐藏
+        }
+        self.refresh_sidebar(cx);
+        cx.notify();
+    }
+
+    /// 删除会话（用户定向本地功能；上游 web 无删除仅有归档）：移除整份
+    /// 日志（目录含多代文件）+ 名册/归档集/列表行；删除当前会话时先停
+    /// 运行再切到最近的剩余会话（无则空白草稿）。破坏性 → 菜单进确认
+    /// 弹窗（confirm_session_delete）后才走到这里。
+    fn delete_session(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        if self.agent_busy && self.current_session_id() == *id {
+            self.agent.cancel();
+        }
+        if self.draft_session.as_ref() == Some(id) {
+            // 未物化草稿：无磁盘足迹，摘行即弃
+            self.draft_session = None;
+        }
+        let cwd = self
+            .sessions
+            .iter()
+            .find(|m| &m.id == id)
+            .and_then(|m| m.cwd.clone());
+        let _ = self.recorder.delete(id, cwd.as_deref());
+        // 磁盘已删：名册/归档集/列表行同步清理，杜绝悬空引用
+        self.assign_session_to_workspace(id, None);
+        self.archived.remove(id.as_str());
+        self.sessions.retain(|s| &s.id != id);
+        if self.current_session_id() == *id {
+            let next = self
+                .sessions
+                .iter()
+                .find(|m| !self.archived.contains(m.id.as_str()))
+                .map(|m| m.id.clone());
+            match next {
+                Some(next) => self.switch_session_inner(next, true, cx),
+                None => self.enter_blank_draft(cx),
+            }
         }
         self.refresh_sidebar(cx);
         cx.notify();
@@ -4497,6 +4538,71 @@ impl Render for AppView {
                                             cx.notify();
                                         });
                                     })),
+                            ),
+                    ),
+            );
+        }
+        if let Some((del_id, del_title)) = self.confirm_session_delete.clone() {
+            let t_cancel = this.clone();
+            let t_confirm = this.clone();
+            root = root.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .top_0()
+                    .left_0()
+                    .bg(gpui::hsla(0.0, 0.0, 0.0, 0.3))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(360.0))
+                            .v_flex()
+                            .gap_3()
+                            .p_4()
+                            .rounded(px(24.0))
+                            .bg(theme::t().surface)
+                            .shadow(theme::elevation_prominent())
+                            .child(div().text_size(px(theme::FONT_ROW)).line_height(px(22.0)).font_weight(FontWeight::MEDIUM).text_color(theme::t().text).child("删除会话"))
+                            .child(
+                                div()
+                                    .text_size(px(theme::FONT_ROW))
+                                    .line_height(px(22.0))
+                                    .text_color(theme::t().text_2)
+                                    .child(format!("删除「{del_title}」将移除其完整会话日志（不可恢复）。归档可保留日志并从列表隐藏。")),
+                            )
+                            .child(
+                                div().flex().justify_end().gap_2()
+                                    .child(action_btn_lite("sess-del-cancel", "取消", false, move |_, _, cx| {
+                                        t_cancel.update(cx, |v, cx| { v.confirm_session_delete = None; cx.notify(); });
+                                    }))
+                                    .child({
+                                        let tk = theme::t();
+                                        div()
+                                            .id("sess-del-confirm")
+                                            .h(px(36.0))
+                                            .px(px(14.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(18.0))
+                                            .border_1()
+                                            .border_color(tk.error)
+                                            .text_size(px(theme::FONT_ROW))
+                                            .line_height(px(22.0))
+                                            .text_color(tk.error)
+                                            .cursor_pointer()
+                                            .hover(|st| st.bg(gpui::hsla(0.0, 0.9, 0.55, 0.12)))
+                                            .on_click(move |_, _, cx| {
+                                                let sid = dsh_llm::SessionId::new(del_id.clone());
+                                                t_confirm.update(cx, |v, cx| {
+                                                    v.confirm_session_delete = None;
+                                                    v.delete_session(&sid, cx);
+                                                });
+                                            })
+                                            .child("删除")
+                                    }),
                             ),
                     ),
             );

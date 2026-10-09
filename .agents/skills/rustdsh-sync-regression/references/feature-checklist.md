@@ -44,6 +44,8 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | C13 | 非人类消息 context 行（10-09 补缺）：plan-mode 切换后下一轮轮头出现「上下文注入」行（标签 plan-mode，notice 摘要），不再是用户气泡；model-switch 公告同形（标签 model-selection） | /plan 切换→发消息开轮 | 轮头 context 行出现、标签正确、展开可见通知文本、落盘 source 为 producer-owned kind（plan-mode/model-selection） |
 | C14 | subagent 子会话耐久化 + 运行中实时查看（0.1.6-alpha.2 补缺 #4）：模型调 subagent 委派任务后，子会话落盘（标题=description）+ 父日志 subagent/catalog 行；侧栏即时收录（活动即入列、免轮终免重启）；点开子会话后转录随写随刷（250ms 节流重放） | 让模型委派 subagent 任务→侧栏即现子会话→点开观察执行过程 | 工具结果含子报告；侧栏免重启出现子会话且运行中即可点开；查看中转录持续增长、轮次展开态不跳动；父会话日志含 subagent/catalog（dump_lines 可见） |
 
+| D9 | 删除会话（用户定向本地功能，上游仅归档）：会话行 … 菜单「删除会话」→ 确认弹窗（整份日志移除不可恢复 + 归档导引）→ 确认后目录/名册/列表行全清；删除当前会话自动切到最近剩余会话 | 会话行 … → 删除 → 确认 | 磁盘目录消失（~/.dsh/sessions/<proj>/<id>/）、列表行消失、当前者被删后视图切走、取消弹窗无副作用 |
+
 ## D. 侧栏（sidebar.rs）
 
 | # | 功能点 | 入口 | 判据 |

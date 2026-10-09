@@ -949,20 +949,23 @@ impl Render for SidebarView {
                                     }).into_any_element(),
                                 ]
                             } else {
-                                // web Rows 会话菜单三项：rename / fork / archive
+                                // web Rows 会话菜单三项 + 本地删除：rename / fork / archive / delete
                                 let t_m = sb.clone();
                                 let t_app1 = this.clone();
                                 let t_app2 = this.clone();
                                 let t_app3 = this.clone();
+                                let t_app4 = this.clone();
                                 let id1 = target.clone();
                                 let id2 = target.clone();
                                 let id3 = target.clone();
+                                let id4 = target.clone();
                                 let title = self
                                     .sessions
                                     .iter()
                                     .find(|m| m.id.as_str() == target)
                                     .map(|m| m.title.clone())
                                     .unwrap_or_default();
+                                let title4 = title.clone();
                                 vec![
                                     crate::sb_menu_row("sess-rename", "重命名", false, move |_, window, cx| {
                                         let id = id1.clone();
@@ -989,6 +992,15 @@ impl Render for SidebarView {
                                         let sid = dsh_llm::SessionId::new(id);
                                         t_app3.update(cx, |v, cx| {
                                             v.archive_session(&sid, cx);
+                                        });
+                                    }).into_any_element(),
+                                    // 删除（用户定向本地功能；上游仅归档）：
+                                    //破坏性——红字、先进确认弹窗
+                                    crate::sb_menu_row("sess-delete", "删除会话", true, move |_, _, cx| {
+                                        let id = id4.clone();
+                                        t_app4.update(cx, |v, cx| {
+                                            v.confirm_session_delete = Some((id, title4.clone()));
+                                            cx.notify();
                                         });
                                     }).into_any_element(),
                                 ]

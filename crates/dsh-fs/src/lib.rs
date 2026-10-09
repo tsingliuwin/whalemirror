@@ -14,6 +14,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use dsh_tools::{Tool, ToolDefinition, ToolExecutionInput, ToolExecutionResult};
+use dsh_llm::ContentBlock;
 use serde_json::json;
 
 /// 文件系统策略 provider：读可见性 + 写包含。
@@ -199,6 +200,7 @@ fn canonicalize_best_effort(path: &Path) -> PathBuf {
 
 /// `fs` 工具：所有操作经注入的策略检查后落到 `std::fs`。
 /// 相对路径按会话工作目录展开（web session.header.cwd 语义）。
+#[derive(Clone)]
 pub struct FsTool {
     policy: Arc<dyn FsPolicy>,
     workdir: dsh_tools::Workdir,
@@ -318,6 +320,133 @@ impl Tool for FsTool {
     }
 }
 
+/// 上游 `read` 工具名形别名（tool-fs/read.ts：name 'read'，参数
+/// file_path/offset/limit）：执行侧改写参数委托 fs op=read 原面（沙箱/
+/// workdir 同路）。提示词 section 以「read 工具」名引用——缺注册时模型
+/// 直呼名会吃 `no tool "read"`（miaocr 会话实测回归）。
+pub struct ReadTool {
+    fs: FsTool,
+}
+
+impl ReadTool {
+    pub fn new(fs: FsTool) -> Self {
+        Self { fs }
+    }
+}
+
+/// 上游 read 的行窗（offset 1 起 / limit 行数）；缺省全文件。
+fn apply_read_window(text: &str, offset: Option<u64>, limit: Option<u64>) -> String {
+    if offset.is_none() && limit.is_none() {
+        return text.to_string();
+    }
+    let start = offset.unwrap_or(1).saturating_sub(1) as usize;
+    let take = limit.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
+    text.lines().skip(start).take(take).collect::<Vec<_>>().join("
+")
+}
+
+#[async_trait]
+impl Tool for ReadTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "read".into(),
+            description: "Read a UTF-8 text file and return its content.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "Path to read, resolved by the filesystem backend. Provide `file_path` before other arguments." },
+                    "offset": { "type": "number", "description": "1-based first line to return. Defaults to 1." },
+                    "limit": { "type": "number", "description": "Maximum number of lines to return." }
+                },
+                "required": ["file_path"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        // 上游参数名为准；path 容错覆盖 fs op 形的习惯偏差
+        let args = &input.arguments;
+        let path = args
+            .get("file_path")
+            .or_else(|| args.get("path"))
+            .and_then(|v| v.as_str());
+        let path = match path {
+            Some(p) if !p.trim().is_empty() => p,
+            _ => return ToolExecutionResult::error("file_path must be a non-empty string"),
+        };
+        let forwarded = ToolExecutionInput {
+            call_id: input.call_id.clone(),
+            name: "fs".into(),
+            arguments: json!({"op": "read", "path": path}),
+        };
+        let result = self.fs.execute(&forwarded).await;
+        // 行窗在成功文本上后置应用（委托面返回整文件）
+        let offset = args.get("offset").and_then(|v| v.as_u64());
+        let limit = args.get("limit").and_then(|v| v.as_u64());
+        if offset.is_none() && limit.is_none() {
+            return result;
+        }
+        if let Some(ContentBlock::Text { text }) = result.content.first() {
+            let windowed = apply_read_window(text, offset, limit);
+            return ToolExecutionResult::text(windowed);
+        }
+        result
+    }
+}
+
+/// 上游 `write` 工具名形别名（tool-fs/write.ts：name 'write'，参数
+/// file_path/content）：委托 fs op=write 原面（diff presentation 同路）。
+pub struct WriteTool {
+    fs: FsTool,
+}
+
+impl WriteTool {
+    pub fn new(fs: FsTool) -> Self {
+        Self { fs }
+    }
+}
+
+#[async_trait]
+impl Tool for WriteTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "write".into(),
+            description: "Create or fully replace a UTF-8 text file.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "Path to write, resolved by the filesystem backend. Provide `file_path` before `content` in the arguments." },
+                    "content": { "type": "string", "description": "Full UTF-8 text content to write." }
+                },
+                "required": ["file_path", "content"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        let args = &input.arguments;
+        let path = args
+            .get("file_path")
+            .or_else(|| args.get("path"))
+            .and_then(|v| v.as_str());
+        let path = match path {
+            Some(p) if !p.trim().is_empty() => p,
+            _ => return ToolExecutionResult::error("file_path must be a non-empty string"),
+        };
+        let content = args.get("content").and_then(|v| v.as_str());
+        let content = match content {
+            Some(c) => c,
+            None => return ToolExecutionResult::error("content is required for write"),
+        };
+        let forwarded = ToolExecutionInput {
+            call_id: input.call_id.clone(),
+            name: "fs".into(),
+            arguments: json!({"op": "write", "path": path, "content": content}),
+        };
+        self.fs.execute(&forwarded).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +550,87 @@ mod mode_tests {
 mod presentation_tests {
     use super::*;
     use dsh_tools::{Tool, ToolExecutionInput};
+
+    #[tokio::test]
+    async fn read_alias_accepts_file_path_and_path_with_window() {
+        // 上游名形别名：file_path 为准、path 容错；offset/limit 行窗
+        let dir = std::env::temp_dir().join(format!("dsh-fs-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "l1
+l2
+l3
+l4").unwrap();
+        let wd = dsh_tools::Workdir::new();
+        wd.set(dir.clone());
+        let fs = FsTool::new(Arc::new(AllowAllPolicy)).with_workdir(wd.clone());
+        let read = ReadTool::new(fs.clone());
+
+        let r = read.execute(&input(r#"{"file_path": "a.txt"}"#)).await;
+        assert_eq!(text_of(&r), "l1
+l2
+l3
+l4");
+        // path 容错（fs op 形习惯偏差）
+        let r = read.execute(&input(r#"{"path": "a.txt"}"#)).await;
+        assert_eq!(text_of(&r), "l1
+l2
+l3
+l4");
+        // 行窗：offset 2 起、limit 2 行
+        let r = read
+            .execute(&input(r#"{"file_path": "a.txt", "offset": 2, "limit": 2}"#))
+            .await;
+        assert_eq!(text_of(&r), "l2
+l3");
+        // 缺 file_path
+        let r = read.execute(&input("{}")).await;
+        assert!(text_of(&r).contains("file_path must be a non-empty string"));
+        // 委托原面：目录 read 指路 op=list
+        let r = read.execute(&input(r#"{"file_path": "."}"#)).await;
+        assert!(text_of(&r).contains("use op=list"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn write_alias_writes_and_keeps_diff_presentation() {
+        let dir = std::env::temp_dir().join(format!("dsh-fs-alias-w-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wd = dsh_tools::Workdir::new();
+        wd.set(dir.clone());
+        let fs = FsTool::new(Arc::new(AllowAllPolicy)).with_workdir(wd);
+        let write = WriteTool::new(fs);
+
+        let r = write
+            .execute(&input(r#"{"file_path": "new.txt", "content": "hello"}"#))
+            .await;
+        assert!(text_of(&r).contains("wrote 5 bytes"));
+        assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "hello");
+        // diff presentation 委托面原样保留（oldText=null = 新文件）
+        let diff = r.presentation.expect("diff presentation");
+        assert_eq!(diff["card"], "diff");
+        assert_eq!(diff["diffs"][0]["oldText"], serde_json::Value::Null);
+        // 追加写：oldText 为先前内容
+        let r = write
+            .execute(&input(r#"{"file_path": "new.txt", "content": "hello2"}"#))
+            .await;
+        assert_eq!(r.presentation.unwrap()["diffs"][0]["oldText"], "hello");
+        // 缺 content
+        let r = write.execute(&input(r#"{"file_path": "x.txt"}"#)).await;
+        assert!(text_of(&r).contains("content is required"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn text_of(r: &ToolExecutionResult) -> String {
+        r.content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
 
     fn input(args: &str) -> ToolExecutionInput {
         ToolExecutionInput::with_raw_arguments(

@@ -105,13 +105,18 @@ fn shell_program() -> Option<std::path::PathBuf> {
     use std::sync::OnceLock;
     static BASH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     BASH.get_or_init(|| {
-        // PATH 上的 bash（Git Bash 终端环境）
+        // PATH 上的 bash（Git Bash 终端环境）。必须返回解析后的完整路径：
+        // CreateProcess 对裸名先搜 System32，而 System32\bash.exe 是 WSL
+        // 启动器——曾因此把 shell 工具劫持进 WSL（无 cargo/rustup、/c
+        // 路径不存在、每条命令带 wsl.exe UTF-16 代理警告噪声）
         if let Ok(path_var) = std::env::var("PATH") {
             let found = std::env::split_paths(&path_var)
                 .map(|dir| dir.join("bash.exe"))
                 .find(|p| p.is_file());
-            if found.is_some() {
-                return Some(std::path::PathBuf::from("bash"));
+            if let Some(bash) = found {
+                // 相对 PATH 项（如 "."）同样会让 CreateProcess 重新走搜索
+                // 序——规范化成绝对路径堵死回退
+                return Some(bash.canonicalize().unwrap_or(bash));
             }
         }
         // GUI 进程的 PATH 常只有 Git\cmd；按安装位次找包装器 bash.exe
@@ -405,5 +410,19 @@ mod tests {
             })
             .unwrap_or_default();
         assert!(!text.trim().is_empty(), "{text}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_program_is_never_a_bare_name() {
+        // 裸名 "bash" 会让 CreateProcess 先搜 System32，命中 WSL 启动器
+        // （曾把 shell 工具劫持进 WSL：无 cargo、/c 路径不存在、每条命令带
+        // wsl.exe UTF-16 代理警告）。锁死不变量：解析结果必须是绝对路径。
+        if let Some(bash) = shell_program() {
+            assert!(
+                bash.is_absolute() && bash.file_name().is_some_and(|f| f == "bash.exe"),
+                "resolved bash must be an absolute path, got {bash:?}"
+            );
+        }
     }
 }

@@ -6593,7 +6593,13 @@ fn main() {
         dsh_fs::FsMode::WorkspaceWrite,
         Vec::new(),
     ));
-    let _fs = tools.register(Arc::new(FsTool::new(fs_sandbox.clone()).with_workdir(workdir.clone()))).unwrap();
+    let fs_tool = FsTool::new(fs_sandbox.clone()).with_workdir(workdir.clone());
+    let _fs = tools.register(Arc::new(fs_tool.clone())).unwrap();
+    // 上游工具名形别名（tool-fs read/write.ts）：提示词 section 以「read
+    // 工具」名引用，缺注册时模型直呼名会吃 no tool "read"（miaocr 会话
+    // 实测回归）；共享同一 FsTool（沙箱/workdir 同路）
+    let _read = tools.register(Arc::new(dsh_fs::ReadTool::new(fs_tool.clone()))).unwrap();
+    let _write = tools.register(Arc::new(dsh_fs::WriteTool::new(fs_tool))).unwrap();
     let _shell = tools.register(Arc::new(ShellTool::default().with_workdir(workdir.clone()))).unwrap();
     let _web = tools.register(Arc::new(WebTool::new())).unwrap();
     let _grep = tools.register(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone()))).unwrap();

@@ -579,6 +579,9 @@ pub fn process_activity(name: &str, arguments: &str) -> ProcessActivity {
             Some("write") => ProcessActivity::Write,
             _ => ProcessActivity::Tools,
         },
+        // 上游名形别名工具（tool-fs read/write.ts）：直呼名的调用归类同面
+        "read" => ProcessActivity::Read,
+        "write" => ProcessActivity::Write,
         "grep" | "glob" => ProcessActivity::Search,
         "shell" | "bash" | "pwsh" => ProcessActivity::Commands,
         "web_search" => ProcessActivity::WebSearch,
@@ -712,6 +715,9 @@ mod process_title_tests {
     #[test]
     fn activity_categorizes_rustdsh_tool_names() {
         assert_eq!(process_activity("fs", r#"{"op":"read","path":"a"}"#), PA::Read);
+        // 上游名形别名（read/write 工具）归类同面
+        assert_eq!(process_activity("read", r#"{"file_path":"a"}"#), PA::Read);
+        assert_eq!(process_activity("write", r#"{"file_path":"a"}"#), PA::Write);
         assert_eq!(process_activity("fs", r#"{"op":"write","path":"a"}"#), PA::Write);
         assert_eq!(process_activity("fs", "{}"), PA::Tools);
         assert_eq!(process_activity("shell", "{}"), PA::Commands);

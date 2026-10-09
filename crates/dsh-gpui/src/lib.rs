@@ -283,6 +283,14 @@ pub struct DirLevel {
     pub truncated: bool,
 }
 
+/// html 预览判定（#7 documentpreview html 格式）：预览面板走
+/// TextView::html 富渲染（vendor 基础 HTML 标签内容阅读器——无 CSS）。
+pub fn is_html_preview(path: &str) -> bool {
+    let lower = path.rsplit(['/', '\\']).next().unwrap_or(path).to_ascii_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    matches!(ext, "html" | "htm" | "xhtml")
+}
+
 /// markdown 预览判定（#7 documentpreview markdown 格式）：预览面板走
 /// MarkdownBlock 富渲染（TextView）而非行号文本——扩展名表与聊天
 /// FileKind::Markdown 分类同源。
@@ -1275,5 +1283,19 @@ mod markdown_preview_tests {
         assert!(!is_markdown_preview("E:/ws/main.rs"));
         assert!(!is_markdown_preview("E:/ws/Cargo.toml"));
         assert!(!is_markdown_preview("noext"));
+    }
+}
+
+#[cfg(test)]
+mod html_preview_tests {
+    use super::*;
+
+    #[test]
+    fn html_routes_to_rich_render() {
+        assert!(is_html_preview("E:/ws/index.html"));
+        assert!(is_html_preview("docs/page.HTM"));
+        assert!(is_html_preview("doc.xhtml"));
+        assert!(!is_html_preview("E:/ws/main.rs"));
+        assert!(!is_html_preview("style.css"));
     }
 }

@@ -179,6 +179,23 @@ impl RenderOnce for MarkdownBlock {
         col
     }
 }
+/// 用 `TextView::html` 渲染一段 html（#7 documentpreview html 格式）：
+/// vendor 基础 HTML 标签内容阅读器（无 CSS——样式走主题默认）。
+#[derive(IntoElement)]
+pub(crate) struct HtmlBlock {
+    pub(crate) text: String,
+    pub(crate) id: usize,
+}
+
+impl RenderOnce for HtmlBlock {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let view = TextView::html(self.id, self.text, window, cx);
+        view.text_size(px(theme::FONT_MARKDOWN_BASE))
+            .line_height(px(theme::FONT_MARKDOWN_BASE_LEADING))
+            .font_family(theme_mono())
+    }
+}
+
 /// hover 提示（gpui-component Tooltip）。
 pub(crate) fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     move |_window, cx| cx.new(|_| Tooltip::new(text)).into()

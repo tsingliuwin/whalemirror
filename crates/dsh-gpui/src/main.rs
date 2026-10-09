@@ -2349,8 +2349,10 @@ impl AppView {
             // 图片预览（上游 documentpreview image 体）：体直接渲染位图，
             // 不走文本分页
             preview.eof = true;
-        } else if dsh_gpui::is_markdown_preview(&preview.path) {
-            // markdown 预览（上游 documentpreview markdown 体）：富渲染
+        } else if dsh_gpui::is_markdown_preview(&preview.path)
+            || dsh_gpui::is_html_preview(&preview.path)
+        {
+            // markdown/html 预览（上游 documentpreview md/html 体）：富渲染
             // 整文档（TextView），不分页——循环读页到 eof
             if let Some(root) = self.preview_root() {
                 while !preview.eof {
@@ -2440,8 +2442,10 @@ impl AppView {
             match &root {
                 Some(r) => {
                     Self::load_preview_page(r, p);
-                    // markdown 全量（富渲染整文档；其余单页起步续读）
-                    if dsh_gpui::is_markdown_preview(&p.path) {
+                    // markdown/html 全量（富渲染整文档；其余单页起步续读）
+                    if dsh_gpui::is_markdown_preview(&p.path)
+                        || dsh_gpui::is_html_preview(&p.path)
+                    {
                         while !p.eof {
                             Self::load_preview_page(r, p);
                         }
@@ -6523,6 +6527,28 @@ impl AppView {
                             .text_color(theme::t().text_2),
                     ),
             );
+        // html 预览体（上游 documentpreview html）：TextView::html 富渲染
+        // （vendor 基础标签内容阅读器——无 CSS，样式走主题默认）
+        if dsh_gpui::is_html_preview(&f.path) {
+            let text: String = if f.lines.is_empty() {
+                match &f.failure {
+                    Some(e) => dsh_gpui::preview_failure_line(e),
+                    None => "正在读取…".into(),
+                }
+            } else {
+                f.lines.join("
+")
+            };
+            return header.child(
+                div()
+                    .id(SharedString::from(format!("dock-html-{fi}")))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(16.0))
+                    .child(widgets::HtmlBlock { text, id: 950_000 + fi }),
+            );
+        }
         // markdown 预览体（上游 documentpreview markdown）：TextView 富
         // 渲染整文档（标题/列表/代码卡——与聊天流同一 MarkdownBlock）；
         // 行号列不显示，头部 wrap 钮保留（对 md 无效但无害，同图片）

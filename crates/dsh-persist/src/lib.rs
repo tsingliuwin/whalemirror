@@ -1290,6 +1290,29 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .to_string(),
             label: data?.get("label").and_then(|v| v.as_str()).map(str::to_string),
         }),
+        "image/offload" => {
+            let d = data?;
+            let targets: Vec<dsh_session::ImageOffloadTarget> = d
+                .get("targets")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| {
+                            Some(dsh_session::ImageOffloadTarget {
+                                seq: t.get("seq")?.as_u64()?,
+                                image_indexes: t
+                                    .get("imageIndexes")?
+                                    .as_array()?
+                                    .iter()
+                                    .filter_map(|i| i.as_u64().map(|x| x as usize))
+                                    .collect(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(SessionEvent::ImageOffload { targets })
+        }
         "deliverables/presented" => {
             let d = data?;
             let files = d
@@ -1383,6 +1406,7 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                     status: None,
                     provider_retry_after_ms: None,
                     request_id: None,
+                    offload_images: None,
                 });
             Some(SessionEvent::LlmRetry {
                 retry_id: d
@@ -1886,6 +1910,23 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
                 }),
             ))
         }
+        SessionEvent::ImageOffload { targets } => {
+            // 上游 image/offload：{targets:[{seq, imageIndexes}]}（选择器
+            // 落盘，重放投影省略命中图片）
+            let targets_json: Vec<serde_json::Value> = targets
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "seq": t.seq,
+                        "imageIndexes": t.image_indexes,
+                    })
+                })
+                .collect();
+            Some(row(
+                "image/offload",
+                serde_json::json!({ "targets": targets_json }),
+            ))
+        }
         SessionEvent::PresentedFiles { turn, call_id, files } => {
             // 上游 tool-present：present 成功结果落盘（含嵌套调用）。
             // files = [{path, description?}]（PresentedFile，description 缺省省略）
@@ -2117,6 +2158,34 @@ mod tests {
                 assert_eq!(files[1].description, None);
             }
             other => panic!("expected PresentedFiles, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_offload_round_trips_through_web_row() {
+        // 上游 image/offload：{targets:[{seq, imageIndexes}]}（卸载决定）
+        let ev = SessionEvent::ImageOffload {
+            targets: vec![
+                dsh_session::ImageOffloadTarget { seq: 3, image_indexes: vec![0, 2] },
+                dsh_session::ImageOffloadTarget { seq: 7, image_indexes: vec![1] },
+            ],
+        };
+        let row = event_to_web_line(&ev, 12, 100).unwrap();
+        assert_eq!(row["type"], "image/offload");
+        let targets = row["data"]["targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0]["seq"], 3);
+        assert_eq!(targets[0]["imageIndexes"], serde_json::json!([0, 2]));
+        let parsed = web_line_to_event(&row).expect("known type parses back");
+        match parsed {
+            SessionEvent::ImageOffload { targets } => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].seq, 3);
+                assert_eq!(targets[0].image_indexes, vec![0, 2]);
+                assert_eq!(targets[1].seq, 7);
+                assert_eq!(targets[1].image_indexes, vec![1]);
+            }
+            other => panic!("expected ImageOffload, got {other:?}"),
         }
     }
 
@@ -2674,6 +2743,7 @@ mod replay_tests {
             status: Some(402),
             provider_retry_after_ms: None,
             request_id: None,
+            offload_images: None,
         };
         let event = SessionEvent::TurnEnd {
             turn: 3,

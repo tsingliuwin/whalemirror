@@ -764,6 +764,64 @@ impl ReactLoopAgent {
         self.emit_ui(AgentEvent::TurnEnded { turn, reason });
     }
 
+    /// 图片卸载选择器（上游 offloadOldestImages）：按会话日志序（=请求序）
+    /// 遍历输入消息事件，深度优先数图片出现（含嵌套 tool-result 与已
+    /// 卸载），选最旧的未卸载出现共 `count` 个，落一条 image/offload 耐久
+    /// 决定（targets 非空才落）。返回是否有可卸载。
+    fn offload_oldest_images(&self, mut count: usize) -> bool {
+        if count == 0 {
+            return false;
+        }
+        let mut targets: Vec<dsh_session::ImageOffloadTarget> = Vec::new();
+        {
+            let session = self.session.lock().unwrap();
+            for entry in session.entries() {
+                if count == 0 {
+                    break;
+                }
+                // 输入消息节点（上游：user/message 与 tool/result；assistant
+                // 排除——模型输出不卸载）
+                let message = match &entry.event {
+                    SessionEvent::UserMessage(m) => m,
+                    SessionEvent::ToolResult { message, .. } => message,
+                    _ => continue,
+                };
+                let mut indexes: Vec<usize> = Vec::new();
+                let mut image_index = 0usize;
+                // 深度优先遍历（含嵌套 tool-result；已卸载的也计数但不选中）
+                fn visit(blocks: &[dsh_llm::ContentBlock], index: &mut usize, count: &mut usize, picked: &mut Vec<usize>) {
+                    for b in blocks {
+                        if *count == 0 {
+                            return;
+                        }
+                        match b {
+                            dsh_llm::ContentBlock::Image { offloaded, .. } => {
+                                if !*offloaded {
+                                    picked.push(*index);
+                                    *count -= 1;
+                                }
+                                *index += 1;
+                            }
+                            dsh_llm::ContentBlock::ToolResult { content, .. } => {
+                                visit(content, index, count, picked);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                visit(&message.content, &mut image_index, &mut count, &mut indexes);
+                if !indexes.is_empty() {
+                    targets.push(dsh_session::ImageOffloadTarget { seq: entry.seq, image_indexes: indexes });
+                }
+            }
+        }
+        if targets.is_empty() {
+            return false;
+        }
+        self.append_event(SessionEvent::ImageOffload { targets });
+        true
+    }
+
     async fn run_step(
         &self,
         turn: u64,
@@ -781,6 +839,17 @@ impl ReactLoopAgent {
             let mut stream = match self.llm.stream(options).await {
                 Ok(s) => s,
                 Err(e) => {
+                    // 图片预算恢复（4c，上游 compaction-image-offload 执行器）：
+                    // IMAGE_OFFLOAD_REQUIRED 携带需卸载数——按请求序选最旧
+                    // 未卸载出现落 image/offload 耐久决定，本步免费重试；
+                    // 无可卸载时按普通错误收束
+                    if e.code == "IMAGE_OFFLOAD_REQUIRED"
+                        && let Some(count) = e.failure.offload_images
+                        && count > 0
+                        && self.offload_oldest_images(count)
+                    {
+                        continue;
+                    }
                     self.report_error(turn, step, &e.message, &e.code);
                     return StepEnd::Concluded(TurnEndReason::Error { failure: *e.failure });
                 }

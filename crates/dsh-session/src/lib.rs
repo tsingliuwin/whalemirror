@@ -8,6 +8,6 @@
 pub mod session;
 
 pub use session::{
-    CancelCause, EpochHeader, HeaderReason, PresentedFile, RequestContext, Session, SessionEntry,
-    SessionEvent, SessionStatsTotals, TurnEndReason, session_stats_fold,
+    CancelCause, EpochHeader, HeaderReason, ImageOffloadTarget, PresentedFile, RequestContext, Session,
+    SessionEntry, SessionEvent, SessionStatsTotals, TurnEndReason, session_stats_fold,
 };

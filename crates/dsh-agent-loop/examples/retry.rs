@@ -48,6 +48,7 @@ impl LlmAdapter for FlakyAdapter {
                         status: Some(429),
                         provider_retry_after_ms: None,
                         request_id: None,
+            offload_images: None,
                     },
                 },
                 replay_state: None,

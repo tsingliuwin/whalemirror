@@ -49,6 +49,7 @@ impl LlmError {
                 status: None,
                 provider_retry_after_ms: None,
                 request_id: None,
+                offload_images: None,
             }),
             message,
             code,

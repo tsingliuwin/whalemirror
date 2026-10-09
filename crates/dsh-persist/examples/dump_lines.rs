@@ -38,6 +38,7 @@ fn main() {
                         dsh_session::SessionEvent::PlanMode { .. } => "plan/mode",
                         dsh_session::SessionEvent::SubagentCatalog { .. } => "subagent/catalog",
                         dsh_session::SessionEvent::PresentedFiles { .. } => "deliverables/presented",
+                        dsh_session::SessionEvent::ImageOffload { .. } => "image/offload",
                     };
                     *counts.entry(k).or_insert(0) += 1;
                 }

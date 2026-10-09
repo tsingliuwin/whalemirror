@@ -211,3 +211,60 @@ async fn tool_result_nested_image_becomes_followup_user_message() {
     assert_eq!(messages[2]["content"], "what do you see?");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[tokio::test]
+async fn oversized_inline_images_fail_with_offload_required_count() {
+    // 4b 预算发射：base64 表示超 20MB 预算 → IMAGE_OFFLOAD_REQUIRED 携带
+    // 需卸载数（ceil(bytes/3)*4 计长，quantum 10MB 圆整）
+    let dir = std::env::temp_dir().join(format!("dsh-img-budget-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = spawn_mock(&dir);
+
+    // 16MB 字节 → base64 ~21.3MB：超 20MB 预算（单张即需卸载 1 张）
+    let big = vec![0u8; 16 * 1024 * 1024];
+    let adapter = DeepSeekAdapter::with_base_url("test-key", base)
+        .with_image_fetcher(std::sync::Arc::new(move |_| Some(big.clone())));
+
+    let msg = Message::user(vec![ContentBlock::Image {
+        offloaded: false,
+        attachment: image_ref(),
+    }]);
+    let options = GenerateOptions::new("deepseek", "deepseek-flash", vec![msg]);
+    let err = match adapter.stream(options).await {
+        Err(e) => e,
+        Ok(_) => panic!("oversized image must fail before HTTP"),
+    };
+    assert_eq!(err.code, "IMAGE_OFFLOAD_REQUIRED");
+    assert_eq!(err.failure.offload_images, Some(1), "one occurrence to offload");
+    assert!(err.message.contains("must be offloaded"), "{}", err.message);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn offloaded_images_project_to_placeholder_not_image_url() {
+    // 4a/4c 投影：offloaded=true 的块发占位文本（无 image_url part）
+    let dir = std::env::temp_dir().join(format!("dsh-img-offloaded-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = spawn_mock(&dir);
+
+    let png = vec![0x89, b'P', b'N', b'G'];
+    let adapter = DeepSeekAdapter::with_base_url("test-key", base)
+        .with_image_fetcher(std::sync::Arc::new(move |_| Some(png.clone())));
+
+    let msg = Message::user(vec![
+        ContentBlock::Image {
+            offloaded: true,
+            attachment: image_ref(),
+        },
+    ]);
+    let options = GenerateOptions::new("deepseek", "deepseek-flash", vec![msg]);
+    let _ = adapter.stream(options).await;
+
+    let body = parse_request(&dir);
+    let content = &body["messages"][0]["content"];
+    assert!(content.is_string(), "placeholder projection keeps string content");
+    let text = content.as_str().unwrap();
+    assert!(text.contains("image omitted to fit request image limits"), "{text}");
+    assert!(text.contains("ask the user to attach it again"), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}

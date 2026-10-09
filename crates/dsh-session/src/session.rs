@@ -73,6 +73,15 @@ pub struct PresentedFile {
     pub description: Option<String>,
 }
 
+/// 一次图片卸载决定命中的一个消息：其内被选中省略的图片下标集。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageOffloadTarget {
+    /// 承载这些图片出现的事件 seq（user/message 或 tool/result）。
+    pub seq: u64,
+    /// 深度优先零基图片下标（含嵌套 tool-result 与已卸载出现）。
+    pub image_indexes: Vec<usize>,
+}
+
 /// One durable session event.
 ///
 /// Serialized as tagged JSON (one line per event) so a session can be
@@ -187,6 +196,13 @@ pub enum SessionEvent {
         turn: u64,
         call_id: String,
         files: Vec<PresentedFile>,
+    },
+    /// 耐久图片卸载决定（web `image/offload`，上游 compaction-image-offload
+    /// 选择器落盘）：targets 命名被选中省略的输入图片出现——(所在消息
+    /// 事件 seq, 深度优先图片下标数组（含嵌套与已卸载，严格递增）)。
+    /// 消息节点与身份不变；后续请求把命中块替换为占位文本。
+    ImageOffload {
+        targets: Vec<ImageOffloadTarget>,
     },
     /// 一次 provider 路由重试等待排定前的持久记录（web `llm/retry`，
     /// LlmRetryEventData：normal 模式带 maxRetries，always 模式不带）。
@@ -357,6 +373,11 @@ impl Session {
                     out.retain(|(seq, _, checkpoint)| !checkpoint && *seq > *before_seq);
                     // 影子区是历史前缀：检查点插在保留消息之前（替换其位置）
                     out.insert(0, (e.seq, compaction_checkpoint_message(summary), true));
+                }
+                // 图片卸载：命中消息的图片块置 offloaded（adapter 序列化
+                // 投影为占位文本——上游 offloadMessageImages 同语义）
+                SessionEvent::ImageOffload { targets } => {
+                    apply_offload_targets(&mut out, targets);
                 }
                 _ => {}
             }
@@ -571,6 +592,45 @@ mod tests {
     }
 }
 
+/// 对已派生 (seq, message) 序列应用一次卸载决定：命中消息的深度优先
+/// 图片下标记 offloaded=true（重放镜像计数——含嵌套与已卸载出现）。
+fn apply_offload_targets(
+    out: &mut Vec<(u64, dsh_llm::Message, bool)>,
+    targets: &[ImageOffloadTarget],
+) {
+    for t in targets {
+        let Some((_, message, _)) = out.iter_mut().find(|(seq, _, _)| *seq == t.seq) else {
+            continue;
+        };
+        let mut image_index = 0usize;
+        let mut wanted = t.image_indexes.clone();
+        wanted.sort_unstable();
+        let mut remaining = wanted.as_slice();
+        // 深度优先：顶层先于嵌套 tool-result 内容
+        fn visit(blocks: &mut [dsh_llm::ContentBlock], counter: &mut usize, wanted: &mut &[usize]) {
+            for b in blocks.iter_mut() {
+                match b {
+                    dsh_llm::ContentBlock::Image { offloaded, .. } => {
+                        if let Some((&first, rest)) = wanted.split_first() {
+                            if *counter == first {
+                                *offloaded = true;
+                                *wanted = rest;
+                            }
+                        }
+                        *counter += 1;
+                    }
+                    dsh_llm::ContentBlock::ToolResult { content, .. } => {
+                        visit(content, counter, wanted);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut counter = 0usize;
+        visit(&mut message.content, &mut counter, &mut remaining);
+    }
+}
+
 #[cfg(test)]
 mod session_stats_tests {
     use super::*;
@@ -680,5 +740,104 @@ mod session_stats_tests {
         ];
         let t3 = session_stats_fold(&entries3);
         assert_eq!((t3.steps, t3.llm_ms), (1, 0));
+    }
+}
+
+#[cfg(test)]
+mod image_offload_tests {
+    use super::*;
+    use dsh_llm::{ContentBlock, Message, MessageSource};
+
+    fn image_msg(id: &str, offloaded: bool) -> Message {
+        Message::new(
+            dsh_llm::Role::User,
+            vec![
+                ContentBlock::text("img"),
+                ContentBlock::Image {
+                    attachment: dsh_llm::ImageAttachmentRef {
+                        attachment_id: format!("sha256:{id}"),
+                        name: None,
+                        media_type: "image/png".into(),
+                        bytes: 10,
+                        width: 4,
+                        height: 4,
+                        original_dimensions: None,
+                    },
+                    offloaded,
+                },
+            ],
+            MessageSource::User,
+        )
+    }
+
+    #[test]
+    fn derive_applies_offload_marks_to_targeted_occurrences() {
+        let mut s = Session::new(dsh_llm::SessionId::new("t"));
+        let m1 = image_msg("a", false);
+        let m2 = image_msg("b", false);
+        s.append(SessionEvent::UserMessage(m1.clone()));
+        s.append(SessionEvent::UserMessage(m2.clone()));
+        // 卸载第二条消息的图片（seq=1）
+        s.append(SessionEvent::ImageOffload {
+            targets: vec![ImageOffloadTarget { seq: 1, image_indexes: vec![0] }],
+        });
+        let out = s.derive_messages_with_seqs();
+        assert_eq!(out.len(), 2);
+        match &out[0].1.content[1] {
+            ContentBlock::Image { offloaded, .. } => assert!(!*offloaded, "seq 0 untouched"),
+            other => panic!("{other:?}"),
+        }
+        match &out[1].1.content[1] {
+            ContentBlock::Image { offloaded, .. } => assert!(*offloaded, "seq 1 marked"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn offload_marks_count_nested_tool_result_images() {
+        // 深度优先计数：顶层图=index 0，嵌套 tool-result 内图=index 1
+        let mut s = Session::new(dsh_llm::SessionId::new("t2"));
+        let nested = Message::new(
+            dsh_llm::Role::User,
+            vec![
+                ContentBlock::Image {
+                    attachment: dsh_llm::ImageAttachmentRef {
+                        attachment_id: "sha256:top".into(),
+                        name: None, media_type: "image/png".into(),
+                        bytes: 1, width: 1, height: 1, original_dimensions: None,
+                    },
+                    offloaded: false,
+                },
+                ContentBlock::tool_result(
+                    dsh_llm::CallId("c".into()),
+                    vec![ContentBlock::Image {
+                        attachment: dsh_llm::ImageAttachmentRef {
+                            attachment_id: "sha256:nested".into(),
+                            name: None, media_type: "image/png".into(),
+                            bytes: 1, width: 1, height: 1, original_dimensions: None,
+                        },
+                        offloaded: false,
+                    }],
+                    false,
+                ),
+            ],
+            MessageSource::User,
+        );
+        s.append(SessionEvent::UserMessage(nested));
+        s.append(SessionEvent::ImageOffload {
+            targets: vec![ImageOffloadTarget { seq: 0, image_indexes: vec![1] }],
+        });
+        let out = s.derive_messages_with_seqs();
+        match &out[0].1.content[0] {
+            ContentBlock::Image { offloaded, .. } => assert!(!*offloaded, "index 0 untouched"),
+            other => panic!("{other:?}"),
+        }
+        match &out[0].1.content[1] {
+            ContentBlock::ToolResult { content, .. } => match &content[0] {
+                ContentBlock::Image { offloaded, .. } => assert!(*offloaded, "nested index 1 marked"),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
     }
 }

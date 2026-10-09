@@ -183,6 +183,7 @@ fn v2_failed_attempt_flushes_as_assistant_attempt() {
                 status: None,
                 provider_retry_after_ms: None,
                 request_id: None,
+                offload_images: None,
             },
         },
     )

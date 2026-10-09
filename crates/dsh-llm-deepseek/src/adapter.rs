@@ -83,12 +83,19 @@ impl DeepSeekAdapter {
         if let Some(system) = &options.system {
             messages.push(json!({ "role": "system", "content": system }));
         }
+        // offloaded 图片先投影为占位文本（4a project_offloaded_images：耐久
+        // 卸载决定命中的块不再发 image_url，模型见附件名+恢复指引文本；
+        // 无对象路径解析时的降级文案与上游同）——投影后的消息再进序列化
+        let messages_in: Vec<dsh_llm::Message> = dsh_llm::image_offload::project_offloaded_images(
+            &options.messages,
+            |a| dsh_llm::image_offload::offloaded_image_text(a, None),
+        );
         // tool-result 内嵌图片（read_image 等结果）：OpenAI wire 的 tool 角色
         // 不携带 image_url part——抽出来聚成紧随工具消息组的合成 user 消息
         //（上游 wire 为 anthropic-messages 形，tool 结果本身走 user 角色，
         // 图片天然可达；此为 OpenAI 形下的等价承载）
         let mut pending_image_parts: Vec<Value> = Vec::new();
-        for m in &options.messages {
+        for m in &messages_in {
             let nested_image = matches!(m.role, Role::User)
                 && matches!(
                     m.content.as_slice(),
@@ -297,6 +304,7 @@ impl DeepSeekAdapter {
             status: Some(status),
             provider_retry_after_ms: None,
             request_id: None,
+            offload_images: None,
         }
     }
 
@@ -332,6 +340,7 @@ impl DeepSeekAdapter {
                             status: None,
                             provider_retry_after_ms: None,
                             request_id: None,
+            offload_images: None,
                         });
                         return;
                     },
@@ -364,6 +373,33 @@ impl LlmAdapter for DeepSeekAdapter {
 
     async fn stream(&self, options: GenerateOptions) -> Result<BoxStream, LlmError> {
         let signal = options.signal.clone();
+        // 图片预算检查（4b，上游 images.ts assertImagesFit inline 形）：
+        // base64 表示（ceil(bytes/3)*4）计长；超限不自行移除而以
+        // IMAGE_OFFLOAD_REQUIRED 携带需卸载数失败——恢复执行器落决定后重试
+        {
+            let budget = dsh_llm::image_offload::ImageRequestBudget {
+                representation: dsh_llm::image_offload::ImageRepresentation::Base64,
+                max_bytes: Some(20 * 1024 * 1024),
+                max_images: Some(600),
+                byte_quantum: Some(10 * 1024 * 1024),
+                count_quantum: Some(20),
+            };
+            let count = dsh_llm::image_offload::required_image_offload(
+                &options.messages,
+                &budget,
+                |a| self.image_fetcher.as_ref().and_then(|f| f(a)).map(|b| b.len() as u64).unwrap_or(a.bytes),
+            );
+            if count > 0 {
+                let mut err = LlmError::new(
+                    format!(
+                        "DeepSeek Messages base64 request images exceed the route budget; {count} more oldest occurrence(s) must be offloaded."
+                    ),
+                    "IMAGE_OFFLOAD_REQUIRED",
+                );
+                err.failure.offload_images = Some(count);
+                return Err(err);
+            }
+        }
         let body = self.build_body(&options);
         let resp = self
             .client
@@ -548,6 +584,7 @@ impl StreamCtx {
                             status: None,
                             provider_retry_after_ms: None,
                             request_id: None,
+            offload_images: None,
                         },
                     }
                 } else {

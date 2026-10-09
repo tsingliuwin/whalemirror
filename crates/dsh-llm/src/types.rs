@@ -255,6 +255,11 @@ pub struct LlmFailure {
     /// Opaque provider-issued request identifier for diagnostics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<ProviderRequestId>,
+    /// With code `IMAGE_OFFLOAD_REQUIRED`: how many more of the oldest retained
+    /// input-image occurrences must be durably offloaded before the request
+    /// fits（上游 failure 载荷的 typed 承载；其余 code 恒 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_images: Option<usize>,
 }
 
 /// Adapter-private lossless-JSON state for replaying a successful response.
@@ -336,6 +341,7 @@ impl StreamChunk {
                     status: None,
                     provider_retry_after_ms: None,
                     request_id: None,
+                    offload_images: None,
                 },
             },
             replay_state: None,
@@ -428,6 +434,7 @@ impl AbortSignal {
                 status: None,
                 provider_retry_after_ms: None,
                 request_id: None,
+                offload_images: None,
             })
         } else {
             Ok(())

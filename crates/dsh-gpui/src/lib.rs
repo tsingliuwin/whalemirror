@@ -736,6 +736,21 @@ mod process_title_tests {
     }
 }
 
+// ---- Echo 退役判定（上游 809e0942b9 retire confirmed echoes 的单进程 analogue）----
+
+/// 轮终判定未认领回显：composer 已回显但从未落盘（日志无该消息 id）的
+/// echo → 退役集合。已认领（id 已落盘）的回显保留。
+pub fn unclaimed_echoes(
+    echo_ids: &[String],
+    logged: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    echo_ids
+        .iter()
+        .filter(|id| !logged.contains(*id))
+        .cloned()
+        .collect()
+}
+
 // ---- 运行中查看子会话：重放节流（子活动高频，250ms 合并窗口）----
 
 /// 被查看子会话此刻是否该重放最新快照（上次重放以来超过节流窗口）。
@@ -937,5 +952,30 @@ mod peek_refresh_tests {
         assert!(!peek_refresh_due(Some(t0), t0 + Duration::from_millis(100)));
         assert!(!peek_refresh_due(Some(t0), t0 + Duration::from_millis(249)));
         assert!(peek_refresh_due(Some(t0), t0 + Duration::from_millis(250)));
+    }
+}
+
+#[cfg(test)]
+mod unclaimed_echo_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn set(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn claimed_echoes_survive_unclaimed_retire() {
+        let drops = unclaimed_echoes(
+            &["claimed-1".into(), "ghost-1".into(), "claimed-2".into(), "ghost-2".into()],
+            &set(&["claimed-1", "claimed-2"]),
+        );
+        assert_eq!(drops, set(&["ghost-1", "ghost-2"]));
+    }
+
+    #[test]
+    fn no_echoes_and_all_claimed_are_noops() {
+        assert!(unclaimed_echoes(&[], &set(&["a"])).is_empty());
+        assert!(unclaimed_echoes(&["a".into()], &set(&["a", "b"])).is_empty());
     }
 }

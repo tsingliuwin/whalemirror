@@ -721,6 +721,7 @@ impl ChatView {
                     // 失败轮次在历史里也要可见（实时路径由 AgentEvent::Error
                     // 入列；回放此前只有用户气泡、轮次看起来凭空蒸发）
                     self.entries.push(ChatEntry {
+            echo_id: None,
                         step: None,
                         step_duration_ms: None,
                         role: Role::Error,
@@ -779,6 +780,7 @@ impl ChatView {
                         // 轨迹指标列数据源：事件级 usage 落条目快照
                         // （计时字段日志无承载，留 0 → 时长列按缺省 — 渲染）
                         self.entries.push(ChatEntry {
+            echo_id: None,
                             step: None,
                             step_duration_ms: None,
                             role: Role::Assistant,
@@ -834,6 +836,7 @@ impl ChatView {
                         continue;
                     }
                     self.entries.push(ChatEntry {
+            echo_id: None,
                         step: None,
                         step_duration_ms: None,
                         role: Role::Context,
@@ -892,6 +895,7 @@ impl ChatView {
                     // model-switch notice，plugin 包装内存形同映射）
                     if let Some((info, text)) = context_entry_from(m) {
                         self.entries.push(ChatEntry {
+            echo_id: None,
                             step: None,
                             step_duration_ms: None,
                             role: Role::Context,
@@ -909,6 +913,7 @@ impl ChatView {
                         blocks.push(MsgBlock::Text(text));
                     }
                     self.entries.push(ChatEntry {
+            echo_id: None,
                         step: None,
                         step_duration_ms: None,
                         role: Role::User,
@@ -956,6 +961,7 @@ impl ChatView {
                 }
                 SessionEvent::Compaction { .. } => {
                     self.entries.push(ChatEntry {
+            echo_id: None,
 step: None,
 step_duration_ms: None, role: Role::Notice, blocks: vec![], done: true, elapsed: None, usage: None, ended_at_ms: None, turn: cur_turn, context: None,
 open: false,
@@ -1009,6 +1015,7 @@ open: false,
         let new = !matches!(self.entries.last(), Some(e) if e.role == Role::Assistant && !e.done);
         if new {
             self.entries.push(ChatEntry {
+            echo_id: None,
                 step: None,
                 step_duration_ms: None,
                 role: Role::Assistant,
@@ -1041,13 +1048,49 @@ open: false,
         self.heights_dirty.set(true);
     }
 
+    /// 轮终 echo 退役：composer 已回显但从未落盘（日志无该消息 id）的
+    /// user 条目移除——取消时排在队里的 steer/发送不留幽灵气泡（实时态
+    /// 与重载态一致；上游 809e0942b9 的单进程 analogue）。已认领（id 已
+    /// 落盘）与非回显条目不受影响。
+    fn retire_unclaimed_echoes(&mut self) {
+        if !self.entries.iter().any(|e| e.echo_id.is_some()) {
+            return;
+        }
+        let session = self.session_handle();
+        let logged: std::collections::HashSet<String> = session
+            .lock()
+            .unwrap()
+            .entries()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::UserMessage(m) => Some(m.id.0.clone()),
+                _ => None,
+            })
+            .collect();
+        let echo_ids: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|e| e.echo_id.clone())
+            .collect();
+        let drop_ids = dsh_gpui::unclaimed_echoes(&echo_ids, &logged);
+        if drop_ids.is_empty() {
+            return;
+        }
+        self.entries
+            .retain(|e| e.echo_id.as_ref().map_or(true, |id| !drop_ids.contains(id)));
+        self.heights_dirty.set(true);
+        self.sync_chat_list(false);
+    }
+
     /// 用户消息入列（标题逻辑在 AppView：sessions/recorder 是宿主职责）。
     /// 用户消息条目（混合附件版）：`text = None` 为附件-only 发送；
-    /// 附件块排在文本前（渲染时呈气泡右上区域）。
+    /// 附件块排在文本前（渲染时呈气泡右上区域）。`message_id` 为本地
+    /// 回显对应的待认领消息 id（轮终退役判定依据）。
     pub(crate) fn push_user_entry_with(
         &mut self,
         text: Option<String>,
         attachments: Vec<crate::ChatAttachment>,
+        message_id: Option<String>,
     ) {
         let mut blocks: Vec<MsgBlock> =
             attachments.into_iter().map(MsgBlock::Attachment).collect();
@@ -1055,6 +1098,7 @@ open: false,
             blocks.push(MsgBlock::Text(t));
         }
         self.entries.push(ChatEntry {
+            echo_id: message_id,
             step: None,
             step_duration_ms: None,
             role: Role::User,
@@ -1071,6 +1115,7 @@ open: false,
     /// @ 文件引用的上下文注入行入列。
     pub(crate) fn push_context_entry(&mut self, info: ContextInfo, text: String) {
         self.entries.push(ChatEntry {
+            echo_id: None,
             step: None,
             step_duration_ms: None,
             role: Role::Context,
@@ -1236,6 +1281,7 @@ open: false,
             }
             AgentEvent::TurnEnded { turn, .. } => {
                 self.running = false;
+                self.retire_unclaimed_echoes();
                 let elapsed = self.turn_started_at.map(|t| t.elapsed());
                 // 冻结本轮统计快照（web turn tail：usage 药丸 + 用时对话框）
                 let mut usage = std::mem::take(&mut self.turn_usage);
@@ -1284,6 +1330,7 @@ open: false,
                 self.running = false;
                 self.turn_started_at = None;
                 self.entries.push(ChatEntry {
+            echo_id: None,
                     step: None,
                     step_duration_ms: None,
                     role: Role::Error,
@@ -1297,6 +1344,7 @@ open: false,
             }
             AgentEvent::Compacted { .. } => {
                 self.entries.push(ChatEntry {
+            echo_id: None,
 step: None,
 step_duration_ms: None, role: Role::Notice, blocks: vec![], done: true, elapsed: None, usage: None, ended_at_ms: None, turn: self.ui_turn, context: None,
 open: false,

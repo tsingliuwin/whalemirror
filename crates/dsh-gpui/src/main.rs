@@ -191,6 +191,10 @@ struct ChatEntry {
     step_duration_ms: Option<u64>,
     /// 轮内步号（轨迹「步骤 N」组头分组键；user/notice 为 None）
     step: Option<u64>,
+    /// 本地回显对应的待认领消息 id（仅 composer 发送的 user 条目；轮终
+    /// 未出现在日志 = 未认领 → 退役移除，上游 809e0942b9 retire echoes
+    /// 的单进程 analogue——取消时排队 steer 不留幽灵气泡）。
+    echo_id: Option<String>,
 }
 
 /// One session shown in the sidebar list.
@@ -3544,8 +3548,10 @@ impl AppView {
         }
         let msg = Message::user(blocks);
         let cards_for_chat = cards;
+        // 回显携带消息 id：轮终未落盘即退役（取消时不留幽灵气泡）
+        let echo_id = msg.id.0.clone();
         self.chat.update(cx, |c, cx| {
-            c.push_user_entry_with(has_text.then(|| text.to_string()), cards_for_chat);
+            c.push_user_entry_with(has_text.then(|| text.to_string()), cards_for_chat, Some(echo_id));
             cx.notify();
         });
         // followup 语义 = send(user_message, NextTurn)；这里携带混合内容块

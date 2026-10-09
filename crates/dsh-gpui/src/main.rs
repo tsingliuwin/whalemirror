@@ -1658,9 +1658,18 @@ fn context_info(
         "agent-instructions" => non_empty(changes_paths.join(", ")).or_else(|| Some(kind.to_string())),
         "plugin" => plugin.clone().filter(|p| !p.is_empty()).or_else(|| Some(kind.to_string())),
         "skill-invocation" => name.clone().filter(|n| !n.is_empty()).or_else(|| Some(kind.to_string())),
+        // settlement 通知（上游 subagent-settled notice）：标签取 summary
+        // 首句、标题「子任务结束」
+        "subagent-settled" => summary.clone().filter(|s| !s.is_empty()),
         other => Some(other.to_string()),
     };
-    let title = if kind == "session-reference" { "跨会话召回" } else { "上下文注入" };
+    let title = if kind == "session-reference" {
+        "跨会话召回"
+    } else if kind == "subagent-settled" {
+        "子任务结束"
+    } else {
+        "上下文注入"
+    };
     let bounded = summary.as_ref().and_then(|s| {
         let t = s.trim();
         if t.is_empty() {

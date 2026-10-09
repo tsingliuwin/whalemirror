@@ -139,6 +139,41 @@ impl SubagentTool {
     }
 }
 
+/// 结束原因（上游 SubagentResult['stopReason'] 的 rustdsh 对应面）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementStop {
+    Completed,
+    Aborted,
+    MaxTokens,
+    Error,
+}
+
+/// 结束摘要首行（上游 settlementSummary 逐字——`Background subagent {id}`
+/// 五分支文案；rustdsh 无 continuable 拒绝面，走 completed 不可续形）。
+pub fn settlement_summary_line(child_id: &str, stop: SettlementStop) -> String {
+    let subject = format!("Background subagent {child_id}");
+    match stop {
+        // rustdsh 子会话为一次性（无 follow-up 通道）——不可续形
+        SettlementStop::Completed => format!("{subject} finished. It cannot receive follow-up messages."),
+        SettlementStop::Aborted => format!("{subject} was stopped before it finished."),
+        SettlementStop::MaxTokens => format!("{subject} ran out of room before it finished."),
+        SettlementStop::Error => format!("{subject} failed before it finished."),
+    }
+}
+
+/// settlement 通知文本（上游 createSettlementMessage 的 content 面：
+/// 摘要行 + closing text 两形 + 无 structured/diagnostic 携带面）。
+pub fn settlement_notice_text(child_id: &str, stop: SettlementStop, closing: Option<&str>) -> String {
+    let summary = settlement_summary_line(child_id, stop);
+    match closing.map(str::trim).filter(|t| !t.is_empty()) {
+        None => format!("{summary}
+It left no closing message."),
+        Some(text) => format!("{summary}
+Its closing message:
+{text}"),
+    }
+}
+
 /// 从子会话日志取末条带文本的助手消息（子任务的最终答复）。
 fn final_assistant_text(session: &Session) -> Option<String> {
     session
@@ -262,6 +297,33 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
             }
             Ok(()) => {
                 let text = final_assistant_text(&child.session().lock().unwrap());
+                // settlement 通知（上游 notifySettlement：子任务结束时向父
+                // 会话落一条 subagent-settled user/message——context 行呈现，
+                // 结束摘要 + closing 文本两形；final report 工具结果保持不变）。
+                // 经 parent link 落父日志（同 subagent/catalog 的路由）
+                let cid = child_id.as_str();
+                let stop = SettlementStop::Completed;
+                {
+                    let notice = settlement_notice_text(cid, stop, text.as_deref());
+                    let notice_msg = dsh_llm::Message::new(
+                        dsh_llm::Role::User,
+                        vec![dsh_llm::ContentBlock::text(notice)],
+                        dsh_llm::MessageSource::Context {
+                            context_kind: "subagent-settled".into(),
+                            plugin: None,
+                            form: Some("notice".into()),
+                            summary: Some(settlement_summary_line(cid, stop)),
+                            changes_paths: Vec::new(),
+                            reference_labels: Vec::new(),
+                            name: None,
+                        },
+                    );
+                    if let Some(parent) = self.parent.lock().unwrap().upgrade() {
+                        parent.append_session_event(dsh_session::SessionEvent::UserMessage(
+                            notice_msg,
+                        ));
+                    }
+                }
                 match text {
                     Some(text) => {
                         ToolExecutionResult::text(format!(
@@ -272,5 +334,44 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+
+    #[test]
+    fn summary_lines_match_upstream_wording() {
+        assert_eq!(
+            settlement_summary_line("session-c1", SettlementStop::Completed),
+            "Background subagent session-c1 finished. It cannot receive follow-up messages."
+        );
+        assert_eq!(
+            settlement_summary_line("session-c1", SettlementStop::Aborted),
+            "Background subagent session-c1 was stopped before it finished."
+        );
+        assert_eq!(
+            settlement_summary_line("session-c1", SettlementStop::MaxTokens),
+            "Background subagent session-c1 ran out of room before it finished."
+        );
+        assert_eq!(
+            settlement_summary_line("session-c1", SettlementStop::Error),
+            "Background subagent session-c1 failed before it finished."
+        );
+    }
+
+    #[test]
+    fn notice_text_has_two_closing_forms() {
+        // 有 closing 文本：摘要 + Its closing message: + 文本
+        let with = settlement_notice_text("session-c1", SettlementStop::Completed, Some("report body"));
+        assert!(with.contains("finished. It cannot receive follow-up messages."), "{with}");
+        assert!(with.contains("Its closing message:\nreport body"), "{with}");
+        // 无 closing：It left no closing message.
+        let without = settlement_notice_text("session-c1", SettlementStop::Completed, None);
+        assert!(without.contains("It left no closing message."), "{without}");
+        // 空白 closing 同无消息形态
+        let blank = settlement_notice_text("session-c1", SettlementStop::Completed, Some("   "));
+        assert!(blank.contains("It left no closing message."), "{blank}");
     }
 }

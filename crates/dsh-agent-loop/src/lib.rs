@@ -473,6 +473,16 @@ impl ReactLoopAgent {
         n
     }
 
+    /// 编辑排队消息（上游 queue.edit——仅纯文本行，内容整体替换）。
+    pub fn edit_queued(&self, message_id: &str, new_text: &str) -> bool {
+        self.inbox.lock().unwrap().edit(message_id, new_text)
+    }
+
+    /// 删除排队消息（上游 queue.remove）。
+    pub fn remove_queued(&self, message_id: &str) -> bool {
+        self.inbox.lock().unwrap().remove(message_id)
+    }
+
     /// Inject context without waking the driver.
     pub fn inject(&self, message: Message) {
         self.inbox.lock().unwrap().append(InboxTarget::NextStep, message.clone());

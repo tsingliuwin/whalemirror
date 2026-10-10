@@ -249,6 +249,14 @@ enum CenterTab {
 
 /// ChatView 的渲染期快照（AppView render 一次读取，嵌套渲染函数不再
 /// 逐个再进子实体）。
+/// 排队条带行快照（QueueDock 渲染面）。
+struct QueueRowSnap {
+    id: String,
+    preview: String,
+    /// 纯文本行才可编辑（上游 text !== null）。
+    editable: bool,
+}
+
 struct ChatSnap {
     empty: bool,
     running: bool,
@@ -256,8 +264,8 @@ struct ChatSnap {
     stats: crate::chat::SessionStats,
     /// 草稿 '/' 前缀的命令菜单过滤词（会话态才有）。
     slash_query: Option<String>,
-    /// 排队条带行（(消息 id, 预览文本)——QueueDock 渲染与 steer 行动作面）。
-    queued: Vec<(String, String)>,
+    /// 排队条带行（QueueDock 渲染与行动作面；editable=纯文本行）。
+    queued: Vec<QueueRowSnap>,
 }
 
 
@@ -1600,6 +1608,10 @@ pub(crate) struct AppView {
     session_drafts: HashMap<SessionId, ComposerDraft>,
     /// 排队条带折叠态（上游 QueueDock 多条默认折叠只露计数头）。
     queue_collapsed: bool,
+    /// 行内编辑中的排队行（上游 InlineEditor——Some=该行处于编辑态）。
+    queue_editing: Option<String>,
+    /// 排队行内编辑输入（单实例，编辑态行挂载）。
+    queue_edit_input: Entity<InputState>,
     _input_subscription: Subscription,
     /// 对话/轨迹主体（独立 entity：流式 delta 的失效只打它；侧栏/详情经
     /// AnyView 的 element_state 缓存复用上帧结果，不再随流式逐帧重建）
@@ -1726,6 +1738,7 @@ impl AppView {
         edit_key: Entity<InputState>,
         edit_base: Entity<InputState>,
         fetch_query: Entity<InputState>,
+        queue_edit_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
@@ -1890,6 +1903,8 @@ impl AppView {
             pending_input: None,
             session_drafts: HashMap::new(),
             queue_collapsed: true,
+            queue_editing: None,
+            queue_edit_input,
             _input_subscription: subscription,
             chat,
             sidebar,
@@ -3456,6 +3471,32 @@ impl AppView {
         }
     }
 
+    /// 编辑排队消息（主 agent / 被查看 runtime 的 inbox 同判路由）。
+    fn edit_viewed_queued(&self, message_id: &str, new_text: &str) -> bool {
+        let viewed_key = self.viewed_session_id().as_str().to_string();
+        if viewed_key == self.current_session_id().as_str() {
+            self.agent.edit_queued(message_id, new_text)
+        } else {
+            self.session_runtimes
+                .get(&viewed_key)
+                .map(|a| a.edit_queued(message_id, new_text))
+                .unwrap_or(false)
+        }
+    }
+
+    /// 删除排队消息（同上路由）。
+    fn remove_viewed_queued(&self, message_id: &str) -> bool {
+        let viewed_key = self.viewed_session_id().as_str().to_string();
+        if viewed_key == self.current_session_id().as_str() {
+            self.agent.remove_queued(message_id)
+        } else {
+            self.session_runtimes
+                .get(&viewed_key)
+                .map(|a| a.remove_queued(message_id))
+                .unwrap_or(false)
+        }
+    }
+
     /// 取消被查看会话的运行（主 agent 或其 runtime——停止/打断都对准
     /// 视图正在看的会话，不错杀主槽）。
     fn cancel_viewed_agent(&mut self) {
@@ -4928,11 +4969,10 @@ impl Render for AppView {
             queued: c
                 .queued
                 .iter()
-                .map(|q| {
-                    (
-                        q.message_id.clone(),
-                        dsh_gpui::queue_row_preview(q.text.as_deref(), q.cards.len()),
-                    )
+                .map(|q| QueueRowSnap {
+                    id: q.message_id.clone(),
+                    preview: dsh_gpui::queue_row_preview(q.text.as_deref(), q.cards.len()),
+                    editable: q.cards.is_empty(),
                 })
                 .collect(),
         });
@@ -5741,21 +5781,89 @@ impl AppView {
             );
         }
         if show_rows {
-            for (ix, (row_id, preview)) in snap.queued.iter().enumerate() {
-                // 插话发送（上游 queue.steer）：仅运行中可点（不可用时
-                // 弱化 + queue.steer.unavailable 文案）
+            for (ix, qrow) in snap.queued.iter().enumerate() {
+                let (row_id, preview, row_editable) = (&qrow.id, &qrow.preview, qrow.editable);
+                // 行动作门（上游 queueMutable：运行中才可操作）
                 let running = snap.running;
-                let t_row = this.clone();
+                let editing = self.queue_editing.as_deref() == Some(row_id.as_str());
                 let row_id_owned = row_id.clone();
                 let steer_tip = if running { "插话发送" } else { "仅运行中可插话发送" };
-                dock = dock.child(
-                    div()
-                        .id(SharedString::from(format!("queue-row-{ix}")))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
+                let mut row = div()
+                    .id(SharedString::from(format!("queue-row-{ix}")))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1();
+                if editing {
+                    // 行内编辑（上游 InlineEditor）：单实例输入挂载 + 保存/取消
+                    let t_save = this.clone();
+                    let t_cancel = this.clone();
+                    row = row
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&self.queue_edit_input).appearance(false).h(px(24.0))),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("queue-save-{ix}")))
+                                .size(px(22.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme::t().hover))
+                                .tooltip(tip("保存排队消息"))
+                                .on_click(move |_, _, cx| {
+                                    t_save.update(cx, |v, cx| {
+                                        let Some(id) = v.queue_editing.clone() else { return };
+                                        let text = v
+                                            .queue_edit_input
+                                            .read_with(cx, |st, _| st.value().trim().to_string());
+                                        if text.is_empty() {
+                                            return;
+                                        }
+                                        if v.chat.update(cx, |c, _| c.edit_queued_text(&id, &text))
+                                            && v.edit_viewed_queued(&id, &text)
+                                        {
+                                            v.queue_editing = None;
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .child(Icon::new(IconName::Check).size(px(13.0)).text_color(theme::t().text_2)),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("queue-cancel-{ix}")))
+                                .size(px(22.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme::t().hover))
+                                .tooltip(tip("取消编辑"))
+                                .on_click(move |_, _, cx| {
+                                    t_cancel.update(cx, |v, cx| {
+                                        v.queue_editing = None;
+                                        cx.notify();
+                                    });
+                                })
+                                .child(Icon::new(IconName::Close).size(px(13.0)).text_color(theme::t().text_3)),
+                        );
+                } else {
+                    let t_edit = this.clone();
+                    let t_remove = this.clone();
+                    let t_steer = this.clone();
+                    let edit_id = row_id.clone();
+                    let remove_id = row_id.clone();
+                    let steer_id = row_id_owned.clone();
+                    let editable = row_editable;
+                    row = row
                         .child(
                             Icon::new(IconName::Inbox)
                                 .size(px(if n == 1 { 14.0 } else { 12.0 }))
@@ -5773,6 +5881,71 @@ impl AppView {
                                 .text_color(theme::t().text_2)
                                 .child(preview.clone()),
                         )
+                        // 编辑（上游 queue.edit：仅纯文本行，含非文本块
+                        // 弱化 + queue.edit.unsupported 文案）
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("queue-edit-{ix}")))
+                                .size(px(22.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .when(editable && running, |d| d.hover(|d| d.bg(theme::t().hover)))
+                                .when(!(editable && running), |d| d.opacity(0.35))
+                                .tooltip(tip(if editable {
+                                    "编辑排队消息"
+                                } else {
+                                    "包含非文本内容，暂不支持编辑"
+                                }))
+                                .on_click(move |_, window, cx| {
+                                    if !(editable && running) {
+                                        return;
+                                    }
+                                    t_edit.update(cx, |v, cx| {
+                                        let text = v
+                                            .chat
+                                            .read_with(cx, |c, _| c.queued_text_of(&edit_id))
+                                            .unwrap_or_default();
+                                        v.queue_edit_input.update(cx, |st, st_cx| {
+                                            st.set_value(text, window, st_cx);
+                                        });
+                                        v.queue_editing = Some(edit_id.clone());
+                                    });
+                                })
+                                .child(
+                                    gpui::svg()
+                                        .path("icons/pencil.svg")
+                                        .size(px(13.0))
+                                        .text_color(theme::t().text_3),
+                                ),
+                        )
+                        // 删除（上游 queue.remove）
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("queue-remove-{ix}")))
+                                .size(px(22.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .when(running, |d| d.hover(|d| d.bg(theme::t().hover)))
+                                .when(!running, |d| d.opacity(0.35))
+                                .tooltip(tip(if running { "删除排队消息" } else { "仅运行中可操作" }))
+                                .on_click(move |_, _, cx| {
+                                    if !running {
+                                        return;
+                                    }
+                                    t_remove.update(cx, |v, cx| {
+                                        v.chat.update(cx, |c, _| c.remove_queued(&remove_id));
+                                        v.remove_viewed_queued(&remove_id);
+                                    });
+                                })
+                                .child(Icon::new(IconName::Delete).size(px(13.0)).text_color(theme::t().text_3)),
+                        )
+                        // 插话发送（上游 queue.steer）
                         .child(
                             div()
                                 .id(SharedString::from(format!("queue-steer-{ix}")))
@@ -5789,12 +5962,12 @@ impl AppView {
                                     if !running {
                                         return;
                                     }
-                                    t_row.update(cx, |v, cx| {
+                                    t_steer.update(cx, |v, cx| {
                                         v.chat.update(cx, |c, cx| {
-                                            c.steer_queued(&row_id_owned);
+                                            c.steer_queued(&steer_id);
                                             cx.notify();
                                         });
-                                        v.promote_viewed_queued(&row_id_owned);
+                                        v.promote_viewed_queued(&steer_id);
                                     });
                                 })
                                 .child(
@@ -5802,12 +5975,14 @@ impl AppView {
                                         .size(px(13.0))
                                         .text_color(theme::t().text_3),
                                 ),
-                        ),
-                );
+                        );
+                }
+                dock = dock.child(row);
             }
         }
         dock
     }
+
 
     fn render_composer_area(&self, this: Entity<AppView>, has_text: bool, width: f32, snap: &ChatSnap) -> Div {
         let card_w = layout::composer_card_width(width);
@@ -8054,6 +8229,9 @@ fn main() {
                 let search_input = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("搜索会话…")
                 });
+                let queue_edit_input = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx).placeholder("编辑排队消息")
+                });
                 let traj_search = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("搜索")
                 });
@@ -8128,6 +8306,7 @@ fn main() {
                         edit_key.clone(),
                         edit_base.clone(),
                         fetch_query.clone(),
+                        queue_edit_input.clone(),
                         cx,
                     )
                 });

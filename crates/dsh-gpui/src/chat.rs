@@ -1171,6 +1171,37 @@ open: false,
         n
     }
 
+    /// 排队行文本读取（编辑点击时装入行内输入）。
+    pub(crate) fn queued_text_of(&self, message_id: &str) -> Option<String> {
+        self.queued
+            .iter()
+            .find(|q| q.message_id == message_id)
+            .and_then(|q| q.text.clone())
+    }
+
+    /// 编辑排队消息文本（上游 queue.edit：仅纯文本行可编辑）。
+    pub(crate) fn edit_queued_text(&mut self, message_id: &str, new_text: &str) -> bool {
+        let Some(q) = self.queued.iter_mut().find(|q| q.message_id == message_id) else {
+            return false;
+        };
+        if !q.cards.is_empty() {
+            return false;
+        }
+        q.text = Some(new_text.to_string());
+        true
+    }
+
+    /// 删除排队消息（上游 queue.remove）。
+    pub(crate) fn remove_queued(&mut self, message_id: &str) -> bool {
+        let n = self.queued.len();
+        self.queued.retain(|q| q.message_id != message_id);
+        let removed = self.queued.len() != n;
+        if removed {
+            self.sync_chat_list(false);
+        }
+        removed
+    }
+
     /// 用户消息入列（标题逻辑在 AppView：sessions/recorder 是宿主职责）。
     /// 用户消息条目（混合附件版）：`text = None` 为附件-only 发送；
     /// 附件块排在文本前（渲染时呈气泡右上区域）。`message_id` 为本地

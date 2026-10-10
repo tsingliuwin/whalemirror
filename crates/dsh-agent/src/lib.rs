@@ -107,6 +107,32 @@ impl Inbox {
         n
     }
 
+    /// 编辑排队消息（上游 queue.edit）：仅纯文本行可编辑——内容整体替换
+    /// 为单文本块（queue.edit.unsupported：含非文本块返回 false）。
+    pub fn edit(&mut self, message_id: &str, new_text: &str) -> bool {
+        let Some(pos) = self.next_turn.iter().position(|m| m.id.0 == message_id) else {
+            return false;
+        };
+        let all_text = self.next_turn[pos]
+            .content
+            .iter()
+            .all(|b| matches!(b, dsh_llm::ContentBlock::Text { .. }));
+        if !all_text {
+            return false;
+        }
+        self.next_turn[pos].content = vec![dsh_llm::ContentBlock::text(new_text.to_string())];
+        true
+    }
+
+    /// 删除排队消息（上游 queue.remove）。未命中返回 false。
+    pub fn remove(&mut self, message_id: &str) -> bool {
+        let Some(pos) = self.next_turn.iter().position(|m| m.id.0 == message_id) else {
+            return false;
+        };
+        self.next_turn.remove(pos);
+        true
+    }
+
     /// Remove and return the complete batch proposed for one step: all
     /// next-step input followed by one queued turn when `target` is next-turn.
     pub fn claim(&mut self, target: InboxTarget, _turn: u64) -> Vec<Message> {
@@ -161,5 +187,62 @@ mod promote_tests {
         assert!(inbox.next_turn.is_empty());
         // 次序：既有 next-step 在前，提升批按原序随后
         assert_eq!(inbox.next_step.iter().map(|m| m.id.0.as_str()).collect::<Vec<_>>(), ["s", "a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod edit_remove_tests {
+    use super::*;
+
+    fn msg(id: &str, text: &str) -> Message {
+        let mut m = Message::user_text(text);
+        m.id = dsh_llm::MessageId(id.into());
+        m
+    }
+
+    #[test]
+    fn edit_replaces_pure_text_row_content() {
+        let mut inbox = Inbox::new();
+        inbox.append(InboxTarget::NextTurn, msg("a", "old text"));
+        assert!(inbox.edit("a", "new text"));
+        match &inbox.next_turn[0].content[..] {
+            [dsh_llm::ContentBlock::Text { text }] => assert_eq!(text, "new text"),
+            other => panic!("single text block expected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_rejects_rows_with_non_text_blocks() {
+        let mut inbox = Inbox::new();
+        let mut m = msg("a", "with file");
+        m.content.push(dsh_llm::ContentBlock::Image {
+            attachment: dsh_llm::ImageAttachmentRef {
+                attachment_id: "sha256:test".into(),
+                name: None,
+                media_type: "image/png".into(),
+                bytes: 1,
+                width: 1,
+                height: 1,
+                original_dimensions: None,
+            },
+            offloaded: false,
+        });
+        inbox.append(InboxTarget::NextTurn, m);
+        assert!(!inbox.edit("a", "nope"), "queue.edit.unsupported");
+        match &inbox.next_turn[0].content[..] {
+            [dsh_llm::ContentBlock::Text { text }, ..] => assert_eq!(text, "with file"),
+            other => panic!("original content preserved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_drops_matching_row_only() {
+        let mut inbox = Inbox::new();
+        inbox.append(InboxTarget::NextTurn, msg("a", "one"));
+        inbox.append(InboxTarget::NextTurn, msg("b", "two"));
+        assert!(inbox.remove("a"));
+        assert_eq!(inbox.next_turn.len(), 1);
+        assert_eq!(inbox.next_turn[0].id.0, "b");
+        assert!(!inbox.remove("zzz"));
     }
 }

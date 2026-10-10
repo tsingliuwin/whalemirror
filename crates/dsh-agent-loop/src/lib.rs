@@ -443,6 +443,12 @@ impl ReactLoopAgent {
         self.send(user_message(text), InboxTarget::NextStep);
     }
 
+    /// 排队待下一轮的快照（上游 inbox next-turn 投影的读面——QueueDock
+    /// 呈现与测试断言用）。
+    pub fn queued_next_turn(&self) -> Vec<Message> {
+        self.inbox.lock().unwrap().next_turn().to_vec()
+    }
+
     /// Inject context without waking the driver.
     pub fn inject(&self, message: Message) {
         self.inbox.lock().unwrap().append(InboxTarget::NextStep, message.clone());

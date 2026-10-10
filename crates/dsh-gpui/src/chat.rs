@@ -46,6 +46,16 @@ pub(crate) struct TurnFold {
     activities: Vec<(dsh_gpui::ProcessActivity, usize)>,
 }
 
+/// 排队待消费的发送（上游 inbox next-turn 的 UI 面承载）：发送时占位
+/// 条带，TurnStarted 消费时刻才入列（echo_id=消息 id 走既有认领/退役
+/// 生命周期——取消未落盘的排队消息由 retire_unclaimed_echoes 收尾）。
+#[derive(Clone)]
+pub(crate) struct QueuedSend {
+    pub(crate) message_id: String,
+    pub(crate) text: Option<String>,
+    pub(crate) cards: Vec<crate::ChatAttachment>,
+}
+
 /// 聊天消息内的单个附件（web .attachmentRow 成员）：
 /// 图片 = 64×64 tile（多附件行强制 compact；单图大图样式仅上游图片画廊），
 /// 文件 = 240×64 卡（r16、0.5px l2 描边、图标 24×28、名称 14/22 w500、
@@ -375,6 +385,9 @@ pub(crate) struct ChatView {
     ui_turn: u64,
     /// 仍打开的轮次（TurnStarted→TurnEnded；打开的轮次不折叠）
     pub(crate) turn_open: Option<u64>,
+    /// 排队待消费的发送（busy+Queue 投递的占位条带；TurnStarted 入列、
+    /// Aborted 清空——上游 QueueDock 的数据面）。
+    pub(crate) queued: Vec<QueuedSend>,
     /// 手动展开过的轮次（compact 默认折叠；web 的页内存 manual overrides）
     pub(crate) turn_expanded: std::collections::HashSet<u64>,
     /// 工作步骤收起时机（上游 CollapseTiming，Browser-local 内存态默认
@@ -476,6 +489,7 @@ impl ChatView {
             traj_tl_bounds: Default::default(),
             ui_turn: 0,
             turn_open: None,
+            queued: Vec::new(),
             turn_expanded: Default::default(),
             collapse_timing: dsh_gpui::CollapseTiming::Completion,
             presented_by_turn: HashMap::new(),
@@ -680,6 +694,7 @@ impl ChatView {
     pub(crate) fn reset_empty(&mut self) {
         self.entries.clear();
         self.presented_by_turn.clear();
+        self.queued.clear();
         self.running = false;
         self.turn_started_at = None;
         self.replay_unfinished_turn = None;
@@ -716,6 +731,7 @@ impl ChatView {
 
     /// Rebuild the transcript from the displayed session log (restore/switch).
     pub(crate) fn rebuild_from_session(&mut self) {
+        self.queued.clear();
         let handle = self.session_handle();
         let session = handle.lock().unwrap();
         self.rebuild_from(&session);
@@ -724,6 +740,7 @@ impl ChatView {
     /// 回放指定会话（`rebuild_from_session` 的显式快照版：运行中查看式
     /// 切换用非 agent 会话直接回放）。
     pub(crate) fn rebuild_from(&mut self, session: &dsh_session::Session) {
+        self.queued.clear();
         self.reset_empty();
         self.turn_expanded.clear();
         self.turn_open = None; // 回放态全部视为已关闭（可折叠判定成立）
@@ -1123,6 +1140,13 @@ open: false,
         self.sync_chat_list(false);
     }
 
+    /// 排队占位（busy+Queue 投递）：不入列、只进条带；TurnStarted 消费
+    /// 时刻由 take_queued 转入列（echo_id 认领走既有生命周期）。
+    pub(crate) fn push_queued_send(&mut self, send: QueuedSend) {
+        self.queued.push(send);
+        self.sync_chat_list(false);
+    }
+
     /// 用户消息入列（标题逻辑在 AppView：sessions/recorder 是宿主职责）。
     /// 用户消息条目（混合附件版）：`text = None` 为附件-only 发送；
     /// 附件块排在文本前（渲染时呈气泡右上区域）。`message_id` 为本地
@@ -1190,6 +1214,12 @@ open: false,
                 self.running = true;
                 self.turn_started_at = Some(Instant::now());
                 self.stats_turns += 1;
+                // 排队条带消费：此刻入列（上游 queued 行离开 dock 转录
+                // 入 transcript）。echo_id=消息 id——轮内落盘即认领、
+                // 取消未落盘由 retire_unclaimed_echoes 收尾。
+                for q in std::mem::take(&mut self.queued) {
+                    self.push_user_entry_with(q.text, q.cards, Some(q.message_id));
+                }
                 // 用户条目在发送时入列，此刻 ui_turn 还是上一轮（首发送为 0）
                 // ——回戳尾随的 user/context/notice 条目到本轮，否则台账裂出
                 // 「第 0 轮」独占段、后续发送的用户泡挂到上一轮头下。
@@ -1327,9 +1357,14 @@ open: false,
                     }
                 }
             }
-            AgentEvent::TurnEnded { turn, .. } => {
+            AgentEvent::TurnEnded { turn, reason } => {
                 self.running = false;
                 self.retire_unclaimed_echoes();
+                // Aborted = cancel 打断（inbox 随之被弃）：排队条带同步清
+                // 空。其余轮终不清——排队的消息等下一轮 TurnStarted 消费。
+                if matches!(reason, TurnEndReason::Aborted { .. }) {
+                    self.queued.clear();
+                }
                 // 轮终交付文件收卡：present 落的耐久事件按本轮归并
                 //（事件走宿主 sink 不进 UI 事件流，此处扫一次会话）
                 {

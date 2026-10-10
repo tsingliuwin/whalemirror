@@ -256,6 +256,8 @@ struct ChatSnap {
     stats: crate::chat::SessionStats,
     /// 草稿 '/' 前缀的命令菜单过滤词（会话态才有）。
     slash_query: Option<String>,
+    /// 排队条带行预览（(文本, 附件数)——QueueDock 渲染面）。
+    queued: Vec<(String, usize)>,
 }
 
 
@@ -1596,6 +1598,8 @@ pub(crate) struct AppView {
     pending_input: Option<String>,
     /// 会话各自的 composer 草稿存档（上游 per-session input shell）。
     session_drafts: HashMap<SessionId, ComposerDraft>,
+    /// 排队条带折叠态（上游 QueueDock 多条默认折叠只露计数头）。
+    queue_collapsed: bool,
     _input_subscription: Subscription,
     /// 对话/轨迹主体（独立 entity：流式 delta 的失效只打它；侧栏/详情经
     /// AnyView 的 element_state 缓存复用上帧结果，不再随流式逐帧重建）
@@ -1746,7 +1750,9 @@ impl AppView {
                         // 空闲但视图在别处：先收敛到视图会话再发送
                         chat.commit_peek(cx);
                     }
-                    // 忙碌投递模式（上游 busyEnter 语义；加速=secondary）
+                    // 忙碌投递模式（上游 busyEnter 语义；加速=secondary）：
+                    // Queue 投递为排队占位（不回显入列，条带呈现至消费）
+                    let mut queued_placement = false;
                     if chat.viewed_busy() {
                         let mode = dsh_gpui::resolve_enter_mode(
                             chat.settings.enter,
@@ -1755,9 +1761,11 @@ impl AppView {
                         );
                         if mode == EnterBehavior::Interrupt {
                             chat.cancel_viewed_agent();
+                        } else {
+                            queued_placement = true;
                         }
                     }
-                    chat.dispatch_user_text(&text, cx);
+                    chat.dispatch_user_text(&text, queued_placement, cx);
                     chat.pending_clear = true;
                     cx.notify();
                 }
@@ -1864,6 +1872,7 @@ impl AppView {
             pending_clear: false,
             pending_input: None,
             session_drafts: HashMap::new(),
+            queue_collapsed: true,
             _input_subscription: subscription,
             chat,
             sidebar,
@@ -3723,7 +3732,7 @@ impl AppView {
         cx.notify();
     }
 
-    fn dispatch_user_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn dispatch_user_text(&mut self, text: &str, queued_placement: bool, cx: &mut Context<Self>) {
         self.command_menu = false;
         self.command_notice = None;
         for (path, content) in self.resolve_file_references(text) {
@@ -3774,7 +3783,7 @@ impl AppView {
             let _ = self.recorder.append(&current, &cwd, &SessionEvent::SessionTitle { title });
             self.refresh_sidebar(cx);
         }
-        self.send_user_turn(text, cx);
+        self.send_user_turn(text, queued_placement, cx);
     }
 
     /// composer 附件栏：文件卡 240×64（r16、0.5px l2 描边、图标座 28×28
@@ -4082,7 +4091,7 @@ impl AppView {
         Some(runtime)
     }
 
-    fn send_user_turn(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn send_user_turn(&mut self, text: &str, queued_placement: bool, cx: &mut Context<Self>) {
         // 未就绪附件拦发送（web：file.stillUploading toast + 发送钮 disabled）
         if self
             .attachments
@@ -4122,12 +4131,30 @@ impl AppView {
         }
         let msg = Message::user(blocks);
         let cards_for_chat = cards;
-        // 回显携带消息 id：轮终未落盘即退役（取消时不留幽灵气泡）
+        // 消息 id：排队占位与直接回显共用——占位在 TurnStarted 消费时刻
+        // 入列（echo_id 认领/退役生命周期不变：轮终未落盘即退役）
         let echo_id = msg.id.0.clone();
-        self.chat.update(cx, |c, cx| {
-            c.push_user_entry_with(has_text.then(|| text.to_string()), cards_for_chat, Some(echo_id));
-            cx.notify();
-        });
+        if queued_placement {
+            // 上游 queue placement：入列推迟到消费时刻，此刻只占条带。
+            // 发送即「下一条输入」——NextInput 折回时机与直接回显同刻
+            // 触发（条目入列时 running 已置位会跳过，故在此显式折）。
+            self.chat.update(cx, |c, cx| {
+                if dsh_gpui::fold_now_on_next_input(c.collapse_timing) && !c.running() {
+                    c.turn_open = None;
+                }
+                c.push_queued_send(crate::chat::QueuedSend {
+                    message_id: echo_id,
+                    text: has_text.then(|| text.to_string()),
+                    cards: cards_for_chat,
+                });
+                cx.notify();
+            });
+        } else {
+            self.chat.update(cx, |c, cx| {
+                c.push_user_entry_with(has_text.then(|| text.to_string()), cards_for_chat, Some(echo_id));
+                cx.notify();
+            });
+        }
         // 草稿物化：首条消息发送才落盘（pin 三事件先行——recorder 首事件
         // 自动建文件；同步在 agent.send 唤醒驱动之前，行序 pin→turn/start）
         // ——仅主会话路径；runtime 会话是磁盘既有会话（无懒物化面）
@@ -4169,6 +4196,7 @@ impl AppView {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
+        let mut queued_placement = false;
         if self.viewed_busy() {
             // 通用设置「繁忙时 Enter 行为」：排队投递，或打断当前轮
             // （被查看会话的 runtime 同语义——打断其自己的轮）。按钮与
@@ -4176,9 +4204,11 @@ impl AppView {
             let mode = dsh_gpui::resolve_enter_mode(self.settings.enter, true, false);
             if mode == EnterBehavior::Interrupt {
                 self.cancel_viewed_agent();
+            } else {
+                queued_placement = true;
             }
         }
-        self.dispatch_user_text(&text, cx);
+        self.dispatch_user_text(&text, queued_placement, cx);
         // 附件未就绪被拦截时保留草稿与附件卡（上游：失败保留，供重试）
         if self.upload_notice.is_none() {
             self.input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -4851,6 +4881,11 @@ impl Render for AppView {
             tab: c.tab(),
             stats: c.session_stats(),
             slash_query,
+            queued: c
+                .queued
+                .iter()
+                .map(|q| (dsh_gpui::queue_row_preview(q.text.as_deref(), q.cards.len()), q.cards.len()))
+                .collect(),
         });
 
         let this = cx.entity();
@@ -5600,6 +5635,95 @@ impl AppView {
     }
 
     /// 底部 composer 区：输入卡 + 统计行（web composer.dock 槽，卡下 footer）。
+    /// 排队条带（上游 QueueDock 的 conversation.input.dock 槽位最小形）：
+    /// 单条直出行、多条计数头（queue.count 文案）可折叠；行=Inbox 图标+
+    /// 预览文本。编辑/插话/删除动作与发送中占位是 #28 后续子批。
+    fn queue_dock_render(&self, this: &Entity<AppView>, snap: &ChatSnap, card_w: f32) -> Div {
+        let n = snap.queued.len();
+        let show_rows = n == 1 || !self.queue_collapsed;
+        let mut dock = div()
+            .w_full()
+            .max_w(px(card_w))
+            .mx_auto()
+            .v_flex()
+            .mb_2()
+            .px_2()
+            .py_1()
+            .rounded(px(10.0))
+            .bg(theme::t().surface)
+            .shadow(theme::elevation_soft());
+        if n > 1 {
+            let t_head = this.clone();
+            let collapsed = self.queue_collapsed;
+            dock = dock.child(
+                div()
+                    .id("queue-head")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::t().hover))
+                    .on_click(move |_, _, cx| {
+                        t_head.update(cx, |v, cx| {
+                            v.queue_collapsed = !v.queue_collapsed;
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        Icon::new(IconName::Inbox)
+                            .size(px(14.0))
+                            .text_color(theme::t().text_3),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme::FONT_TAB))
+                            .line_height(px(18.0))
+                            .text_color(theme::t().text_2)
+                            .child(dsh_gpui::queue_count_label(n)),
+                    )
+                    .child(
+                        Icon::new(if collapsed { IconName::ChevronUp } else { IconName::ChevronDown })
+                            .size(px(12.0))
+                            .text_color(theme::t().caption),
+                    ),
+            );
+        }
+        if show_rows {
+            for (ix, (preview, _attachments)) in snap.queued.iter().enumerate() {
+                dock = dock.child(
+                    div()
+                        .id(SharedString::from(format!("queue-row-{ix}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .child(
+                            Icon::new(IconName::Inbox)
+                                .size(px(if n == 1 { 14.0 } else { 12.0 }))
+                                .text_color(theme::t().text_3),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(theme::FONT_TAB))
+                                .line_height(px(18.0))
+                                .text_color(theme::t().text_2)
+                                .child(preview.clone()),
+                        ),
+                );
+            }
+        }
+        dock
+    }
+
     fn render_composer_area(&self, this: Entity<AppView>, has_text: bool, width: f32, snap: &ChatSnap) -> Div {
         let card_w = layout::composer_card_width(width);
         let locked = snap.empty && self.current_workspace.is_none();
@@ -5609,6 +5733,10 @@ impl AppView {
             .v_flex()
             .bg(theme::t().bg_base)
             .pb_2()
+            // 排队条带（上游 QueueDock 槽位）：输入卡上方
+            .when(!snap.queued.is_empty(), |d| {
+                d.child(self.queue_dock_render(&this, snap, card_w))
+            })
             .child(self.composer_card(this.clone(), has_text, card_w, snap.running, locked, snap.slash_query.as_deref()));
         // web StatsPills（0.1.5-alpha.1）：输入卡下方两个图标 pill——
         // 仪表 pill（轮/步 + 输出速度）开「会话统计」对话框，数据 pill

@@ -1703,3 +1703,51 @@ mod enter_mode_tests {
         assert_eq!(resolve_enter_mode(EnterBehavior::Interrupt, true, true), EnterBehavior::Queue);
     }
 }
+
+/// 上游 queue.count 文案（QueueDock 计数头）：`{n} 条排队消息`。
+pub fn queue_count_label(n: usize) -> String {
+    format!("{n} 条排队消息")
+}
+
+/// 排队行预览文本（上游 previewOf 最小形）：文本块连接压缩空白、
+/// 200 字符截断加省略号；无文本按附件数呈现。
+pub fn queue_row_preview(text: Option<&str>, attachments: usize) -> String {
+    let flat = text.unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return if attachments > 0 { format!("{attachments} 个附件") } else { String::new() };
+    }
+    let chars: Vec<char> = flat.chars().collect();
+    if chars.len() > 200 {
+        let head: String = chars[..200].iter().collect();
+        format!("{head}…")
+    } else {
+        flat
+    }
+}
+
+#[cfg(test)]
+mod queue_preview_tests {
+    use super::*;
+
+    #[test]
+    fn count_label_matches_upstream_wording() {
+        assert_eq!(queue_count_label(1), "1 条排队消息");
+        assert_eq!(queue_count_label(3), "3 条排队消息");
+    }
+
+    #[test]
+    fn preview_flattens_whitespace_and_truncates_at_200() {
+        let long = "a".repeat(300);
+        let p = queue_row_preview(Some(&long), 0);
+        assert_eq!(p.chars().count(), 201, "200 chars + ellipsis");
+        assert!(p.ends_with('…'));
+        assert_eq!(queue_row_preview(Some("  hello   world  "), 0), "hello world");
+    }
+
+    #[test]
+    fn preview_attachment_only_form() {
+        assert_eq!(queue_row_preview(None, 2), "2 个附件");
+        assert_eq!(queue_row_preview(Some(""), 2), "2 个附件");
+        assert_eq!(queue_row_preview(None, 0), "");
+    }
+}

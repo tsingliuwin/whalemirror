@@ -205,3 +205,38 @@ async fn switching_sessions_does_not_leak_prior_head_seq() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 排队快照读面：send(NextTurn) 后可见、驱动消费后清空。
+#[tokio::test]
+async fn queued_next_turn_snapshot_tracks_inbox() {
+    let events = EventBus::new();
+    let llm = Arc::new(LlmRuntime::with_events(events.clone()));
+    let _ = llm.register_adapter(&["mock".to_string()], Arc::new(OkAdapter)).unwrap();
+    let prompt = Arc::new(SystemPrompt::new());
+    let agent = build_agent("session-queue-snap", &llm, Arc::clone(&prompt));
+    agent.spawn();
+
+    // 驱动空闲：直投 NextTurn 即被下一轮立即消费
+    agent.send(
+        dsh_llm::Message::user_text("queued-1"),
+        dsh_agent_loop::InboxTarget::NextTurn,
+    );
+    agent.when_idle().await;
+    assert!(agent.queued_next_turn().is_empty(), "idle driver consumes the queue");
+
+    // 运行中排队：占位 NextTurn 不被当前步吃掉，快照可见
+    agent.followup("run");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    agent.send(
+        dsh_llm::Message::user_text("queued-2"),
+        dsh_agent_loop::InboxTarget::NextTurn,
+    );
+    let snap = agent.queued_next_turn();
+    assert_eq!(snap.len(), 1, "queued message visible while running");
+    assert!(snap[0].content.iter().any(|b| matches!(
+        b,
+        dsh_llm::ContentBlock::Text { text } if text.contains("queued-2")
+    )));
+    agent.when_idle().await;
+    assert!(agent.queued_next_turn().is_empty(), "consumed by the follow-up turn");
+}

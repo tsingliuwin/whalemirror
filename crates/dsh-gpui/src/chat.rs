@@ -1147,6 +1147,30 @@ open: false,
         self.sync_chat_list(false);
     }
 
+    /// 插话提升（上游 queue.steer 行动作）：条带行离开即入列（当前轮
+    /// 中步界消费——入列时刻即消费开始的 UI 呈现）。
+    pub(crate) fn steer_queued(&mut self, message_id: &str) -> bool {
+        let Some(pos) = self.queued.iter().position(|q| q.message_id == message_id) else {
+            return false;
+        };
+        let q = self.queued.remove(pos);
+        self.push_user_entry_with(q.text, q.cards, Some(q.message_id));
+        self.sync_chat_list(true);
+        true
+    }
+
+    /// 全部插话（上游空稿加速手势 steerQueue）：整条带入列，返回条数。
+    pub(crate) fn steer_all_queued(&mut self) -> usize {
+        let n = self.queued.len();
+        for q in std::mem::take(&mut self.queued) {
+            self.push_user_entry_with(q.text, q.cards, Some(q.message_id));
+        }
+        if n > 0 {
+            self.sync_chat_list(true);
+        }
+        n
+    }
+
     /// 用户消息入列（标题逻辑在 AppView：sessions/recorder 是宿主职责）。
     /// 用户消息条目（混合附件版）：`text = None` 为附件-only 发送；
     /// 附件块排在文本前（渲染时呈气泡右上区域）。`message_id` 为本地

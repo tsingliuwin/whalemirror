@@ -449,6 +449,30 @@ impl ReactLoopAgent {
         self.inbox.lock().unwrap().next_turn().to_vec()
     }
 
+    /// 插话提升一条排队消息入当前轮（上游 queue.steer 消费语义：
+    /// next-turn → next-step，本轮下个步界消费）。未命中 false。
+    pub fn promote_queued(&self, message_id: &str) -> bool {
+        let mut inbox = self.inbox.lock().unwrap();
+        let hit = inbox.promote(message_id);
+        drop(inbox);
+        if hit {
+            // 空闲驱动不消费 next-step 之外的提升语义：唤醒兜底
+            self.wake.notify_one();
+        }
+        hit
+    }
+
+    /// 全部提升（上游空稿加速手势 steerQueue）。返回提升条数。
+    pub fn promote_all_queued(&self) -> usize {
+        let mut inbox = self.inbox.lock().unwrap();
+        let n = inbox.promote_all();
+        drop(inbox);
+        if n > 0 {
+            self.wake.notify_one();
+        }
+        n
+    }
+
     /// Inject context without waking the driver.
     pub fn inject(&self, message: Message) {
         self.inbox.lock().unwrap().append(InboxTarget::NextStep, message.clone());

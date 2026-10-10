@@ -256,8 +256,8 @@ struct ChatSnap {
     stats: crate::chat::SessionStats,
     /// 草稿 '/' 前缀的命令菜单过滤词（会话态才有）。
     slash_query: Option<String>,
-    /// 排队条带行预览（(文本, 附件数)——QueueDock 渲染面）。
-    queued: Vec<(String, usize)>,
+    /// 排队条带行（(消息 id, 预览文本)——QueueDock 渲染与 steer 行动作面）。
+    queued: Vec<(String, String)>,
 }
 
 
@@ -1735,6 +1735,23 @@ impl AppView {
             if let InputEvent::PressEnter { secondary } = event {
                 let text: String = input.read_with(cx, |s, _| s.value().to_string());
                 let text = text.trim().to_string();
+                // 空稿加速手势（上游 view-binding steerQueue）：Ctrl+Enter +
+                // 草稿空 + 有排队 + 运行中 → 整条带插话提升（不发送草稿）
+                let queue_len = chat.chat.read_with(cx, |c, _| c.queued.len());
+                if dsh_gpui::steer_queue_gesture(
+                    *secondary,
+                    !text.is_empty() || !chat.attachments.is_empty(),
+                    queue_len,
+                    chat.viewed_busy(),
+                ) {
+                    chat.chat.update(cx, |c, cx| {
+                        c.steer_all_queued();
+                        cx.notify();
+                    });
+                    chat.promote_all_viewed_queued();
+                    cx.notify();
+                    return;
+                }
                 // 附件-only 发送合法（上游：draft 空 + 有附件 → commitSend；
                 // 未就绪附件由 send_user_turn 拦截并提示）
                 if !text.is_empty() || !chat.attachments.is_empty() {
@@ -3412,6 +3429,33 @@ impl AppView {
         }
     }
 
+    /// 插话提升排队消息（主 agent / 被查看 runtime 的 inbox——steer 路由
+    /// 与取消/打断同判）。
+    fn promote_viewed_queued(&self, message_id: &str) -> bool {
+        let viewed_key = self.viewed_session_id().as_str().to_string();
+        if viewed_key == self.current_session_id().as_str() {
+            self.agent.promote_queued(message_id)
+        } else {
+            self.session_runtimes
+                .get(&viewed_key)
+                .map(|a| a.promote_queued(message_id))
+                .unwrap_or(false)
+        }
+    }
+
+    /// 全部插话提升（上游空稿加速手势）。返回提升条数。
+    fn promote_all_viewed_queued(&self) -> usize {
+        let viewed_key = self.viewed_session_id().as_str().to_string();
+        if viewed_key == self.current_session_id().as_str() {
+            self.agent.promote_all_queued()
+        } else {
+            self.session_runtimes
+                .get(&viewed_key)
+                .map(|a| a.promote_all_queued())
+                .unwrap_or(0)
+        }
+    }
+
     /// 取消被查看会话的运行（主 agent 或其 runtime——停止/打断都对准
     /// 视图正在看的会话，不错杀主槽）。
     fn cancel_viewed_agent(&mut self) {
@@ -4884,7 +4928,12 @@ impl Render for AppView {
             queued: c
                 .queued
                 .iter()
-                .map(|q| (dsh_gpui::queue_row_preview(q.text.as_deref(), q.cards.len()), q.cards.len()))
+                .map(|q| {
+                    (
+                        q.message_id.clone(),
+                        dsh_gpui::queue_row_preview(q.text.as_deref(), q.cards.len()),
+                    )
+                })
                 .collect(),
         });
 
@@ -5692,7 +5741,13 @@ impl AppView {
             );
         }
         if show_rows {
-            for (ix, (preview, _attachments)) in snap.queued.iter().enumerate() {
+            for (ix, (row_id, preview)) in snap.queued.iter().enumerate() {
+                // 插话发送（上游 queue.steer）：仅运行中可点（不可用时
+                // 弱化 + queue.steer.unavailable 文案）
+                let running = snap.running;
+                let t_row = this.clone();
+                let row_id_owned = row_id.clone();
+                let steer_tip = if running { "插话发送" } else { "仅运行中可插话发送" };
                 dock = dock.child(
                     div()
                         .id(SharedString::from(format!("queue-row-{ix}")))
@@ -5717,6 +5772,36 @@ impl AppView {
                                 .line_height(px(18.0))
                                 .text_color(theme::t().text_2)
                                 .child(preview.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("queue-steer-{ix}")))
+                                .size(px(22.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .when(running, |d| d.hover(|d| d.bg(theme::t().hover)))
+                                .when(!running, |d| d.opacity(0.35))
+                                .tooltip(tip(steer_tip))
+                                .on_click(move |_, _, cx| {
+                                    if !running {
+                                        return;
+                                    }
+                                    t_row.update(cx, |v, cx| {
+                                        v.chat.update(cx, |c, cx| {
+                                            c.steer_queued(&row_id_owned);
+                                            cx.notify();
+                                        });
+                                        v.promote_viewed_queued(&row_id_owned);
+                                    });
+                                })
+                                .child(
+                                    Icon::new(IconName::ArrowUp)
+                                        .size(px(13.0))
+                                        .text_color(theme::t().text_3),
+                                ),
                         ),
                 );
             }

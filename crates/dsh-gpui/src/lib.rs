@@ -1751,3 +1751,23 @@ mod queue_preview_tests {
         assert_eq!(queue_row_preview(None, 0), "");
     }
 }
+
+/// 空稿加速手势（上游 view-binding：accelerated && canSteerQueue）：
+/// Ctrl+Enter + 草稿空 + 有排队 + 运行中 → 全部插话提升（steerQueue）。
+pub fn steer_queue_gesture(accelerated: bool, has_draft: bool, queue_len: usize, running: bool) -> bool {
+    accelerated && !has_draft && queue_len > 0 && running
+}
+
+#[cfg(test)]
+mod steer_gesture_tests {
+    use super::*;
+
+    #[test]
+    fn gesture_requires_all_four_conditions() {
+        assert!(steer_queue_gesture(true, false, 2, true));
+        assert!(!steer_queue_gesture(false, false, 2, true), "plain Enter never steers the queue");
+        assert!(!steer_queue_gesture(true, true, 2, true), "draft content submits instead");
+        assert!(!steer_queue_gesture(true, false, 0, true), "nothing queued");
+        assert!(!steer_queue_gesture(true, false, 2, false), "idle driver consumes the queue anyway");
+    }
+}

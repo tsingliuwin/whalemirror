@@ -86,6 +86,27 @@ impl Inbox {
         self.splice(target, usize::MAX, 0, vec![message]);
     }
 
+    /// 插话提升：把 next-turn 中 id 命中的一条移入 next-step（本轮下个
+    /// 步界消费——上游 queue.steer 的消费语义）。未命中返回 false。
+    pub fn promote(&mut self, message_id: &str) -> bool {
+        if let Some(pos) = self.next_turn.iter().position(|m| m.id.0 == message_id) {
+            let m = self.next_turn.remove(pos);
+            self.next_step.push(m);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 全部提升（上游空稿加速手势 steerQueue）：next-turn 整批移入
+    /// next-step，返回移动条数。
+    pub fn promote_all(&mut self) -> usize {
+        let moved = std::mem::take(&mut self.next_turn);
+        let n = moved.len();
+        self.next_step.extend(moved);
+        n
+    }
+
     /// Remove and return the complete batch proposed for one step: all
     /// next-step input followed by one queued turn when `target` is next-turn.
     pub fn claim(&mut self, target: InboxTarget, _turn: u64) -> Vec<Message> {
@@ -94,5 +115,51 @@ impl Inbox {
             claimed.push(self.next_turn.remove(0));
         }
         claimed
+    }
+}
+#[cfg(test)]
+mod promote_tests {
+    use super::*;
+
+    fn msg(id: &str, text: &str) -> Message {
+        let mut m = Message::user_text(text);
+        m.id = dsh_llm::MessageId(id.into());
+        m
+    }
+
+    #[test]
+    fn promote_moves_one_matching_to_next_step() {
+        let mut inbox = Inbox::new();
+        inbox.append(InboxTarget::NextTurn, msg("a", "one"));
+        inbox.append(InboxTarget::NextTurn, msg("b", "two"));
+        assert!(inbox.promote("a"));
+        assert_eq!(inbox.next_turn.len(), 1);
+        assert_eq!(inbox.next_turn[0].id.0, "b");
+        assert_eq!(inbox.next_step.len(), 1);
+        assert_eq!(inbox.next_step[0].id.0, "a");
+        // claim（step 2 起 target=NextStep）：提升消息本轮消费
+        let claimed = inbox.claim(InboxTarget::NextStep, 1);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id.0, "a");
+    }
+
+    #[test]
+    fn promote_miss_returns_false() {
+        let mut inbox = Inbox::new();
+        inbox.append(InboxTarget::NextTurn, msg("a", "one"));
+        assert!(!inbox.promote("zzz"));
+        assert_eq!(inbox.next_turn.len(), 1);
+    }
+
+    #[test]
+    fn promote_all_flushes_next_turn_into_next_step() {
+        let mut inbox = Inbox::new();
+        inbox.append(InboxTarget::NextTurn, msg("a", "one"));
+        inbox.append(InboxTarget::NextTurn, msg("b", "two"));
+        inbox.append(InboxTarget::NextStep, msg("s", "steered"));
+        assert_eq!(inbox.promote_all(), 2);
+        assert!(inbox.next_turn.is_empty());
+        // 次序：既有 next-step 在前，提升批按原序随后
+        assert_eq!(inbox.next_step.iter().map(|m| m.id.0.as_str()).collect::<Vec<_>>(), ["s", "a", "b"]);
     }
 }

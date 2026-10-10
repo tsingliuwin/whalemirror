@@ -34,6 +34,25 @@ impl LlmAdapter for OkAdapter {
     }
 }
 
+struct SlowAdapter;
+
+#[async_trait::async_trait]
+impl LlmAdapter for SlowAdapter {
+    fn provider_info(&self, _provider: &str) -> LlmProviderInfo {
+        LlmProviderInfo { id: "mock".into(), name: "Mock".into() }
+    }
+
+    async fn stream(&self, _options: GenerateOptions) -> Result<BoxStream, LlmError> {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let chunks = vec![
+            StreamChunk::BlockStart { index: 0, block_type: ContentBlockType::Text },
+            StreamChunk::TextDelta { index: 0, text: "done".into() },
+            StreamChunk::Finish { reason: FinishReason::Stop, replay_state: None },
+        ];
+        Ok(Box::pin(futures::stream::iter(chunks)))
+    }
+}
+
 fn build_agent(
     id: &str,
     llm: &Arc<LlmRuntime>,
@@ -239,4 +258,70 @@ async fn queued_next_turn_snapshot_tracks_inbox() {
     )));
     agent.when_idle().await;
     assert!(agent.queued_next_turn().is_empty(), "consumed by the follow-up turn");
+}
+
+/// 插话提升的消费语义：运行中 steer 的消息落**当前轮**（turn 相同），
+/// 排队未 steer 的消息落下一轮——日志行 turn 断言区分两路径。
+#[tokio::test]
+async fn steered_message_lands_in_current_turn_not_next() {
+    let dir = std::env::temp_dir().join(format!("dsh-loop-steer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let recorder = Arc::new(SessionRecorder::new(dir.join("sessions")));
+    let events = EventBus::new();
+    let llm = Arc::new(LlmRuntime::with_events(events.clone()));
+    let _ = llm.register_adapter(&["mock".to_string()], Arc::new(SlowAdapter)).unwrap();
+    let prompt = Arc::new(SystemPrompt::new());
+    let agent = build_agent("session-steer-e2e", &llm, Arc::clone(&prompt));
+    wire_sink(&agent, &recorder);
+    agent.spawn();
+
+    // 第一轮起跑
+    agent.followup("run");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // 两条排队
+    let mut steered = dsh_llm::Message::user_text("steered-msg");
+    steered.id = dsh_llm::MessageId("steer-id".into());
+    agent.send(steered, dsh_agent_loop::InboxTarget::NextTurn);
+    let mut queued = dsh_llm::Message::user_text("queued-msg");
+    queued.id = dsh_llm::MessageId("queued-id".into());
+    agent.send(queued, dsh_agent_loop::InboxTarget::NextTurn);
+    // 只提升第一条
+    assert!(agent.promote_queued("steer-id"));
+    assert!(!agent.promote_queued("no-such"));
+    agent.when_idle().await;
+
+    let (loaded, _) = recorder
+        .load(&dsh_llm::SessionId::new("session-steer-e2e"), Some("/tmp/ws"))
+        .expect("session should load");
+    let mut steered_turn = None;
+    let mut queued_turn = None;
+    // UserMessage 为元组形（不带 turn）：按行序以 TurnStart 折算当前轮
+    let mut turn = 0u64;
+    for e in loaded.entries() {
+        match &e.event {
+            dsh_session::SessionEvent::TurnStart { turn: t, .. } => turn = *t,
+            dsh_session::SessionEvent::UserMessage(m) => match m.id.0.as_str() {
+                "steer-id" => steered_turn = Some(turn),
+                "queued-id" => queued_turn = Some(turn),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    let (st, qt) = (steered_turn.expect("steered row"), queued_turn.expect("queued row"));
+    assert_eq!(st, 1, "steered message consumed inside the running turn 1");
+    assert_eq!(qt, 2, "queued message consumed by the follow-up turn 2");
+    assert!(agent.queued_next_turn().is_empty());
+
+    // 空稿全提升手势原语：返回条数（消费语义同上，此处只验原语面）
+    let mut a = dsh_llm::Message::user_text("all-1");
+    a.id = dsh_llm::MessageId("all-1".into());
+    agent.send(a, dsh_agent_loop::InboxTarget::NextTurn);
+    let mut b = dsh_llm::Message::user_text("all-2");
+    b.id = dsh_llm::MessageId("all-2".into());
+    agent.send(b, dsh_agent_loop::InboxTarget::NextTurn);
+    assert_eq!(agent.promote_all_queued(), 2);
+    assert_eq!(agent.promote_all_queued(), 0, "再提升为空");
+    agent.when_idle().await;
+    std::fs::remove_dir_all(&dir).ok();
 }

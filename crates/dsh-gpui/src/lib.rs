@@ -1641,3 +1641,65 @@ mod composer_swap_tests {
         assert!(p.restore_new, "target session gets its own saved draft back");
     }
 }
+
+/// 智能体运行中按 Enter 的行为（通用设置；上游 BusyEnterBehavior
+/// queue/steer——本地 steer 语义=打断当前轮后新轮携带消息，文案用「打断」）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EnterBehavior {
+    /// 排队（投递到 inbox NextTurn，当前轮结束后处理）。
+    #[serde(rename = "queue")]
+    Queue,
+    /// 打断（cancel 当前轮后立即处理）。
+    #[serde(rename = "interrupt")]
+    Interrupt,
+}
+
+/// 上游 resolveSubmitMode（ui-conversation input/submission-policy.ts）
+/// 的镜像：一次投递手势解析为 queue/steer 投递模式。
+/// - 非运行（或不可 steer）：恒 queue——空闲即普通发送；
+/// - 运行中 plain Enter / 发送按钮：按偏好（busyEnter 设置）；
+/// - 运行中加速 Enter（Ctrl+Enter，vendor secondary-enter）：偏好的反相
+///   （按次覆盖，queue ↔ 打断）。
+/// 上游另有 steeringAvailable 会话运输门——本地 NextStep 注入原语恒在，
+/// 省略该参数。
+pub fn resolve_enter_mode(
+    preferred: EnterBehavior,
+    running: bool,
+    accelerated: bool,
+) -> EnterBehavior {
+    if !running {
+        return EnterBehavior::Queue;
+    }
+    if !accelerated {
+        return preferred;
+    }
+    match preferred {
+        EnterBehavior::Queue => EnterBehavior::Interrupt,
+        EnterBehavior::Interrupt => EnterBehavior::Queue,
+    }
+}
+
+#[cfg(test)]
+mod enter_mode_tests {
+    use super::*;
+
+    #[test]
+    fn idle_is_always_plain_queue() {
+        for preferred in [EnterBehavior::Queue, EnterBehavior::Interrupt] {
+            assert_eq!(resolve_enter_mode(preferred, false, false), EnterBehavior::Queue);
+            assert_eq!(resolve_enter_mode(preferred, false, true), EnterBehavior::Queue);
+        }
+    }
+
+    #[test]
+    fn plain_enter_follows_preference_when_running() {
+        assert_eq!(resolve_enter_mode(EnterBehavior::Queue, true, false), EnterBehavior::Queue);
+        assert_eq!(resolve_enter_mode(EnterBehavior::Interrupt, true, false), EnterBehavior::Interrupt);
+    }
+
+    #[test]
+    fn accelerated_enter_inverts_preference_when_running() {
+        assert_eq!(resolve_enter_mode(EnterBehavior::Queue, true, true), EnterBehavior::Interrupt);
+        assert_eq!(resolve_enter_mode(EnterBehavior::Interrupt, true, true), EnterBehavior::Queue);
+    }
+}

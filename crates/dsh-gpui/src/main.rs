@@ -46,6 +46,7 @@ use gpui_component::{Icon, IconName, Root, StyledExt, TitleBar};
 use dsh_gpui::{
     ToolBlock, child_path, files_failure_line, order_entries,
 };
+pub(crate) use dsh_gpui::EnterBehavior;
 use std::collections::{HashMap, HashSet};
 use gpui_component::input::{Input, InputEvent, InputState};
 use std::sync::Arc;
@@ -294,17 +295,6 @@ pub(crate) enum AppearanceMode {
     Dark,
     #[serde(rename = "system")]
     System,
-}
-
-/// 智能体运行中按 Enter 的行为（通用设置）。
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum EnterBehavior {
-    /// 排队（投递到 inbox，当前轮结束后处理）。
-    #[serde(rename = "queue")]
-    Queue,
-    /// 打断（cancel 当前轮后立即处理）。
-    #[serde(rename = "interrupt")]
-    Interrupt,
 }
 
 /// 已完成轮次的对话视图（web `ui-chat.transcriptView`；compact 默认）。
@@ -1736,7 +1726,9 @@ impl AppView {
     ) -> Self {
         let this = cx.entity();
         let subscription = cx.subscribe(&input, |chat, input, event, cx| {
-            if matches!(event, InputEvent::PressEnter { secondary: false }) {
+            // plain Enter 按偏好投递；Ctrl+Enter（vendor secondary-enter）为
+            // 加速手势：运行中按次取偏好反相（上游 resolveSubmitMode 表）
+            if let InputEvent::PressEnter { secondary } = event {
                 let text: String = input.read_with(cx, |s, _| s.value().to_string());
                 let text = text.trim().to_string();
                 // 附件-only 发送合法（上游：draft 空 + 有附件 → commitSend；
@@ -1753,6 +1745,17 @@ impl AppView {
                     if chat.view_split().needs_commit() {
                         // 空闲但视图在别处：先收敛到视图会话再发送
                         chat.commit_peek(cx);
+                    }
+                    // 忙碌投递模式（上游 busyEnter 语义；加速=secondary）
+                    if chat.viewed_busy() {
+                        let mode = dsh_gpui::resolve_enter_mode(
+                            chat.settings.enter,
+                            true,
+                            *secondary,
+                        );
+                        if mode == EnterBehavior::Interrupt {
+                            chat.cancel_viewed_agent();
+                        }
                     }
                     chat.dispatch_user_text(&text, cx);
                     chat.pending_clear = true;
@@ -3390,6 +3393,27 @@ impl AppView {
             .unwrap_or_else(|| self.current_session_id())
     }
 
+    /// 被查看会话是否运行中（主槽走 agent_busy，runtime 走表存在性）。
+    fn viewed_busy(&self) -> bool {
+        let viewed_key = self.viewed_session_id().as_str().to_string();
+        if viewed_key == self.current_session_id().as_str() {
+            self.agent_busy
+        } else {
+            self.session_runtimes.contains_key(&viewed_key)
+        }
+    }
+
+    /// 取消被查看会话的运行（主 agent 或其 runtime——停止/打断都对准
+    /// 视图正在看的会话，不错杀主槽）。
+    fn cancel_viewed_agent(&mut self) {
+        let viewed_key = self.viewed_session_id().as_str().to_string();
+        if viewed_key == self.current_session_id().as_str() {
+            self.agent.cancel();
+        } else if let Some(a) = self.session_runtimes.get(&viewed_key) {
+            a.cancel();
+        }
+    }
+
     /// composer 草稿随会话换入换出（上游 input/hub.ts：每个 retained
     /// session 各持一份 shell——文本/附件不跨会话泄漏；单实例输入态由
     /// 存档表承载）。离开侧：已物化会话存档、空白草稿弃（切走即弃定向）；
@@ -4145,25 +4169,13 @@ impl AppView {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        let viewed_key = self.viewed_session_id().as_str().to_string();
-        let viewed_is_primary = viewed_key == self.current_session_id().as_str();
-        let viewed_busy = if viewed_is_primary {
-            self.agent_busy
-        } else {
-            self.session_runtimes.contains_key(&viewed_key)
-        };
-        if viewed_busy {
+        if self.viewed_busy() {
             // 通用设置「繁忙时 Enter 行为」：排队投递，或打断当前轮
-            // （被查看会话的 runtime 同语义——打断其自己的轮）
-            match self.settings.enter {
-                EnterBehavior::Queue => {}
-                EnterBehavior::Interrupt => {
-                    if viewed_is_primary {
-                        self.agent.cancel();
-                    } else if let Some(a) = self.session_runtimes.get(&viewed_key) {
-                        a.cancel();
-                    }
-                }
+            // （被查看会话的 runtime 同语义——打断其自己的轮）。按钮与
+            // plain Enter 同手势=按偏好（加速反相只在 Ctrl+Enter 键路）。
+            let mode = dsh_gpui::resolve_enter_mode(self.settings.enter, true, false);
+            if mode == EnterBehavior::Interrupt {
+                self.cancel_viewed_agent();
             }
         }
         self.dispatch_user_text(&text, cx);
@@ -6566,7 +6578,12 @@ impl AppView {
                     .child(Icon::new(IconName::ChevronDown).size(px(12.0)).text_color(theme::t().caption)),
             );
 
-        let trailing: AnyElement = if running {
+        // 上游 InputBar primary：运行中且空稿才变停止钮（对准被查看会话的
+        // agent——#5 下视图可能看的是 runtime，不能错杀主槽）；运行中且有
+        // 稿仍是发送钮，tooltip 按有效投递模式（排队发送/打断发送——上游
+        // input.send.queue/steer 文案位，本地 Interrupt 语义=打断）
+        let primary_stops = running && !has_text && self.attachments.is_empty();
+        let trailing: AnyElement = if primary_stops {
             let t_stop = this.clone();
             // 停止按钮：蓝圆 + 白色方块
             div()
@@ -6582,12 +6599,20 @@ impl AppView {
                 .tooltip(tip("停止生成"))
                 .on_click(move |_, _, cx| {
                     t_stop.update(cx, |v, _cx| {
-                        v.agent.cancel();
+                        v.cancel_viewed_agent();
                     });
                 })
                 .child(div().size(px(10.0)).rounded(px(2.0)).bg(gpui::white()))
                 .into_any_element()
         } else {
+            let send_tip = if running {
+                match dsh_gpui::resolve_enter_mode(self.settings.enter, true, false) {
+                    EnterBehavior::Queue => "排队发送",
+                    EnterBehavior::Interrupt => "打断发送",
+                }
+            } else {
+                "发送 (Enter)"
+            };
             let t_send = this.clone();
             div()
                 .id("composer-send")
@@ -6600,7 +6625,7 @@ impl AppView {
                 .cursor_pointer()
                 .when(!has_text, |d| d.opacity(0.4))
                 .when(has_text, |d| d.hover(|s| s.bg(theme::t().accent_hover)))
-                .tooltip(tip("发送 (Enter)"))
+                .tooltip(tip(send_tip))
                 .on_click(move |_, window, cx| {
                     t_send.update(cx, |v, cx| v.send_from_composer(window, cx));
                 })

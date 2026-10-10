@@ -92,6 +92,14 @@ struct DraftFile {
     image: Option<dsh_llm::ImageAttachmentRef>,
 }
 
+/// composer 草稿的会话存档（上游 per-session input shell 的承载面）：
+/// 文本 + 附件随会话换入换出。
+#[derive(Clone)]
+struct ComposerDraft {
+    text: String,
+    attachments: Vec<DraftFile>,
+}
+
 /// 图片捕获面的扩展名判定（PNG/JPEG——尺寸头解析可靠的两类；gif/webp
 /// 暂按普通文件走 File 块，偏差表记录）。
 pub(crate) fn is_image_path(path: &std::path::Path) -> bool {
@@ -1593,6 +1601,11 @@ pub(crate) struct AppView {
     fetch_picked: std::collections::HashSet<String>,
     fetch_query: Entity<InputState>,
     pending_clear: bool,
+    /// 切换会话待应用的输入草稿（set_value 需 window——渲染期应用，
+    /// 同 pending_clear 模式）。
+    pending_input: Option<String>,
+    /// 会话各自的 composer 草稿存档（上游 per-session input shell）。
+    session_drafts: HashMap<SessionId, ComposerDraft>,
     _input_subscription: Subscription,
     /// 对话/轨迹主体（独立 entity：流式 delta 的失效只打它；侧栏/详情经
     /// AnyView 的 element_state 缓存复用上帧结果，不再随流式逐帧重建）
@@ -1846,6 +1859,8 @@ impl AppView {
             fetch_picked: std::collections::HashSet::new(),
             fetch_query,
             pending_clear: false,
+            pending_input: None,
+            session_drafts: HashMap::new(),
             _input_subscription: subscription,
             chat,
             sidebar,
@@ -2945,6 +2960,8 @@ impl AppView {
         let Ok((session, cwd)) = self.recorder.load(&id, cwd_hint.as_deref()) else {
             return;
         };
+        // composer 草稿随查看会话换入换出（peek 变更前算离开侧）
+        self.swap_composer_draft(&id, cx);
         if id == agent_id {
             // 切回运行中的会话：显示交还 agent 会话，并把回放态接到实时流
             //（running/轮次计时/步号由 resume_running 从回放锚补回）。
@@ -3004,6 +3021,8 @@ impl AppView {
             self.view_only_switch(id, cx);
             return;
         }
+        // composer 草稿随会话换出（先于 drop：空白草稿判定读 draft_session）
+        self.swap_composer_draft(&id, cx);
         // 切走弃草稿：目标不是当前草稿自身时，摘行（无磁盘足迹）——
         // 用户定向「不发送不写入，切走自然不显示」
         if self.draft_session.as_ref() != Some(&id) {
@@ -3110,8 +3129,11 @@ impl AppView {
         // pin 事件、不写名册；首条消息发送时才物化（send_user_turn），
         // 切走即弃（无磁盘足迹，行随撤）。上游在点击即建持久空白会话
         // 作草稿锚，此为本地偏差（见 upstream-analysis）。
-        self.drop_current_draft();
         let id = self.alloc_session_id();
+        // 草稿随会话换出（先于 drop：空白草稿判定读 draft_session）；新
+        // 会话无存档 → 清空输入（旧会话残留文本不带入新草稿）
+        self.swap_composer_draft(&id, cx);
+        self.drop_current_draft();
         self.current_cwd = cwd.clone();
         self.sync_fs_sandbox();
         self.agent.set_session(Session::new(id.clone()));
@@ -3191,9 +3213,12 @@ impl AppView {
     fn enter_blank_draft(&mut self, cx: &mut Context<Self>) {
         // 弃未物化草稿（若在）；纯草稿不属任何工作区：清掉可能残留的显式
         // 选择，chip 回「选择工作区」
+        let new_id = self.alloc_session_id();
+        // 草稿随会话换出（先于 drop），新空白草稿输入清空
+        self.swap_composer_draft(&new_id, cx);
         self.drop_current_draft();
         self.current_workspace = None;
-        self.agent.set_session(Session::new(self.alloc_session_id()));
+        self.agent.set_session(Session::new(new_id));
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
@@ -3363,6 +3388,55 @@ impl AppView {
         self.peek_session
             .clone()
             .unwrap_or_else(|| self.current_session_id())
+    }
+
+    /// composer 草稿随会话换入换出（上游 input/hub.ts：每个 retained
+    /// session 各持一份 shell——文本/附件不跨会话泄漏；单实例输入态由
+    /// 存档表承载）。离开侧：已物化会话存档、空白草稿弃（切走即弃定向）；
+    /// 进入侧：恢复存档或清空。输入值经 pending_input 渲染期应用
+    /// （set_value 需 window）。
+    fn swap_composer_draft(&mut self, new: &SessionId, cx: &mut Context<Self>) {
+        let old = self.viewed_session_id();
+        let old_is_blank = self.draft_session.as_ref() == Some(&old);
+        let plan = dsh_gpui::composer_swap_plan(
+            old.as_str(),
+            new.as_str(),
+            old_is_blank,
+            self.session_drafts.contains_key(new),
+        );
+        let Some(plan) = plan else { return };
+        if plan.stash_old {
+            let text = self.input.read_with(cx, |s, _| s.value().to_string());
+            self.session_drafts.insert(
+                old.clone(),
+                ComposerDraft { text, attachments: std::mem::take(&mut self.attachments) },
+            );
+        } else {
+            self.attachments.clear();
+        }
+        if plan.restore_new {
+            let d = self.session_drafts.remove(new).expect("plan checked contains_key");
+            self.pending_input = Some(d.text);
+            self.attachments = d.attachments;
+        } else {
+            self.pending_input = Some(String::new());
+            self.attachments.clear();
+        }
+        // 附件上传提示随草稿走，不落进新会话的 composer
+        self.upload_notice = None;
+        cx.notify();
+    }
+
+    /// 草稿附件按 id 定位（存档双查）：live composer 与已存档会话草稿都
+    /// 可能在途（上传完成回写不能因切换丢失）。
+    fn find_draft_file_mut(&mut self, id: &str) -> Option<&mut DraftFile> {
+        if let Some(d) = self.attachments.iter_mut().find(|d| d.id == id) {
+            return Some(d);
+        }
+        self.session_drafts
+            .values_mut()
+            .flat_map(|d| d.attachments.iter_mut())
+            .find(|d| d.id == id)
     }
 
     fn is_empty_session(&self, cx: &App) -> bool {
@@ -3561,7 +3635,7 @@ impl AppView {
                     })
                     .await;
                 let _ = this.update(cx, |v, cx| {
-                    if let Some(d) = v.attachments.iter_mut().find(|d| d.id == id) {
+                    if let Some(d) = v.find_draft_file_mut(&id) {
                         match result {
                             Ok((reference, image)) => {
                                 d.image = image;
@@ -3602,7 +3676,7 @@ impl AppView {
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
-                if let Some(d) = v.attachments.iter_mut().find(|d| d.id == draft.id) {
+                if let Some(d) = v.find_draft_file_mut(&draft.id) {
                     d.state = match result {
                         Ok(reference) => DraftUpload::Ready { reference },
                         Err(message) => DraftUpload::Failed { message },
@@ -4612,7 +4686,7 @@ impl AppView {
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
-                if let Some(d) = v.attachments.iter_mut().find(|d| d.id == id) {
+                if let Some(d) = v.find_draft_file_mut(&id) {
                     match result {
                         Ok((reference, dims)) => {
                             d.image = dims.map(|(width, height)| {
@@ -4717,6 +4791,10 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(text) = self.pending_input.take() {
+            // 会话草稿换入的输入值（set_value 需 window——渲染期应用）
+            self.input.update(cx, |state, cx| state.set_value(text, window, cx));
+        }
         if self.pending_clear {
             self.pending_clear = false;
             self.input.update(cx, |state, cx| state.set_value("", window, cx));

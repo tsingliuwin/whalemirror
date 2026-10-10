@@ -27,6 +27,7 @@
 | 23 | storage-json 数组判守 | 0.2.1-alpha.1 | 读 web projcache 单元时 tables 为数组应拒绝（防把不可见记录当空视图覆写丢弃——上游 format.ts 修正同语义） | 已实施（09-24：touch_projcache 的 tables 数组判守 + 单测「数组保留不覆写」） | 已完成 |
 | 24 | 图片大图查看器（image.open「查看大图」）| 0.2.1-alpha.1 | **已落（10-09）**：聊天图片 tile 点击 → 全窗遮罩（黑 65% 居中 contain，点击任意处关闭——上游 lightbox 语义）；ImageViewer 状态机抽 lib（+1 单测：点击开/遮罩关/空路径反查失败 tile 无动作）；#7 的 gpui::img 渲染底座直接复用 | image.loading 占位态（加载中骨架）未做——本地对象路径直读即时加载 | **已完成**（loading 骨架面小不做） |
 | 25 | prepare.* 过程组运行中形态 | 0.2.1-alpha.1 | 工具准备期的「准备读取文件」等运行中行（上游 ProcessActivitySummary.running）| rustdsh 折叠仅闭合轮，运行中轮不折叠；需先有过程组运行中面 | 观察 |
+| 26 | composer 草稿随会话存取（per-session input shell） | ui-conversation input/hub.ts（既有） | 单实例 InputState+attachments 草稿跨会话泄漏：A 会话打字/加附件切到 B 后原样出现在 B 的 composer、发送即入 B（上游每个 retained session 各持一份 shell，切走不带走）。**已落（10-10）**：composer_swap_plan 纯函数（同会话 None/已物化 stash/空白草稿弃/有存档 restore，+4 单测）+ session_drafts 存档表 + swap_composer_draft 四路接线（switch_session_inner/view_only_switch/new_session/enter_blank_draft，先于 drop 读 draft_session）+ find_draft_file_mut 存档双查（在途上传回写切换后不丢）+ pending_input 渲染期应用（set_value 需 window，同 pending_clear 模式）。实机完整往返验证受阻（GPUI Input 吃 SendInput 合成键入三种形态，CUA type 本会话不可用——已验证点击可达与应用稳定渲染，待带 CUA 会话补验） | 实机打字往返验证 | **已完成**（逻辑面 4 单测+全量回归；实机往返补验待 CUA 会话） |
 
 ## 批次二（工作台补全）
 

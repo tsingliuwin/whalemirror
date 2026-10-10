@@ -1579,3 +1579,65 @@ mod pdf_preview_tests {
         assert!(!is_pdf_preview("noext"));
     }
 }
+
+/// composer 草稿切换计划（上游 ui-conversation input/hub.ts 的
+/// per-session shell 语义：每个 retained session 各持一份输入草稿——
+/// 文本与附件随会话存取，切走不带走）。纯决策面：
+/// - 同会话 → None（无切换）；
+/// - 离开侧：已物化会话的草稿存档（stash）；空白未物化草稿弃
+///   （binding 释放——本地定向「切走即弃」）；
+/// - 进入侧：有存档恢复，无存档清空。
+#[derive(Debug, PartialEq, Eq)]
+pub struct ComposerSwapPlan {
+    /// 离开侧草稿存档（false = 丢弃：空白草稿）。
+    pub stash_old: bool,
+    /// 进入侧恢复存档草稿（false = 清空）。
+    pub restore_new: bool,
+}
+
+pub fn composer_swap_plan(
+    old: &str,
+    new: &str,
+    old_is_blank_draft: bool,
+    new_has_saved: bool,
+) -> Option<ComposerSwapPlan> {
+    if old == new {
+        return None;
+    }
+    Some(ComposerSwapPlan {
+        stash_old: !old_is_blank_draft,
+        restore_new: new_has_saved,
+    })
+}
+
+#[cfg(test)]
+mod composer_swap_tests {
+    use super::*;
+
+    #[test]
+    fn same_session_is_noop() {
+        assert!(composer_swap_plan("s1", "s1", false, true).is_none());
+        assert!(composer_swap_plan("s1", "s1", true, false).is_none());
+    }
+
+    #[test]
+    fn materialized_old_is_stashed() {
+        let p = composer_swap_plan("a", "b", false, false).unwrap();
+        assert!(p.stash_old, "typed draft in a materialized session is kept with it");
+        assert!(!p.restore_new);
+    }
+
+    #[test]
+    fn blank_draft_old_is_discarded() {
+        let p = composer_swap_plan("draft", "b", true, false).unwrap();
+        assert!(!p.stash_old, "unsent blank draft is dropped on switch (user direction)");
+        assert!(!p.restore_new);
+    }
+
+    #[test]
+    fn saved_target_restores() {
+        let p = composer_swap_plan("a", "b", false, true).unwrap();
+        assert!(p.stash_old);
+        assert!(p.restore_new, "target session gets its own saved draft back");
+    }
+}

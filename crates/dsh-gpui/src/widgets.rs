@@ -184,6 +184,9 @@ impl RenderOnce for MarkdownBlock {
 }
 /// 用 `TextView::html` 渲染一段 html（#7 documentpreview html 格式）：
 /// vendor 基础 HTML 标签内容阅读器（无 CSS——样式走主题默认）。
+/// dock 预览 Editor 化后暂未构造（html 走源码形态）；TextView 宽度
+/// 专项（#30）解决富渲染后回归使用。
+#[allow(dead_code)]
 #[derive(IntoElement)]
 pub(crate) struct HtmlBlock {
     pub(crate) text: String,

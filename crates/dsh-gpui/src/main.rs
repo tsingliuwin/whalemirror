@@ -49,6 +49,7 @@ use dsh_gpui::{
 pub(crate) use dsh_gpui::EnterBehavior;
 use std::collections::{HashMap, HashSet};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_base::input::{Editor, EditorState};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1425,6 +1426,11 @@ const DOCK_WIDTH: f32 = 440.0;
 pub(crate) struct FilePreview {
     /// 绝对路径（树行经 childPath 传入）
     pub(crate) path: String,
+    /// 全文（Editor 化后文本类一次性装载；md/html 同走编辑器源码形态）
+    full_text: String,
+    /// 只读编辑器实体（文本类预览；渲染期构造——构造需要 window，open
+    /// 路径（链接钩子）只有 &mut App）
+    editor: Option<Entity<gpui_base::input::EditorState>>,
     /// 已载行
     lines: Vec<String>,
     /// 下一页起始行号（= 已载行数）
@@ -2476,6 +2482,8 @@ impl AppView {
         }
         let mut preview = FilePreview {
             path,
+            full_text: String::new(),
+            editor: None,
             lines: Vec::new(),
             loaded_through: 0,
             eof: false,
@@ -2493,19 +2501,31 @@ impl AppView {
         } else if dsh_gpui::is_markdown_preview(&preview.path)
             || dsh_gpui::is_html_preview(&preview.path)
         {
-            // markdown/html 预览（上游 documentpreview md/html 体）：富渲染
-            // 整文档（TextView），不分页——循环读页到 eof
+            // markdown/html：Editor 化（源码形态，只读+语法高亮面待 language
+            // 接入）——0.7 TextView 宽度测量问题（#30）期间的可查看承载
             if let Some(root) = self.preview_root() {
                 while !preview.eof {
                     Self::load_preview_page(&root, &mut preview);
                 }
+                preview.full_text = preview.lines.join("
+");
+                preview.lines.clear();
             } else {
                 preview.failure =
                     Some(dsh_gpui::PreviewErrorKind::Unavailable("会话没有工作区目录。".into()));
             }
         } else {
             match self.preview_root() {
-                Some(root) => Self::load_preview_page(&root, &mut preview),
+                Some(root) => {
+                    // Editor 化：文本类一次性全量（rope 承载；「读取更多」
+                    // 分页机制随编辑器化退役）
+                    while !preview.eof {
+                        Self::load_preview_page(&root, &mut preview);
+                    }
+                    preview.full_text = preview.lines.join("
+");
+                    preview.lines.clear();
+                }
                 None => {
                     preview.failure =
                         Some(dsh_gpui::PreviewErrorKind::Unavailable("会话没有工作区目录。".into()));
@@ -2556,23 +2576,6 @@ impl AppView {
         }
     }
 
-    fn preview_load_more(&mut self, cx: &mut Context<Self>) {
-        let root = self.preview_root();
-        if let Some(p) = self.active_preview_mut() {
-            if !p.eof {
-                match &root {
-                    Some(r) => Self::load_preview_page(r, p),
-                    None => {
-                        p.failure = Some(dsh_gpui::PreviewErrorKind::Unavailable(
-                            "会话没有工作区目录。".into(),
-                        ));
-                    }
-                }
-            }
-        }
-        cx.notify();
-    }
-
     fn preview_reload(&mut self, cx: &mut Context<Self>) {
         let root = self.preview_root();
         if let Some(p) = self.active_preview_mut() {
@@ -2580,18 +2583,19 @@ impl AppView {
             p.loaded_through = 0;
             p.eof = false;
             p.failure = None;
+            p.full_text.clear();
             match &root {
                 Some(r) => {
-                    Self::load_preview_page(r, p);
-                    // markdown/html 全量（富渲染整文档；pdf 已 eof 不再读
-                    // 字节；其余单页起步续读）
-                    if dsh_gpui::is_markdown_preview(&p.path)
-                        || dsh_gpui::is_html_preview(&p.path)
-                    {
-                        while !p.eof {
-                            Self::load_preview_page(r, p);
-                        }
+                    // Editor 化：全量重读；编辑器实体丢弃（set_value 需
+                    // window，reload 路径无）——下一帧 render ensure 按新
+                    // 文本重建
+                    while !p.eof {
+                        Self::load_preview_page(r, p);
                     }
+                    p.full_text = p.lines.join("
+");
+                    p.lines.clear();
+                    p.editor = None;
                 }
                 None => {
                     p.failure = Some(dsh_gpui::PreviewErrorKind::Unavailable(
@@ -2603,9 +2607,13 @@ impl AppView {
         cx.notify();
     }
 
-    fn preview_toggle_wrap(&mut self, cx: &mut Context<Self>) {
+    fn preview_toggle_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(p) = self.active_preview_mut() {
             p.wrap = !p.wrap;
+            let wrap = p.wrap;
+            if let Some(editor) = p.editor.clone() {
+                editor.update(cx, |st, cx| st.set_soft_wrap(wrap, window, cx));
+            }
         }
         cx.notify();
     }
@@ -4932,6 +4940,25 @@ impl Render for AppView {
         if self.pending_clear {
             self.pending_clear = false;
             self.input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+
+        // 文本类预览的只读编辑器实体（Editor 化）：构造需要 window，open
+        // 路径（链接钩子）只有 &mut App——渲染期 ensure（Option 已构造即跳过）
+        if self.dock.open
+            && let Some(DockTab::File(fi)) = self.dock.tabs.get(self.dock.active).copied()
+            && let Some(f) = self.dock.files.get_mut(fi)
+            && f.editor.is_none()
+            && !dsh_gpui::is_image_preview(&f.path)
+            && !dsh_gpui::is_pdf_preview(&f.path)
+        {
+            let editor = cx.new(|cx| {
+                let st = EditorState::new(window, cx);
+                let mut st = st.soft_wrap(f.wrap);
+                st.set_readonly(true, cx);
+                st.set_value(f.full_text.clone(), window, cx);
+                st
+            });
+            f.editor = Some(editor);
         }
 
         // 跟随系统：按窗口外观校正主题（与当前生效主题不同才重应用）
@@ -7333,8 +7360,8 @@ impl AppView {
                     .cursor_pointer()
                     .hover(|st| st.bg(theme::t().hover).text_color(theme::t().text))
                     .tooltip(tip(if wrap_on { "取消换行" } else { "自动换行" }))
-                    .on_click(move |_, _, cx| {
-                        t_wrap.update(cx, |v, cx| v.preview_toggle_wrap(cx));
+                    .on_click(move |_, window, cx| {
+                        t_wrap.update(cx, |v, cx| v.preview_toggle_wrap(window, cx));
                     })
                     .child(
                         svg()
@@ -7395,55 +7422,6 @@ impl AppView {
                     ),
             );
         }
-        // html 预览体（上游 documentpreview html）：TextView::html 富渲染
-        // （vendor 基础标签内容阅读器——无 CSS，样式走主题默认）
-        if dsh_gpui::is_html_preview(&f.path) {
-            let text: String = if f.lines.is_empty() {
-                match &f.failure {
-                    Some(e) => dsh_gpui::preview_failure_line(e),
-                    None => "正在读取…".into(),
-                }
-            } else {
-                f.lines.join("
-")
-            };
-            return header.child(
-                div()
-                    .id(SharedString::from(format!("dock-html-{fi}")))
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_y_scroll()
-                    .p(px(16.0))
-                    .child(widgets::HtmlBlock { text, id: 950_000 + fi }),
-            );
-        }
-        // markdown 预览体（上游 documentpreview markdown）：TextView 富
-        // 渲染整文档（标题/列表/代码卡——与聊天流同一 MarkdownBlock）；
-        // 行号列不显示，头部 wrap 钮保留（对 md 无效但无害，同图片）
-        if dsh_gpui::is_markdown_preview(&f.path) {
-            let text: String = if f.lines.is_empty() {
-                match &f.failure {
-                    Some(e) => dsh_gpui::preview_failure_line(e),
-                    None => "正在读取…".into(),
-                }
-            } else {
-                f.lines.join("
-")
-            };
-            return header.child(
-                div()
-                    .id(SharedString::from(format!("dock-md-{fi}")))
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_y_scroll()
-                    .p(px(16.0))
-                    .child(widgets::MarkdownBlock { text, id: 900_000 + fi }),
-            );
-        }
         // 图片预览体（上游 documentpreview image：居中 contain 位图）
         if dsh_gpui::is_image_preview(&f.path) {
             let img_path = std::path::PathBuf::from(&f.path);
@@ -7465,91 +7443,54 @@ impl AppView {
                     ),
             );
         }
-        let mut rows: Vec<AnyElement> = Vec::new();
-        if f.lines.is_empty() {
-            rows.push(
+        // 文本类预览体（Editor 化）：只读编辑器——display_map 自管
+        // wrap_width（实测布局宽度，Zed 编辑器同源可靠性），自带行号列
+        // 与横向滚动（wrap 关）。失败行/空文件明示同旧。
+        let fi_owned = fi;
+        if f.failure.is_some() || f.full_text.is_empty() {
+            let line_text = match &f.failure {
+                Some(e) => dsh_gpui::preview_failure_line(e),
+                None => {
+                    if f.eof { "（空文件）".to_string() } else { "正在读取…".to_string() }
+                }
+            };
+            return header.child(
                 div()
-                    .py_2()
-                    .px_3()
-                    .text_size(px(13.0))
-                    .line_height(px(20.0))
-                    .text_color(theme::t().text_2)
-                    .child(match &f.failure {
-                        Some(e) => dsh_gpui::preview_failure_line(e),
-                        None => "正在读取…".into(),
-                    })
-                    .into_any_element(),
-            );
-        } else {
-            for (n, line) in f.lines.iter().enumerate() {
-                rows.push(
-                    div()
-                        .flex()
-                        .items_start()
-                        .child(
-                            div()
-                                .w(px(44.0))
-                                .flex_none()
-                                .pr(px(8.0))
-                                .text_right()
-                                .text_size(px(12.0))
-                                .line_height(px(20.0))
-                                .text_color(theme::t().text_3)
-                                .child(format!("{}", n + 1)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .when(!f.wrap, |d| d.whitespace_nowrap())
-                                .text_size(px(12.0))
-                                .line_height(px(20.0))
-                                .font_family(widgets::theme_mono())
-                                .text_color(theme::t().text)
-                                .child(line.clone()),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
-        if !f.eof && !f.lines.is_empty() {
-            let t_more = this.clone();
-            rows.push(
-                div()
-                    .id(SharedString::from(format!("dock-more-{fi}")))
-                    .mt_2()
-                    .mb_2()
-                    .ml(px(44.0))
-                    .h(px(28.0))
-                    .flex_none()
+                    .id(SharedString::from(format!("dock-empty-{fi_owned}")))
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .gap_1()
-                    .rounded(px(8.0))
-                    .border(px(0.5))
-                    .border_color(theme::t().border_l3)
                     .text_size(px(theme::FONT_ROW))
-                    .text_color(theme::t().text_2)
-                    .cursor_pointer()
-                    .hover(|st| st.bg(theme::t().hover).text_color(theme::t().text))
-                    .on_click(move |_, _, cx| {
-                        t_more.update(cx, |v, cx| v.preview_load_more(cx));
-                    })
-                    .child(format!("加载更多（已载 {} 行）", f.loaded_through))
-                    .into_any_element(),
+                    .line_height(px(theme::FONT_ROW_LEADING))
+                    .text_color(theme::t().text_3)
+                    .child(line_text),
             );
         }
-        let body = div()
-            .id(SharedString::from(format!("dock-preview-body-{fi}")))
-            .flex_grow_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .v_flex()
-            .px_2()
-            .py_2()
-            .children(rows);
-        div().flex_grow_1().min_h_0().v_flex().child(header).child(body)
+        let editor = match &f.editor {
+            Some(e) => e.clone(),
+            // ensure 在 render 头部（构造需 window）；此帧未及构造时占位
+            None => {
+                return header.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme::t().text_3)
+                        .child("正在准备…"),
+                );
+            }
+        };
+        header.child(
+            div()
+                .id(SharedString::from(format!("dock-editor-{fi_owned}")))
+                .flex_1()
+                .min_h_0()
+                .child(Editor::new(&editor)),
+        )
     }
 
     fn render_details(&self, width: f32, this: Entity<AppView>) -> Div {

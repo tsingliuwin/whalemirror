@@ -7412,6 +7412,8 @@ impl AppView {
                     .id(SharedString::from(format!("dock-html-{fi}")))
                     .flex_1()
                     .min_h_0()
+                    .w_full()
+                    .min_w_0()
                     .overflow_y_scroll()
                     .p(px(16.0))
                     .child(widgets::HtmlBlock { text, id: 950_000 + fi }),
@@ -7435,6 +7437,8 @@ impl AppView {
                     .id(SharedString::from(format!("dock-md-{fi}")))
                     .flex_1()
                     .min_h_0()
+                    .w_full()
+                    .min_w_0()
                     .overflow_y_scroll()
                     .p(px(16.0))
                     .child(widgets::MarkdownBlock { text, id: 900_000 + fi }),

@@ -91,7 +91,7 @@ impl RenderOnce for MarkdownBlock {
         style = style.with_dark(true);
 
         let segments = split_markdown(&self.text);
-        let mut col = div().v_flex().gap(px(12.0));
+        let mut col = div().w_full().min_w_0().v_flex().gap(px(12.0));
         for (i, seg) in segments.into_iter().enumerate() {
             match seg {
                 MdSegment::Text(text) => {

@@ -4246,7 +4246,18 @@ impl Render for ChatView {
                             // 零高隐藏；答案条目隐藏本步 reasoning 块
                             if let Some(f) = folds.get(&e.turn).cloned() {
                                 let expanded = v.turn_expanded.contains(&e.turn);
-                                let member = matches!(e.role, Role::Assistant | Role::Context)
+                                // 上游 TURN_PROCESS_INDEPENDENT_KINDS：
+                                // system-prompt 行独立于过程折叠（恒显示，
+                                // 自带折叠）——仅非 system-prompt 的上下文行
+                                // （文件引用等）算过程证据
+                                let is_system_prompt = matches!(
+                                    &e.context,
+                                    Some(info)
+                                        if info.title == "系统提示词"
+                                            || info.title == "系统提示词更新"
+                                );
+                                let member = !is_system_prompt
+                                    && matches!(e.role, Role::Assistant | Role::Context)
                                     && f.first_process <= ix
                                     && ix < f.answer;
                                 if member {

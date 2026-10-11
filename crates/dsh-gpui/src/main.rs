@@ -7303,6 +7303,12 @@ impl AppView {
 
     /// 文件预览 tab 体：路径头（directory 灰 + name 全墨 + 换行 + 重载）+
     /// 行号 gutter + 等宽正文（上游 CodeBody 的行号列；语法高亮面外）。
+    /// dock 预览体的正确结构（旧代码 header.child(body) 把 body 塞进 38px
+    /// 标题行内——靠溢出侥幸渲染；正确形态=header 与 body 兄弟节点）。
+    fn preview_shell(header: Div, body: impl IntoElement) -> Div {
+        div().flex_grow_1().min_h_0().v_flex().child(header).child(body)
+    }
+
     fn dock_preview(&self, fi: usize, this: &Entity<AppView>) -> Div {
         let Some(f) = self.dock.files.get(fi) else {
             return div().flex_grow_1().min_h_0();
@@ -7399,7 +7405,7 @@ impl AppView {
         // pdf 预览体：GPUI 无 canvas/pdfjs 渲染面——明示能力边界行
         //（上游 watch-unsupported 同语义）。头部（路径+wrap/重载钮）保留。
         if dsh_gpui::is_pdf_preview(&f.path) {
-            return header.child(
+            return Self::preview_shell(header, 
                 div()
                     .id(SharedString::from(format!("dock-pdf-{fi}")))
                     .flex_1()
@@ -7428,7 +7434,7 @@ impl AppView {
         // 图片预览体（上游 documentpreview image：居中 contain 位图）
         if dsh_gpui::is_image_preview(&f.path) {
             let img_path = std::path::PathBuf::from(&f.path);
-            return header.child(
+            return Self::preview_shell(header, 
                 div()
                     .id(SharedString::from(format!("dock-img-{fi}")))
                     .flex_1()
@@ -7457,7 +7463,7 @@ impl AppView {
                     if f.eof { "（空文件）".to_string() } else { "正在读取…".to_string() }
                 }
             };
-            return header.child(
+            return Self::preview_shell(header, 
                 div()
                     .id(SharedString::from(format!("dock-empty-{fi_owned}")))
                     .flex_1()
@@ -7475,7 +7481,7 @@ impl AppView {
             Some(e) => e.clone(),
             // ensure 在 render 头部（构造需 window）；此帧未及构造时占位
             None => {
-                return header.child(
+                return Self::preview_shell(header, 
                     div()
                         .flex_1()
                         .min_h_0()
@@ -7487,12 +7493,12 @@ impl AppView {
                 );
             }
         };
-        header.child(
+        Self::preview_shell(
+            header,
             div()
                 .id(SharedString::from(format!("dock-editor-{fi_owned}")))
                 .flex_1()
                 .min_h_0()
-                .h_full()
                 .overflow_hidden()
                 .child(Editor::new(&editor)),
         )

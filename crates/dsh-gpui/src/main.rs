@@ -6999,7 +6999,7 @@ impl AppView {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::t().accent_hover))
-                .tooltip(tip("停止生成"))
+                .tooltip(widgets::tip_keys("停止生成", &["esc", "esc"]))
                 .on_click(move |_, _, cx| {
                     t_stop.update(cx, |v, _cx| {
                         v.cancel_viewed_agent();

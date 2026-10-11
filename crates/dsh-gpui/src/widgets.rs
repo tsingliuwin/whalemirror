@@ -217,6 +217,58 @@ pub(crate) fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyVi
     move |_window, cx| cx.new(|_| Tooltip::new(text)).into()
 }
 
+/// 带键位 chip 的 tooltip（web Tooltip shortcutKeys：如停止=双 Esc）。
+/// 镜像官方 Tooltip chrome（popover 面/描边/圆角/间距），键位 chip 走
+/// 官方 Kbd appearance(false) 文本形（muted 弱化）。
+pub(crate) struct TipKeys {
+    pub(crate) text: &'static str,
+    pub(crate) keys: &'static [&'static str],
+}
+
+impl gpui::Render for TipKeys {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let tokens = crate::theme::t();
+        div()
+            .h_flex()
+            .m_3()
+            .bg(tokens.surface)
+            .text_color(tokens.text)
+            .border_1()
+            .border_color(tokens.border_l2)
+            .shadow_md()
+            .rounded(px(8.0))
+            .justify_between()
+            .py_0p5()
+            .px_2()
+            .text_sm()
+            .gap_3()
+            .child(self.text)
+            .child(
+                div()
+                    .text_xs()
+                    .flex_shrink_0()
+                    .text_color(tokens.text_3)
+                    .h_flex()
+                    .gap_1()
+                    .children(self.keys.iter().map(|k| {
+                        gpui_component::kbd::Kbd::new(
+                            gpui::Keystroke::parse(k).expect("static keystroke"),
+                        )
+                        .appearance(false)
+                    })),
+            )
+            .into_element()
+    }
+}
+
+/// 带键位 chip 的 tooltip 工厂（web Tooltip shortcutKeys 位）。
+pub(crate) fn tip_keys(
+    text: &'static str,
+    keys: &'static [&'static str],
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_window, cx| cx.new(|_| TipKeys { text, keys }).into()
+}
+
 /// 28px 圆形图标按钮（web .iconButton）。
 pub(crate) fn icon_btn(
     id: &'static str,

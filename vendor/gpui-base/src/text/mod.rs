@@ -41,12 +41,11 @@ pub fn set_relative_file_opener(
     *RELATIVE_FILE_OPENER.write().unwrap() = opener;
 }
 
-/// [dsh] 无 scheme 的真实路径经钩子打开。返回 true = 已消费。
+/// [dsh] 无 scheme 的路径经钩子打开（宿主侧解析会话工作区并判存在，
+/// 不存在的文件显示预览失败行——上游 documentpreview 同语义）。返回
+/// true = 已消费。
 pub fn try_relative_file_opener(url: &str, cx: &mut gpui::App) -> bool {
-    let is_path = !url.is_empty()
-        && !url.contains("://")
-        && !url.starts_with("mailto:")
-        && std::path::Path::new(url).exists();
+    let is_path = !url.is_empty() && !url.contains("://") && !url.starts_with("mailto:");
     if is_path {
         if let Some(opener) = RELATIVE_FILE_OPENER.read().unwrap().as_ref() {
             opener(url, cx);
@@ -56,18 +55,13 @@ pub fn try_relative_file_opener(url: &str, cx: &mut gpui::App) -> bool {
     false
 }
 
-/// [dsh] 空 href 或不存在路径不交给系统打开：LLM 常输出引用式链接
-/// （[text][1] 无定义 → url 为空）与相对路径——Windows ShellExecute
-/// 会弹「找不到文件」错误框。有 scheme 的 URL 放行。
+/// [dsh] 空 href 不交给系统打开（LLM 常输出引用式链接 [text][1] 无定义
+/// → url 为空——Windows ShellExecute 会弹「找不到文件」错误框）。有
+/// scheme 的 URL 放行系统打开；无 scheme 的路径交宿主预览（存在性由
+/// 宿主相对会话工作区判定，不以进程 CWD 误判）。
 pub fn dsh_openable(url: &str) -> bool {
     let u = url.trim();
-    if u.is_empty() {
-        return false;
-    }
-    if u.contains("://") || u.starts_with("mailto:") {
-        return true;
-    }
-    std::path::Path::new(u).exists()
+    !u.is_empty()
 }
 
 pub(crate) fn init(cx: &mut App) {

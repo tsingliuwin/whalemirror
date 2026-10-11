@@ -721,7 +721,15 @@ pub fn read_text_page(
 ) -> Result<TextPage, PreviewErrorKind> {
     let root_canon = std::fs::canonicalize(root)
         .map_err(|e| PreviewErrorKind::Unavailable(e.to_string()))?;
-    let canon = match std::fs::canonicalize(path) {
+    // 相对路径按会话工作区解析（模型/工具输出的路径是相对会话 cwd 的；
+    // 直接 canonicalize 会落到进程 CWD——跨工作区会话点击文件卡即
+    // OutsideWorkspace 误报，进程 CWD 无同名文件则点击无反应）
+    let resolved = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        root_canon.join(path)
+    };
+    let canon = match std::fs::canonicalize(&resolved) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(PreviewErrorKind::NotFound);
@@ -1804,5 +1812,43 @@ mod fold_header_tests {
     fn all_members_before_user_falls_back_to_first() {
         // 理论面：过程组全在用户前（异常序）——回退首条避免空锚
         assert_eq!(fold_header_index(&[0, 1], Some(5)), 0);
+    }
+}
+
+#[cfg(test)]
+mod read_page_root_tests {
+    use super::*;
+
+    #[test]
+    fn relative_path_resolves_against_workspace_root() {
+        // 临时工作区 + 子文件：相对路径必须相对 root 解析（非进程 CWD）
+        let dir = std::env::temp_dir().join(format!("dsh-preview-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("a.txt"), b"line1\nline2\n").unwrap();
+        let root = dir.to_string_lossy().to_string();
+
+        let page = read_text_page(&root, "sub/a.txt", 0).expect("relative path opens via root");
+        assert_eq!(page.text, "line1\nline2\n");
+
+        // root 内不存在的相对路径：NotFound（而非进程 CWD 下同名文件）
+        let missing = read_text_page(&root, "Cargo.toml", 0);
+        if dir.join("Cargo.toml").exists() {
+            panic!("test fixture collision");
+        }
+        assert!(matches!(missing, Err(PreviewErrorKind::NotFound)), "{missing:?}");
+
+        // 绝对路径不受影响（root 内）
+        let abs = dir.join("sub").join("a.txt");
+        let page = read_text_page(&root, &abs.to_string_lossy(), 0).expect("absolute in-root opens");
+        assert_eq!(page.text, "line1\nline2\n");
+
+        // root 外的绝对路径：OutsideWorkspace（沙箱边界保持）
+        let outside = std::env::temp_dir().join(format!("dsh-outside-{}.txt", std::process::id()));
+        std::fs::write(&outside, b"x").unwrap();
+        let r = read_text_page(&root, &outside.to_string_lossy(), 0);
+        assert!(matches!(r, Err(PreviewErrorKind::OutsideWorkspace)), "{r:?}");
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

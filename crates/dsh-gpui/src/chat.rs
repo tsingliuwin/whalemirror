@@ -1895,7 +1895,13 @@ open: false,
                             .hover(|s| s.text_color(theme::t().text))
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
-                                widgets::open_with_host_app(&open_path);
+                                // web fileLink 的宿主路由：无 scheme 路径
+                                // 优先 dock 预览（相对会话工作区解析，不
+                                // 存在显示失败行）；有 scheme（http 等）
+                                // 才交系统默认应用
+                                if !gpui_base::text::try_relative_file_opener(&open_path, cx) {
+                                    widgets::open_with_host_app(&open_path);
+                                }
                             })
                             .child(summary_text.clone()),
                     );

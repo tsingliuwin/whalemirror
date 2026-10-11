@@ -48,7 +48,7 @@ use dsh_gpui::{
 };
 pub(crate) use dsh_gpui::EnterBehavior;
 use std::collections::{HashMap, HashSet};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1548,7 +1548,7 @@ pub(crate) struct AppView {
     /// composer 统计 pill 的对话框互斥开合（web StatsPills exclusive slot）
     stat_dialog: Option<StatDialogKind>,
     rename_input: Entity<InputState>,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     /// composer 附件草稿（有序；上游 DraftFileUploads）
     attachments: Vec<DraftFile>,
     /// 附件内容寻址存储（DSH_HOME/attachments/v1）
@@ -1715,7 +1715,8 @@ impl AppView {
         workdir: dsh_tools::Workdir,
         persist_cwd: Arc<std::sync::Mutex<String>>,
         sessions: Vec<SessionMeta>,
-        input: Entity<InputState>,
+        plan_feedback: Entity<InputState>,
+        input: Entity<TextareaState>,
         #[allow(dead_code)] // 被 DeepSeek 卡引用
     api_input: Entity<InputState>,
         desired_model: String,
@@ -1745,7 +1746,8 @@ impl AppView {
         let subscription = cx.subscribe(&input, |chat, input, event, cx| {
             // plain Enter 按偏好投递；Ctrl+Enter（vendor secondary-enter）为
             // 加速手势：运行中按次取偏好反相（上游 resolveSubmitMode 表）
-            if let InputEvent::PressEnter { secondary } = event {
+            // shift=true = Shift+Enter 换行手势（0.7 语义），不发送
+            if let InputEvent::PressEnter { secondary, shift: false } = event {
                 let text: String = input.read_with(cx, |s, _| s.value().to_string());
                 let text = text.trim().to_string();
                 // 空稿加速手势（上游 view-binding steerQueue）：Ctrl+Enter +
@@ -1831,7 +1833,7 @@ impl AppView {
             workdir,
             persist_cwd,
             sessions,
-            plan_feedback: input.clone(),
+            plan_feedback: plan_feedback.clone(),
             input,
             api_input,
             desired_model,
@@ -2680,7 +2682,7 @@ impl AppView {
         let Some(root) = self.dock.root.clone() else {
             // noWorkspace：会话无工作区目录
             return div()
-                .flex_grow()
+                .flex_grow_1()
                 .min_h_0()
                 .flex()
                 .items_start()
@@ -2814,7 +2816,7 @@ impl AppView {
         self.dock_level_rows(&root, &mut rows, 0, this);
         let body = div()
             .id("dock-files-list")
-            .flex_grow()
+            .flex_grow_1()
             .min_h_0()
             .overflow_y_scroll()
             .v_flex()
@@ -2823,7 +2825,7 @@ impl AppView {
             .pl(px(8.0))
             .pr(px(2.0))
             .children(rows);
-        div().flex_grow().min_h_0().v_flex().child(header).child(body)
+        div().flex_grow_1().min_h_0().v_flex().child(header).child(body)
     }
 
     /// 一层目录的行（含嵌套展开层）。未加载的层不渲染（根在打开时必载，
@@ -7090,7 +7092,7 @@ impl AppView {
                         .child("选择工作区"),
                 )
             } else {
-                div().pl_4().pr_3().pt_1().child(Input::new(&self.input).appearance(false).w_full())
+                div().pl_4().pr_3().pt_1().child(Textarea::new(&self.input).appearance(false).w_full())
             })
             .child(
                 div()
@@ -7263,7 +7265,7 @@ impl AppView {
         let body: AnyElement = match self.dock.tabs.get(self.dock.active) {
             Some(DockTab::Files) => self.dock_tree(&this).into_any_element(),
             Some(DockTab::File(fi)) => self.dock_preview(*fi, &this).into_any_element(),
-            None => div().flex_grow().min_h_0().into_any_element(),
+            None => div().flex_grow_1().min_h_0().into_any_element(),
         };
         div()
             .h_full()
@@ -7281,7 +7283,7 @@ impl AppView {
     /// 行号 gutter + 等宽正文（上游 CodeBody 的行号列；语法高亮面外）。
     fn dock_preview(&self, fi: usize, this: &Entity<AppView>) -> Div {
         let Some(f) = self.dock.files.get(fi) else {
-            return div().flex_grow().min_h_0();
+            return div().flex_grow_1().min_h_0();
         };
         let (dir_part, name_part) = match f.path.rsplit_once(['/', '\\']) {
             Some((d, n)) if !n.is_empty() => (d.to_string(), n.to_string()),
@@ -7443,11 +7445,7 @@ impl AppView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .p(px(16.0))
-                    .child(widgets::MarkdownBlock {
-                        text,
-                        id: 900_000 + fi,
-                        parse_delay: None,
-                    }),
+                    .child(widgets::MarkdownBlock { text, id: 900_000 + fi }),
             );
         }
         // 图片预览体（上游 documentpreview image：居中 contain 位图）
@@ -7548,14 +7546,14 @@ impl AppView {
         }
         let body = div()
             .id(SharedString::from(format!("dock-preview-body-{fi}")))
-            .flex_grow()
+            .flex_grow_1()
             .min_h_0()
             .overflow_y_scroll()
             .v_flex()
             .px_2()
             .py_2()
             .children(rows);
-        div().flex_grow().min_h_0().v_flex().child(header).child(body)
+        div().flex_grow_1().min_h_0().v_flex().child(header).child(body)
     }
 
     fn render_details(&self, width: f32, this: Entity<AppView>) -> Div {
@@ -7720,6 +7718,8 @@ fn click_anchor_y(click: &ClickEvent) -> f32 {
     match click {
         ClickEvent::Mouse(m) => f32::from(m.up.position.y),
         ClickEvent::Keyboard(k) => f32::from(k.bounds.origin.y + k.bounds.size.height),
+        // 触屏点击（本应用无触屏交互面）：取落点，语义同鼠标
+        ClickEvent::Touch(t) => f32::from(t.position.y),
     }
 }
 
@@ -8198,7 +8198,7 @@ fn main() {
         subagent_tool.set_route(&effective_startup, &startup_model);
     }
 
-    Application::new()
+    gpui_platform::application()
         .with_assets(assets::AppAssets::new())
         .run(move |cx| {
         gpui_component::init(cx);
@@ -8214,10 +8214,14 @@ fn main() {
             },
             |window, cx| {
                 window.set_window_title("鲸像 WhaleMirror");
-                let input = cx.new(|cx: &mut Context<InputState>| {
-                    InputState::new(window, cx)
+                let input_feedback = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx).placeholder("给模型的修改反馈（可选）")
+                });
+                let input = cx.new(|cx: &mut Context<TextareaState>| {
+                    TextareaState::new(window, cx)
                         .placeholder("给智能体发消息")
-                        .multi_line(true)
+                        // 0.7 chat textarea 模式：Enter=发送 / Shift+Enter=换行
+                        .submit_on_enter(true)
                         .auto_grow(1, 14)
                 });
                 let api_input = cx.new(|cx: &mut Context<InputState>| {
@@ -8284,6 +8288,7 @@ fn main() {
                         workdir.clone(),
                         cwd_slot_for_view,
                         sessions_meta.clone(),
+                        input_feedback,
                         input.clone(),
                         api_input,
                         desired_model,
@@ -8385,7 +8390,7 @@ fn main() {
                 // [dsh] composer 图片粘贴捕获：剪贴板图片 → 附件流（同回形针
                 // 分流；PNG/JPEG 测尺寸入存挂草稿，其他格式返回 false 走文本）
                 let paste_view = app.clone();
-                gpui_component::input::set_image_paste_handler(Some(
+                gpui_base::input::set_image_paste_handler(Some(
                     std::sync::Arc::new(
                         move |img: gpui::Image, cx: &mut gpui::App| -> bool {
                             let format = match img.format {
@@ -8402,7 +8407,7 @@ fn main() {
                         },
                     ),
                 ));
-                gpui_component::text::set_relative_file_opener(Some(
+                gpui_base::text::set_relative_file_opener(Some(
                     std::sync::Arc::new({
                         let view = view.clone();
                         move |path: &str, cx: &mut gpui::App| {

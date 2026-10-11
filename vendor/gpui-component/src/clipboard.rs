@@ -1,13 +1,14 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    prelude::FluentBuilder, App, ClipboardItem, ElementId, IntoElement, RenderOnce, SharedString,
-    Window,
+    App, ClipboardItem, ElementId, IntoElement, RenderOnce, SharedString, Window,
+    prelude::FluentBuilder,
 };
+use rust_i18n::t;
 
 use crate::{
+    IconName, Sizable, Size,
     button::{Button, ButtonVariants as _},
-    IconName, Sizable as _,
 };
 
 /// An element that provides clipboard copy functionality.
@@ -17,6 +18,16 @@ pub struct Clipboard {
     value: SharedString,
     value_fn: Option<Rc<dyn Fn(&mut Window, &mut App) -> SharedString>>,
     on_copied: Option<Rc<dyn Fn(SharedString, &mut Window, &mut App)>>,
+    tooltip_text: Option<SharedString>,
+    accessibility_label: Option<SharedString>,
+    size: Size,
+}
+
+impl Sizable for Clipboard {
+    fn with_size(mut self, size: impl Into<Size>) -> Self {
+        self.size = size.into();
+        self
+    }
 }
 
 impl Clipboard {
@@ -27,7 +38,25 @@ impl Clipboard {
             value: SharedString::default(),
             value_fn: None,
             on_copied: None,
+            tooltip_text: None,
+            accessibility_label: None,
+            size: Size::XSmall,
         }
+    }
+
+    /// Set tooltip text for the clipboard button.
+    pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.tooltip_text = Some(tooltip.into());
+        self
+    }
+
+    /// Set the name a screen reader announces. Defaults to the localized "Copy".
+    ///
+    /// The clipboard button shows only an icon, so it has no visible label to
+    /// read, and its tooltip is a hint rather than a name.
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
     }
 
     /// Set the value for copying to the clipboard. Default is an empty string.
@@ -73,7 +102,12 @@ impl RenderOnce for Clipboard {
                 IconName::Copy
             })
             .ghost()
-            .xsmall()
+            .with_size(self.size)
+            .when_some(self.tooltip_text, |this, text| this.tooltip(text))
+            .accessibility_label(
+                self.accessibility_label
+                    .unwrap_or_else(|| t!("Copy").into()),
+            )
             .when(!copied, |this| {
                 this.on_click({
                     let state = state.clone();

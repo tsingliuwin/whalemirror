@@ -322,6 +322,7 @@ const fn elevation_stroke(stroke_color: Hsla) -> gpui::BoxShadow {
         offset: gpui::point(px(0.0), px(0.0)),
         blur_radius: px(0.0),
         spread_radius: px(0.5),
+        inset: false,
     }
 }
 
@@ -331,6 +332,7 @@ const fn elevation_glow(x: f32, y: f32, blur: f32, alpha: f32) -> gpui::BoxShado
         offset: gpui::point(px(x), px(y)),
         blur_radius: px(blur),
         spread_radius: px(0.0),
+        inset: false,
     }
 }
 

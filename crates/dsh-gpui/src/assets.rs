@@ -1,4 +1,4 @@
-//! 资源源组合：图标基座来自官方 `gpui-component-assets` crate（与
+//! 资源源组合：图标基座来自官方 `gpui-kit-assets` crate（与
 //! gpui-component 0.5.1 同源同版本，随依赖更新走），本地只维护自有
 //! 资产（brands 与 3 个官方目录没有的 svg）。此前 88 个图标逐个
 //! include_bytes! 手抄进仓库，升级依赖时无感漂移。
@@ -61,12 +61,12 @@ const LOCAL: &[(&str, &[u8])] = &[
 ];
 
 pub struct AppAssets {
-    icons: gpui_component_assets::Assets,
+    icons: gpui_kit_assets::Assets,
 }
 
 impl AppAssets {
     pub fn new() -> Self {
-        Self { icons: gpui_component_assets::Assets }
+        Self { icons: gpui_kit_assets::Assets }
     }
 }
 

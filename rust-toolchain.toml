@@ -1,0 +1,4 @@
+# gpui-pre 0.3.8（gpui 改名线）依赖 unstable cold_path——GPUI 生态基线为 nightly（Zed 上游同）。
+# 锁定具体版本保证构建可重现；升级 gpui-pre 时同步评估此版本。
+[toolchain]
+channel = "nightly"

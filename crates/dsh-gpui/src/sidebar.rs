@@ -107,13 +107,11 @@ impl SidebarView {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             loop {
-                Timer::after(Duration::from_millis(125)).await;
+                cx.background_executor().timer(Duration::from_millis(125)).await;
                 let Some(view) = this.upgrade() else { return };
-                let Ok(running) = view.update(&mut cx, |v, _| !v.running_ids.is_empty()) else {
-                    return;
-                };
-                if running && view.update(&mut cx, |_, cx| cx.notify()).is_err() {
-                    return;
+                let running = view.update(&mut cx, |v, _| !v.running_ids.is_empty());
+                if running {
+                    view.update(&mut cx, |_, cx| cx.notify());
                 }
             }
         })
@@ -206,7 +204,7 @@ impl Render for SidebarView {
                         t_new.update(cx, |v, cx| { v.new_session(cx); });
                     }),
                 )
-                .child(div().flex_grow())
+                .child(div().flex_grow_1())
                 .child(
                     rail_icon("sb-settings", IconName::Settings, "设置", move |_, _, cx| {
                         t_settings.update(cx, |v, cx| { v.settings_open = true; cx.notify(); });
@@ -761,7 +759,7 @@ impl Render for SidebarView {
                     // 会话列表 + 底部渐隐（web .fade）
                     div()
                         .relative()
-                        .flex_grow()
+                        .flex_grow_1()
                         .min_h_0()
                         .child(
                             div()

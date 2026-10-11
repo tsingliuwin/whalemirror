@@ -2,15 +2,11 @@
 //!
 //! 这些组件不依赖 AppView（回调一律经泛型闭包注入），可以被任何面板复用。
 
-use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{
-    text::{TextView, TextViewStyle},
-    tooltip::Tooltip,
-    Icon, IconName, StyledExt,
-};
+use gpui_component::{tooltip::Tooltip, Icon, IconName, StyledExt};
+use gpui_base::text::{TextView, TextViewStyle};
 
 use crate::theme;
 use crate::chat::FileKind;
@@ -68,29 +64,31 @@ fn split_markdown(md: &str) -> Vec<MdSegment> {
 pub(crate) struct MarkdownBlock {
     pub(crate) text: String,
     pub(crate) id: usize,
-    /// 流式尾的解析节流窗（vendor 稳态节流）；None = 默认 200ms
-    pub(crate) parse_delay: Option<std::time::Duration>,
 }
 
 impl RenderOnce for MarkdownBlock {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let mut style = TextViewStyle::default().paragraph_gap(rems(1.0));
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut style = TextViewStyle::default().with_paragraph_gap(rems(1.0));
         // 标题标尺对齐 web --dsw-font-markdown-h*：h1 21/30、h2 19/28、
         // h3 18/26、h4-h6 正文 14/24（600 字重在 vendor 主题内对齐）。
-        style.heading_base_font_size = px(theme::FONT_MARKDOWN_BASE);
-        style.heading_font_size = Some(Arc::new(|level, base| match level {
-            1 => px(21.0),
-            2 => px(19.0),
-            3 => px(18.0),
-            _ => base,
-        }));
-        style.heading_line_height = Some(Arc::new(|level, _base| match level {
+        // 0.7：标题字号/行高经 heading refine + with_heading_line_height 定制
+        style = style.with_heading(|level| {
+            let mut r = gpui::StyleRefinement::default();
+            match level {
+                1 => r = r.text_size(px(21.0)),
+                2 => r = r.text_size(px(19.0)),
+                3 => r = r.text_size(px(18.0)),
+                _ => {}
+            }
+            r
+        });
+        style = style.with_heading_line_height(|level, _base| match level {
             1 => px(30.0),
             2 => px(28.0),
             3 => px(26.0),
             _ => px(theme::FONT_MARKDOWN_BASE_LEADING),
-        }));
-        style.is_dark = true;
+        });
+        style = style.with_dark(true);
 
         let segments = split_markdown(&self.text);
         let mut col = div().v_flex().gap(px(12.0));
@@ -100,15 +98,25 @@ impl RenderOnce for MarkdownBlock {
                     if text.trim().is_empty() {
                         continue;
                     }
-                    let view = TextView::markdown(self.id * 1000 + i * 2, text, window, cx);
-                    let view = match self.parse_delay {
-                        Some(d) => view.parse_delay(d),
-                        None => view,
-                    };
+                    let view = TextView::markdown(self.id * 1000 + i * 2, text);
                     col = col.child(
                         view.text_size(px(theme::FONT_MARKDOWN_BASE))
                             .line_height(px(theme::FONT_MARKDOWN_BASE_LEADING))
-                            .style(style.clone()),
+                            .style(style.clone())
+                            // [dsh] 链接点击分流：守卫（空/悬空引用不打开）
+                            // + 真实路径优先路由侧栏预览（0.7 官方缝）
+                            .on_link_click(move |url, _ev, _window, cx| {
+                                if !gpui_base::text::dsh_openable(url) {
+                                    return;
+                                }
+                                if !url.contains("://")
+                                    && !url.starts_with("mailto:")
+                                    && gpui_base::text::try_relative_file_opener(url, cx)
+                                {
+                                    return;
+                                }
+                                cx.open_url(url);
+                            }),
                     );
                 }
                 MdSegment::Code { lang, code } => {
@@ -125,12 +133,7 @@ impl RenderOnce for MarkdownBlock {
 {code}
 ```")
                     };
-                    let mut view = TextView::markdown(
-                        self.id * 1000 + i * 2 + 1,
-                        fenced,
-                        window,
-                        cx,
-                    );
+                    let mut view = TextView::markdown(self.id * 1000 + i * 2 + 1, fenced);
                     view = view.code_block_actions(|block, _window, cx| {
                         let text = block.code().to_string();
                         let mut btn = div()
@@ -188,11 +191,24 @@ pub(crate) struct HtmlBlock {
 }
 
 impl RenderOnce for HtmlBlock {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let view = TextView::html(self.id, self.text, window, cx);
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let view = TextView::html(self.id, self.text);
         view.text_size(px(theme::FONT_MARKDOWN_BASE))
             .line_height(px(theme::FONT_MARKDOWN_BASE_LEADING))
             .font_family(theme_mono())
+            // [dsh] 链接点击分流（同 MarkdownBlock）
+            .on_link_click(|url, _ev, _window, cx| {
+                if !gpui_base::text::dsh_openable(url) {
+                    return;
+                }
+                if !url.contains("://")
+                    && !url.starts_with("mailto:")
+                    && gpui_base::text::try_relative_file_opener(url, cx)
+                {
+                    return;
+                }
+                cx.open_url(url);
+            })
     }
 }
 

@@ -6,9 +6,11 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
-gpui.workspace = true
+gpui-pre.workspace = true
+gpui-pre-platform.workspace = true
 gpui-component.workspace = true
-gpui-component-assets.workspace = true
+gpui-base.workspace = true
+gpui-kit-assets.workspace = true
 dsh-cordis = { path = "../cordis" }
 dsh-llm = { path = "../dsh-llm" }
 dsh-tools = { path = "../dsh-tools" }

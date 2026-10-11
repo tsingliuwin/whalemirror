@@ -566,11 +566,9 @@ impl ChatView {
             let mut cx = cx.clone();
             let mut grace = 0u32;
             loop {
-                Timer::after(Duration::from_millis(33)).await;
+                cx.background_executor().timer(Duration::from_millis(33)).await;
                 let Some(tick) = this.upgrade() else { return; };
-                let Ok(running) = tick.update(&mut cx, |v, _| v.running) else {
-                    return;
-                };
+                let running = tick.update(&mut cx, |v, _| v.running);
                 if running {
                     grace = GRACE_TICKS;
                 } else if grace == 0 {
@@ -578,9 +576,7 @@ impl ChatView {
                 } else {
                     grace -= 1;
                 }
-                let Ok(dirty) = tick.update(&mut cx, |v, _| v.heights_dirty.replace(false)) else {
-                    return;
-                };
+                let dirty = tick.update(&mut cx, |v, _| v.heights_dirty.replace(false));
                 if dirty || !running {
                     let _ = tick.update(&mut cx, |v, _| {
                         v.invalidate_stream_tail();
@@ -1616,19 +1612,14 @@ open: false,
         match block {
             MsgBlock::Attachment(_) => div().into_any_element(),
             MsgBlock::Text(t) => {
-                // 流式尾喂活文本 + 50ms 稳态解析窗（vendor [dsh] 补丁：节流
-                // 不因连续 delta 重置，约 20 次/秒渐进发布，对齐 web 每
-                // 2-3 帧一次的流式节奏）；非尾块（已完结）直接用现文。
-                let is_stream_tail = self.running
-                    && ei + 1 == self.entries.len()
-                    && bi + 1 == self.entries.get(ei).map(|e| e.blocks.len()).unwrap_or(0);
+                // 0.7 渲染 deferred 化（InlineFlow 惰性布局）——流式尾节流
+                // 窗随 0.5 补丁退役，流式节奏表现待实机回归观察
                 div()
                     .w_full()
                     .text_color(theme::t().text)
                     .child(widgets::MarkdownBlock {
                         text: t.clone(),
                         id: 1_000_000 + ei * 1000 + bi,
-                        parse_delay: is_stream_tail.then(|| Duration::from_millis(50)),
                     })
                     .into_any_element()
             }
@@ -3036,7 +3027,7 @@ open: false,
                     .collect()
             },
         )
-        .track_scroll(self.traj_ul.clone())
+        .track_scroll(&self.traj_ul)
         .w_full()
         .h_full();
 
@@ -3804,7 +3795,7 @@ impl TrajHeader {
             .justify_center()
             .child(
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .max_w(px(TRAJ_LANE_MAX_PX))
                     .h_full()
                     .px_4()
@@ -4090,7 +4081,7 @@ impl ChatView {
                 })
                 .collect()
         })
-        .track_scroll(self.rail_scroll.clone())
+        .track_scroll(&self.rail_scroll)
         .h(px(frame_h))
         .w_full();
 
@@ -4408,7 +4399,7 @@ fn render_entry_footer(
     // 用量药丸 + 对话框（有 token 数据才出现；web 同款）
     let usage_pill = usage.clone().map(|u| {
         gpui_component::popover::Popover::new(("turn-usage-pop", ei as u64))
-            .anchor(gpui::Corner::TopLeft)
+            .anchor(gpui::Anchor::TopLeft)
             .trigger(
                 gpui_component::button::Button::new(("turn-usage-btn", ei as u64))
                     .ghost()
@@ -4423,7 +4414,7 @@ fn render_entry_footer(
     // 用时药丸 + 对话框（有用量数据时是药丸，否则并入纯文本分支）
     let time_pill = usage.clone().map(|u| {
         gpui_component::popover::Popover::new(("turn-time-pop", ei as u64))
-            .anchor(gpui::Corner::TopLeft)
+            .anchor(gpui::Anchor::TopLeft)
             .trigger(
                 gpui_component::button::Button::new(("turn-time-btn", ei as u64))
                     .ghost()
@@ -4700,7 +4691,7 @@ fn presented_files_row(files: Option<&Vec<dsh_session::PresentedFile>>) -> Div {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::t().hover))
                 .on_click(move |_, _, cx| {
-                    let _ = gpui_component::text::try_relative_file_opener(&open_path, cx);
+                    let _ = gpui_base::text::try_relative_file_opener(&open_path, cx);
                 })
                 .child(
                     div()
@@ -4878,7 +4869,7 @@ fn plan_cards_row(entries: &[ChatEntry], turn: u64) -> Div {
             );
         wrap = wrap.child(
             gpui_component::popover::Popover::new(("plan-card-pop", ix as u64))
-                .anchor(gpui::Corner::TopLeft)
+                .anchor(gpui::Anchor::TopLeft)
                 .trigger(
                     gpui_component::button::Button::new(("plan-card-btn", ix as u64))
                         .ghost()

@@ -25,13 +25,15 @@ members = [
 # 内 [dsh] 注释。
 [patch.crates-io]
 gpui-component = { path = "vendor/gpui-component" }
+# text 渲染核心（text_view/inline/node/style/utils）0.7 起在 gpui-base——[dsh] 补丁随之
+gpui-base = { path = "vendor/gpui-base" }
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "DeepSeek Harness (deepseek-harness) web client rebuilt natively in Rust + GPUI, sharing ~/.dsh session storage with the web build"
-repository = "https://github.com/tsingliuwin/rust-deepseek-harness"
+# repository 元数据见 GitHub 主页说明（nightly cargo lint unused 误报发布元信息，摘除）
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -40,7 +42,6 @@ base64 = "0.22"
 serde_json = { version = "1", features = ["preserve_order"] }
 futures = "0.3"
 async-trait = "0.1"
-thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 regex = "1"
 bytes = "1"
@@ -48,8 +49,12 @@ async-stream = "0.3"
 flume = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["default-tls", "stream", "json", "gzip", "brotli", "deflate"] }
-gpui = "0.2.2"
-gpui-component = "0.5.1"
-gpui-component-assets = "0.5.1"
+# GPUI 生态 gpui-kit 线（0.3.8/0.7.1）：gpui-pre 为 gpui 本体改名线（lib 名仍 gpui，
+# 业务代码 use gpui:: 不变）；平台工厂在 gpui-pre-platform（lib 名 gpui_platform）。
+gpui-pre = "0.3.8"
+gpui-pre-platform = "0.3.8"
+gpui-component = "0.7.1"
+gpui-base = "0.7.1"
+gpui-kit-assets = "0.7.1"
 encoding_rs = "0.8"
 codepage = "0.1"

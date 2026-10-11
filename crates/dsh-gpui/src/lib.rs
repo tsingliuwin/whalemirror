@@ -1771,3 +1771,38 @@ mod steer_gesture_tests {
         assert!(!steer_queue_gesture(true, false, 2, false), "idle driver consumes the queue anyway");
     }
 }
+
+/// 折叠头锚点（web turn-process：用户气泡在折叠头之上——折叠头锚在用户
+/// 消息之后的第一个过程条目，系统提示词等前置上下文行随折叠隐藏）。
+pub fn fold_header_index(process: &[usize], last_user_index: Option<usize>) -> usize {
+    match last_user_index {
+        Some(u) => process
+            .iter()
+            .copied()
+            .find(|&i| i > u)
+            .unwrap_or(process[0]),
+        None => process[0],
+    }
+}
+
+#[cfg(test)]
+mod fold_header_tests {
+    use super::*;
+
+    #[test]
+    fn header_anchors_after_user_message() {
+        // 系统提示词(0) < 用户(1) < Think(2)…：头锚 2，不在用户上方
+        assert_eq!(fold_header_index(&[0, 2, 3, 4, 5], Some(1)), 2);
+    }
+
+    #[test]
+    fn no_user_entry_keeps_first_process() {
+        assert_eq!(fold_header_index(&[0, 1, 2], None), 0);
+    }
+
+    #[test]
+    fn all_members_before_user_falls_back_to_first() {
+        // 理论面：过程组全在用户前（异常序）——回退首条避免空锚
+        assert_eq!(fold_header_index(&[0, 1], Some(5)), 0);
+    }
+}

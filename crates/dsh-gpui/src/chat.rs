@@ -41,6 +41,9 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub(crate) struct TurnFold {
     first_process: usize,
+    /// 折叠头锚位（web：用户气泡在折叠头之上——锚在用户消息后的第一个
+    /// 过程条目；first_process 若为用户前的上下文行则随折叠隐藏）。
+    header_at: usize,
     answer: usize,
     /// 过程活动类目计数（上游 processActivity：distinct call 去重、count 降序）。
     activities: Vec<(dsh_gpui::ProcessActivity, usize)>,
@@ -1601,7 +1604,16 @@ open: false,
                 }
             }
             let activities = dsh_gpui::process_activity_counts(calls);
-            out.insert(t, TurnFold { first_process: process[0], answer, activities });
+            // 用户气泡在折叠头之上：头锚在轮内最后一条用户消息之后的第一个
+            // 过程条目（系统提示词等前置上下文行随折叠隐藏）
+            let last_user = (process[0]..=answer)
+                .rev()
+                .find(|&i| self.entries[i].role == Role::User);
+            let header_at = dsh_gpui::fold_header_index(&process, last_user);
+            out.insert(
+                t,
+                TurnFold { first_process: process[0], header_at, answer, activities },
+            );
         }
         out
     }
@@ -4239,7 +4251,7 @@ impl Render for ChatView {
                                     && ix < f.answer;
                                 if member {
                                     let t_ctl = this.clone();
-                                    if ix == f.first_process {
+                                    if ix == f.header_at {
                                         // 0.1.7-alpha.1 stepProcess：类目计数标题
                                         //（前 3 类 done 文案组合；空类目「已完成分析」）
                                         let label = dsh_gpui::process_title(&f.activities);

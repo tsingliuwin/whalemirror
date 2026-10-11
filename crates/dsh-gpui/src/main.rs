@@ -4959,6 +4959,9 @@ impl Render for AppView {
                 st
             });
             f.editor = Some(editor);
+            // 构造只是第一帧：编辑器内部（display_map 行布局）需要后续帧
+            // 完成初始化——不 notify 会停在空白中间态（实机反馈空白根因）
+            cx.notify();
         }
 
         // 跟随系统：按窗口外观校正主题（与当前生效主题不同才重应用）
@@ -7489,6 +7492,8 @@ impl AppView {
                 .id(SharedString::from(format!("dock-editor-{fi_owned}")))
                 .flex_1()
                 .min_h_0()
+                .h_full()
+                .overflow_hidden()
                 .child(Editor::new(&editor)),
         )
     }

@@ -1544,7 +1544,6 @@ pub(crate) struct AppView {
     /// composer 命令菜单开合（上游 input.commands：加号 + '/' 前缀触发）
     command_menu: bool,
     /// 命令菜单动作反馈（导出结果等；行内条显示，发送/重开菜单时清）
-    command_notice: Option<String>,
     /// composer 统计 pill 的对话框互斥开合（web StatsPills exclusive slot）
     stat_dialog: Option<StatDialogKind>,
     rename_input: Entity<InputState>,
@@ -1872,7 +1871,6 @@ impl AppView {
             permission_preset: "workspace-write".into(),
             approval_policy: "ask".into(),
             command_menu: false,
-            command_notice: None,
             stat_dialog: None,
             rename_input,
             attachments: Vec::new(),
@@ -3053,7 +3051,6 @@ impl AppView {
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
-        self.command_notice = None;
         self.permission_menu = false;
         self.full_access_confirm = false;
         self.refresh_sidebar(cx);
@@ -3122,7 +3119,6 @@ impl AppView {
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
-        self.command_notice = None;
         self.permission_menu = false;
         self.full_access_confirm = false;
         // 回放 + 折叠态/列表重置都在 ChatView 内完成（含虚拟列表 reset：
@@ -3149,7 +3145,7 @@ impl AppView {
         if self.agent_busy {
             // 新建要动 agent 会话槽（pin 事件/沙箱基准），运行中不可——
             // 明确告知而非静默吞点击（查看其它会话仍可用）
-            self.command_notice = Some("会话运行中，完成后可新建".into());
+            self.pending_toasts.push("会话运行中，完成后可新建".into());
             cx.notify();
             return;
         }
@@ -3201,7 +3197,6 @@ impl AppView {
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
-        self.command_notice = None;
         self.chat.update(cx, |c, cx| {
             c.reset_empty();
             cx.notify();
@@ -3272,7 +3267,6 @@ impl AppView {
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
-        self.command_notice = None;
         self.chat.update(cx, |c, cx| {
             c.reset_empty();
             cx.notify();
@@ -3405,7 +3399,6 @@ impl AppView {
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
-        self.command_notice = None;
         self.chat.update(cx, |c, cx| {
             c.reset_empty();
             cx.notify();
@@ -3692,7 +3685,7 @@ impl AppView {
                 _ => unreachable!(),
             };
             let _ = t.update(cx, |v, cx| {
-                v.command_notice = Some(msg);
+                v.pending_toasts.push(msg);
                 cx.notify();
             });
         })
@@ -3825,7 +3818,6 @@ impl AppView {
 
     fn dispatch_user_text(&mut self, text: &str, queued_placement: bool, cx: &mut Context<Self>) {
         self.command_menu = false;
-        self.command_notice = None;
         for (path, content) in self.resolve_file_references(text) {
             let name = std::path::Path::new(&path)
                 .file_name()
@@ -7073,19 +7065,6 @@ impl AppView {
             // 240×64 / 图片 64×64，横排 gap10 溢出横滚）
             .when(!self.attachments.is_empty(), |d| {
                 d.child(self.attachment_rail(&this))
-            })
-            // 发送拦截提示（web file.stillUploading toast 的行内形态）
-            // 命令菜单动作反馈（导出结果等；中性三级色，区别于拦截红）
-            .when(self.command_notice.is_some(), |d| {
-                d.child(
-                    div()
-                        .px(px(16.0))
-                        .pb(px(2.0))
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(theme::t().text_3)
-                        .child(self.command_notice.clone().unwrap_or_default()),
-                )
             })
             .child(if locked {
                 // web：inert 态编辑器不挂载，占位文案即引导。高度必须

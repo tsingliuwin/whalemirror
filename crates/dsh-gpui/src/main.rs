@@ -42,7 +42,7 @@ use dsh_tools::ToolRegistry;
 use dsh_web::WebTool;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{Icon, IconName, Root, StyledExt, TitleBar};
+use gpui_component::{WindowExt, Icon, IconName, Root, StyledExt, TitleBar};
 use dsh_gpui::{
     ToolBlock, child_path, files_failure_line, order_entries,
 };
@@ -1608,6 +1608,9 @@ pub(crate) struct AppView {
     session_drafts: HashMap<SessionId, ComposerDraft>,
     /// 排队条带折叠态（上游 QueueDock 多条默认折叠只露计数头）。
     queue_collapsed: bool,
+    /// 待发 toast（渲染期经 window.push_notification 发出——逻辑路径
+    /// 常无 window，走 pending 模式同 pending_clear）。
+    pending_toasts: Vec<String>,
     /// 行内编辑中的排队行（上游 InlineEditor——Some=该行处于编辑态）。
     queue_editing: Option<String>,
     /// 排队行内编辑输入（单实例，编辑态行挂载）。
@@ -1905,6 +1908,7 @@ impl AppView {
             pending_input: None,
             session_drafts: HashMap::new(),
             queue_collapsed: true,
+            pending_toasts: Vec::new(),
             queue_editing: None,
             queue_edit_input,
             _input_subscription: subscription,
@@ -4186,6 +4190,10 @@ impl AppView {
             .any(|d| !matches!(d.state, DraftUpload::Ready { .. }))
         {
             self.upload_notice = Some("文件还在上传，请等待上传完成后发送");
+            // 上游 file.stillUploading toast（0.7 官方通知层；0.5 时代
+            // 无通知面用行内条，本批升级后对齐 web 形态）
+            self.pending_toasts
+                .push("文件还在上传，请等待上传完成后发送".into());
             cx.notify();
             return;
         }
@@ -4921,6 +4929,10 @@ impl AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _probe_empty = self.chat.read_with(cx, |c, _| c.is_empty());
+        // 待发 toast（逻辑路径 set、渲染期发——window 在此才可用）
+        for toast in std::mem::take(&mut self.pending_toasts) {
+            window.push_notification(toast, cx);
+        }
         if let Some(text) = self.pending_input.take() {
             // 会话草稿换入的输入值（set_value 需 window——渲染期应用）
             self.input.update(cx, |state, cx| state.set_value(text, window, cx));
@@ -7063,17 +7075,6 @@ impl AppView {
                 d.child(self.attachment_rail(&this))
             })
             // 发送拦截提示（web file.stillUploading toast 的行内形态）
-            .when(self.upload_notice.is_some(), |d| {
-                d.child(
-                    div()
-                        .px(px(16.0))
-                        .pb(px(2.0))
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(theme::t().error)
-                        .child(self.upload_notice.unwrap_or_default()),
-                )
-            })
             // 命令菜单动作反馈（导出结果等；中性三级色，区别于拦截红）
             .when(self.command_notice.is_some(), |d| {
                 d.child(

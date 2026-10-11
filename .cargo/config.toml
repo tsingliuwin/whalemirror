@@ -1,0 +1,5 @@
+# gpui-pre 0.3.8（gpui-kit 线）的元素构造链帧显著大于 0.2：hero 等深层
+# 嵌套渲染在默认 1MB 主线程栈上溢出（Zed 上游基线即大栈）。/STACK 提升
+# 主线程栈保留到 8MB。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]

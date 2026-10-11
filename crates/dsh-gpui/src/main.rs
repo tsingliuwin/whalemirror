@@ -4920,6 +4920,7 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _probe_empty = self.chat.read_with(cx, |c, _| c.is_empty());
         if let Some(text) = self.pending_input.take() {
             // 会话草稿换入的输入值（set_value 需 window——渲染期应用）
             self.input.update(cx, |state, cx| state.set_value(text, window, cx));
@@ -6257,7 +6258,10 @@ impl AppView {
                                     ),
                             ),
                     )
-                    .child(self.composer_card(this, has_text, layout::composer_card_width(center_w), snap.running, snap.empty && self.current_workspace.is_none(), None))
+                    .child({
+                        let c = self.composer_card(this, has_text, layout::composer_card_width(center_w), snap.running, snap.empty && self.current_workspace.is_none(), None);
+                        c
+                    })
                     // 下拉面板挂在栈层级（输入卡之后渲染 → 绘制在其上，
                     // 对齐 web .workspaceRow z-index:10 的效果）；遮罩提供
                     // 点击外部关闭
@@ -6882,12 +6886,17 @@ impl AppView {
                     });
                 })
             })
-            .child(svg_icon_btn("composer-attach", "icons/paperclip.svg", theme::t().text, "添加附件", {
-                let t_attach = this.downgrade();
-                move |_, _, cx| {
-                    Self::pick_attachments(&t_attach, cx);
-                }
-            }))
+            .child({
+                svg_icon_btn("composer-attach", "icons/paperclip.svg", theme::t().text, "添加附件", {
+                    let t_attach = this.downgrade();
+                    move |_, _, cx| {
+                        Self::pick_attachments(&t_attach, cx);
+                    }
+                })
+            })
+            .when(true, |d| {
+                d
+            })
             .child({
                 // 上游 PermissionSelect trigger:当前档位盾标 + 预设名 +
                 // chevron,点击开预设菜单(locked 态无效)
@@ -7092,7 +7101,10 @@ impl AppView {
                         .child("选择工作区"),
                 )
             } else {
-                div().pl_4().pr_3().pt_1().child(Textarea::new(&self.input).appearance(false).w_full())
+                {
+                    let ta = div().pl_4().pr_3().pt_1().child(Textarea::new(&self.input).appearance(false).w_full());
+                    ta
+                }
             })
             .child(
                 div()

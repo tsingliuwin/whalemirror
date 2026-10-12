@@ -42,6 +42,7 @@ use dsh_tools::ToolRegistry;
 use dsh_web::WebTool;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_base::input::{Editor, EditorState};
 use gpui_component::{WindowExt, Icon, IconName, Root, StyledExt, TitleBar};
 use dsh_gpui::{
     ToolBlock, child_path, files_failure_line, order_entries,
@@ -49,7 +50,6 @@ use dsh_gpui::{
 pub(crate) use dsh_gpui::EnterBehavior;
 use std::collections::{HashMap, HashSet};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_base::input::{Editor, EditorState};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1426,7 +1426,7 @@ const DOCK_WIDTH: f32 = 440.0;
 pub(crate) struct FilePreview {
     /// 绝对路径（树行经 childPath 传入）
     pub(crate) path: String,
-    /// 全文（Editor 化后文本类一次性装载；md/html 同走编辑器源码形态）
+    /// 全文（Editor 化：文本类一次性装载）
     full_text: String,
     /// 只读编辑器实体（文本类预览；渲染期构造——构造需要 window，open
     /// 路径（链接钩子）只有 &mut App）
@@ -1751,6 +1751,17 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
+        // [临时验证] 启动即自动打开 dock md 预览（验证后移除）
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2500))
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.dock.open = true;
+                v.open_file_preview("README.md".into(), cx);
+            });
+        })
+        .detach();
         let subscription = cx.subscribe(&input, |chat, input, event, cx| {
             // plain Enter 按偏好投递；Ctrl+Enter（vendor secondary-enter）为
             // 加速手势：运行中按次取偏好反相（上游 resolveSubmitMode 表）
@@ -4942,6 +4953,7 @@ impl Render for AppView {
             self.input.update(cx, |state, cx| state.set_value("", window, cx));
         }
 
+
         // 文本类预览的只读编辑器实体（Editor 化）：构造需要 window，open
         // 路径（链接钩子）只有 &mut App——渲染期 ensure（Option 已构造即跳过）
         if self.dock.open
@@ -7481,7 +7493,8 @@ impl AppView {
             Some(e) => e.clone(),
             // ensure 在 render 头部（构造需 window）；此帧未及构造时占位
             None => {
-                return Self::preview_shell(header, 
+                return Self::preview_shell(
+                    header,
                     div()
                         .flex_1()
                         .min_h_0()

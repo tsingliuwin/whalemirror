@@ -49,6 +49,13 @@ pub(crate) struct TurnFold {
     activities: Vec<(dsh_gpui::ProcessActivity, usize)>,
 }
 
+/// 排队条带附件 chip 种类（QueueDock attachments 面）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueAttachKind {
+    Image,
+    File,
+}
+
 /// 排队待消费的发送（上游 inbox next-turn 的 UI 面承载）：发送时占位
 /// 条带，TurnStarted 消费时刻才入列（echo_id=消息 id 走既有认领/退役
 /// 生命周期——取消未落盘的排队消息由 retire_unclaimed_echoes 收尾）。

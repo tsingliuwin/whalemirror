@@ -256,6 +256,8 @@ struct QueueRowSnap {
     preview: String,
     /// 纯文本行才可编辑（上游 text !== null）。
     editable: bool,
+    /// 附件 chips（QueueDock 的 attachments 面：图标+名/缩略）。
+    attachments: Vec<(crate::chat::QueueAttachKind, String)>,
 }
 
 struct ChatSnap {
@@ -5022,6 +5024,19 @@ impl Render for AppView {
                     id: q.message_id.clone(),
                     preview: dsh_gpui::queue_row_preview(q.text.as_deref(), q.cards.len()),
                     editable: q.cards.is_empty(),
+                    attachments: q
+                        .cards
+                        .iter()
+                        .map(|card| match card {
+                            crate::ChatAttachment::ImageTile { .. } => {
+                                (crate::chat::QueueAttachKind::Image, "图片".to_string())
+                            }
+                            crate::ChatAttachment::FileCard { name, .. } => (
+                                crate::chat::QueueAttachKind::File,
+                                name.clone(),
+                            ),
+                        })
+                        .collect(),
                 })
                 .collect(),
         });
@@ -5930,6 +5945,30 @@ impl AppView {
                                 .text_color(theme::t().text_2)
                                 .child(preview.clone()),
                         )
+                        // 附件 chips（上游 QueueDock attachments 面）
+                        .children(qrow.attachments.iter().map(|(kind, label)| {
+                            let (icon, label) = match kind {
+                                crate::chat::QueueAttachKind::Image => {
+                                    (IconName::File, format!("图片 {label}"))
+                                }
+                                crate::chat::QueueAttachKind::File => {
+                                    (IconName::File, label.clone())
+                                }
+                            };
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_1p5()
+                                .h(px(20.0))
+                                .rounded(px(6.0))
+                                .bg(theme::t().surface_2)
+                                .text_color(theme::t().text_3)
+                                .text_size(px(11.0))
+                                .child(Icon::new(icon).size(px(11.0)))
+                                .child(label)
+                        }))
                         // 编辑（上游 queue.edit：仅纯文本行，含非文本块
                         // 弱化 + queue.edit.unsupported 文案）
                         .child(

@@ -1,7 +1,7 @@
 # 上游更新分析法（模式 A 详细步骤）
 
 上游仓库：`E:\aiproject\deepseek-harness`（git）。rustdsh 是其 **web 前端（packages/client/*）+ 存储行为（storage/session）+ llm-deepseek 适配层** 的 Rust/GPUI 1:1 复刻。
-> **当前同步点：dsh-v0.2.1-alpha.5**——2026-10-15 拉取登记（27 提交/591 文件；同步面小：account 通知层叠与元数据（面外——账号体系）、provider-aware 模型 label 槽+菜单视口内定位（与 #35 同族登记）、右栏折叠裁剪防 PageUp 移框、PTC 指令组合重构**零文本变化**（字节级等价）；标签后增量同族）。此前 dsh-v0.2.1-alpha.4（f2235d6c02）。
+> **当前同步点：dsh-v0.2.1-rc.2**——2026-10-17 拉取登记（alpha.5→rc.2 仅 7 提交；同步面=**DeepSeek Search/Fetch API+设置开关**（fda98dadd2：web-search-deepseek 设置卡+count 1-50 默认 10+辅助请求禁 thinking；面内高价值——#37）+DeepSeek Flash 1017 临时徽章（3c937cd0ba，面外观察）+vendor cordis 4.0.5 等（构建面））。此前 dsh-v0.2.1-alpha.5。
 > **当前同步点：dsh-v0.2.1-alpha.1（5badb15009）**——2026-09-23 同步（发布点=master HEAD，无增量；跨 0.1.7 系列与 0.2.x，1552 文件 +74303/-11195）。此前 00102833df（0.1.7-alpha.2，2026-09-23 同步）。
 > 0.1.5-alpha.1 主面：**会话格式 v3**（system prompt 晋升 system/message 行 + request/header 去 system + PTC 改名 + canonical 信封）、composer 统计行改双图标 pill + 互斥统计对话框、SystemPromptRow（系统提示词折叠行）；Sidebar 工作区文件树/dockkit/textpreview/remotes 全链面外。
 > **最近检查：2026-09-14（文件浏览器面重判 + 实施轮）**——上游无需新拉（本地 master c291e7961a 已含 ui-sidebar-files/documentpreview 全链；网络面 GitHub SSH/HTTPS 双断、系统代理 7897 出口坏，SSH443 握手可成但传输被掐，改用本地既有树分析）； **最近检查：2026-09-11（定时轮 #7，零更新轮）**——上游 pull 经仓库局部代理（http.proxy=127.0.0.1:7897，SSH/HTTPS 直连被墙后的固定修复）成功，Already up to date（HEAD=master=rc.2 发布点 fb2c4b9e69），五段零差异，无动作。上轮 #6 同步结论不变。

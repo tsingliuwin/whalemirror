@@ -332,6 +332,36 @@ pub(crate) struct AppSettings {
     /// 用户声明的 OpenAI 兼容提供方（web 模型页「添加提供方 / 添加自定义提供方」）。
     #[serde(default)]
     pub(crate) providers: Vec<CustomProvider>,
+    /// DeepSeek 官方搜索设置（alpha.3+ web-search 设置卡；serde 缺省 = 关）。
+    #[serde(default)]
+    pub(crate) web_search: WebSearchSettings,
+}
+
+/// web_search 设置卡（上游 web-search-deepseek：开关/API key/base URL/count）。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WebSearchSettings {
+    /// 搜索开关（关 = 不注册 web_search 工具）。
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// 搜索 API key（空 = 回退 DEEPSEEK_API_KEY 凭据/env）。
+    #[serde(default)]
+    pub(crate) api_key: String,
+    /// 单请求 web_search 服务端工具使用上限（1-50；上游默认 10）。
+    #[serde(default = "default_web_search_count")]
+    pub(crate) count: u32,
+    /// Messages 端点覆盖（空 = https://api.deepseek.com/anthropic/v1）。
+    #[serde(default)]
+    pub(crate) base_url: String,
+}
+
+fn default_web_search_count() -> u32 {
+    10
+}
+
+impl Default for WebSearchSettings {
+    fn default() -> Self {
+        Self { enabled: false, api_key: String::new(), count: default_web_search_count(), base_url: String::new() }
+    }
 }
 
 impl Default for AppSettings {
@@ -342,6 +372,7 @@ impl Default for AppSettings {
             transcript_view: TranscriptView::Compact,
             model: "deepseek-flash".into(),
             providers: Vec::new(),
+            web_search: WebSearchSettings::default(),
         }
     }
 }
@@ -1607,6 +1638,9 @@ pub(crate) struct AppView {
     fetch_candidates: Vec<dsh_llm_deepseek::DiscoveredModel>,
     fetch_picked: std::collections::HashSet<String>,
     fetch_query: Entity<InputState>,
+    web_search_key_input: Entity<InputState>,
+    web_search_base_url_input: Entity<InputState>,
+    web_search_count_input: Entity<InputState>,
     pending_clear: bool,
     /// 切换会话待应用的输入草稿（set_value 需 window——渲染期应用，
     /// 同 pending_clear 模式）。
@@ -1749,6 +1783,9 @@ impl AppView {
         edit_key: Entity<InputState>,
         edit_base: Entity<InputState>,
         fetch_query: Entity<InputState>,
+        web_search_key_input: Entity<InputState>,
+        web_search_base_url_input: Entity<InputState>,
+        web_search_count_input: Entity<InputState>,
         queue_edit_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1921,7 +1958,10 @@ impl AppView {
             fetch_candidates: Vec::new(),
             fetch_picked: std::collections::HashSet::new(),
             fetch_query,
-            pending_clear: false,
+
+            web_search_key_input,
+            web_search_base_url_input,
+            web_search_count_input,            pending_clear: false,
             pending_input: None,
             session_drafts: HashMap::new(),
             queue_collapsed: true,
@@ -2617,6 +2657,35 @@ impl AppView {
                 }
             }
         }
+        cx.notify();
+    }
+
+    /// 应用 web_search 设置卡（读三输入→校验→更新+持久化+toast 反馈）。
+    fn apply_web_search_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let key = self
+            .web_search_key_input
+            .read_with(cx, |st, _| st.value().trim().to_string());
+        let base_url = self
+            .web_search_base_url_input
+            .read_with(cx, |st, _| st.value().trim().to_string());
+        let count_text = self
+            .web_search_count_input
+            .read_with(cx, |st, _| st.value().trim().to_string());
+        let count = match count_text.parse::<u32>() {
+            Ok(n) if (1..=50).contains(&n) => n,
+            _ => {
+                self.pending_toasts
+                    .push("单请求搜索上限需为 1-50 的数字".into());
+                cx.notify();
+                return;
+            }
+        };
+        self.settings.web_search.api_key = key;
+        self.settings.web_search.base_url = base_url;
+        self.settings.web_search.count = count;
+        self.persist_settings();
+        self.pending_toasts
+            .push("DeepSeek 搜索设置已保存，重启后生效".into());
         cx.notify();
     }
 
@@ -7930,9 +7999,30 @@ fn main() {
     });
     // web_search：DeepSeek 搜索 provider（env key 优先，回退存储 key；
     // 无 key 不注册——工具缺席与 web provider 未配置同语义）
-    let search_tool = dsh_web::WebSearchTool::from_env().or_else(|| {
-        if stored_deepseek_key.is_empty() { None } else { Some(dsh_web::WebSearchTool::new(stored_deepseek_key.clone())) }
-    });
+    // web_search 设置卡（alpha.3 web-search-deepseek）：开关+key/base_url/count
+    // 持久化；enabled=false 时不注册（上游同：设置开关控制）。key 回退链：
+    // 设置 key → DEEPSEEK_API_KEY 凭据/env → 存储的 DeepSeek key
+    let ws_enabled = user_settings.web_search.enabled
+        || !user_settings.web_search.api_key.is_empty()
+        || std::env::var("DSH_WEB_SEARCH_KEY").map_or(false, |k| !k.is_empty());
+    let search_tool = if ws_enabled {
+        let ws_key = if user_settings.web_search.api_key.is_empty() {
+            stored_deepseek_key.clone()
+        } else {
+            user_settings.web_search.api_key.clone()
+        };
+        if ws_key.is_empty() {
+            None
+        } else {
+            Some(dsh_web::WebSearchTool::with_config(
+                ws_key,
+                user_settings.web_search.base_url.clone(),
+                user_settings.web_search.count,
+            ))
+        }
+    } else {
+        None
+    };
     if let Some(search) = search_tool {
         let _search = tools.register(Arc::new(search)).unwrap();
         let _search_section = prompt.add_section(dsh_system_prompt::PromptSection {
@@ -8233,6 +8323,21 @@ fn main() {
                 let search_input = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("搜索会话…")
                 });
+                let web_search_key_input = cx.new(|cx: &mut Context<InputState>| {
+                    let mut st = InputState::new(window, cx).masked(true).placeholder("搜索 API key（留空用 DEEPSEEK_API_KEY）");
+                    st.set_value(user_settings.web_search.api_key.clone(), window, cx);
+                    st
+                });
+                let web_search_base_url_input = cx.new(|cx: &mut Context<InputState>| {
+                    let mut st = InputState::new(window, cx).placeholder("https://api.deepseek.com/anthropic/v1");
+                    st.set_value(user_settings.web_search.base_url.clone(), window, cx);
+                    st
+                });
+                let web_search_count_input = cx.new(|cx: &mut Context<InputState>| {
+                    let mut st = InputState::new(window, cx).placeholder("10");
+                    st.set_value(user_settings.web_search.count.to_string(), window, cx);
+                    st
+                });
                 let queue_edit_input = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("编辑排队消息")
                 });
@@ -8311,6 +8416,9 @@ fn main() {
                         edit_key.clone(),
                         edit_base.clone(),
                         fetch_query.clone(),
+                        web_search_key_input.clone(),
+                        web_search_base_url_input.clone(),
+                        web_search_count_input.clone(),
                         queue_edit_input.clone(),
                         cx,
                     )

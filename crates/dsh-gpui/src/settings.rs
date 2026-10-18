@@ -361,6 +361,51 @@ fn segmented(
 fn general_page(app: &AppView, this: &Entity<AppView>, cx: &mut App) -> Div {
     let tk = theme::t();
     let t = this.clone();
+    let t_ws_switch = t.clone();
+    let web_search_switch = segmented(
+        "set-web-search",
+        &[
+            ("启用", app.settings.web_search.enabled, true),
+            ("停用", !app.settings.web_search.enabled, true),
+        ],
+        move |i, _, _, cx| {
+            let enabled = i == 0;
+            t_ws_switch.update(cx, |v, cx| {
+                if v.settings.web_search.enabled != enabled {
+                    v.settings.web_search.enabled = enabled;
+                    v.persist_settings();
+                    cx.notify();
+                }
+            });
+        },
+    );
+    let web_search_key_input = Input::new(&app.web_search_key_input)
+        .appearance(false)
+        .w(px(220.0));
+    let web_search_base_url_input = Input::new(&app.web_search_base_url_input)
+        .appearance(false)
+        .w(px(220.0));
+    let web_search_count_input = Input::new(&app.web_search_count_input)
+        .appearance(false)
+        .w(px(60.0));
+    let t_ws = this.clone();
+    let web_search_save_button = div()
+        .id("set-web-search-save")
+        .h(px(28.0))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .rounded(px(8.0))
+        .border(px(0.5))
+        .border_color(tk.border_l3)
+        .text_size(px(theme::FONT_TAB))
+        .text_color(tk.text)
+        .cursor_pointer()
+        .hover(|st| st.bg(tk.hover))
+        .child("保存搜索设置")
+        .on_click(move |_, window, cx| {
+            t_ws.update(cx, |v, cx| v.apply_web_search_settings(window, cx));
+        });
     let appearance = segmented(
         "set-appearance",
         &[
@@ -513,6 +558,40 @@ fn general_page(app: &AppView, this: &Entity<AppView>, cx: &mut App) -> Div {
             collapse,
             true,
         ))
+        // DeepSeek 搜索设置卡（上游 web-search-deepseek 设置卡：开关/key/
+        // base URL/count；保存后重启生效——工具在启动时注册）
+        .child(settings_row(
+            "DeepSeek 搜索",
+            "启用后注册 web_search 工具（key 留空用 DEEPSEEK_API_KEY；保存后重启生效）",
+            web_search_switch,
+            false,
+        ))
+        .when(app.settings.web_search.enabled, |page| {
+            page.child(settings_row(
+                "搜索 API key",
+                "留空时回退 DEEPSEEK_API_KEY 凭据",
+                web_search_key_input,
+                false,
+            ))
+            .child(settings_row(
+                "搜索端点",
+                "留空用官方默认端点",
+                web_search_base_url_input,
+                false,
+            ))
+            .child(settings_row(
+                "单请求搜索上限",
+                "1-50，默认 10",
+                web_search_count_input,
+                false,
+            ))
+            .child(settings_row(
+                "",
+                "",
+                web_search_save_button,
+                true,
+            ))
+        })
 }
 
 /// select 形态的选项 chip（web InputBar .select：h28 r8、13/20 medium

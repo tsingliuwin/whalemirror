@@ -63,7 +63,7 @@ pub const DEEPSEEK_SEARCH_BASE_URL: &str = "https://api.deepseek.com/anthropic/v
 pub const DEEPSEEK_SEARCH_MODEL: &str = "deepseek-v4-flash";
 pub const DEEPSEEK_SEARCH_API_VERSION: &str = "2023-06-01";
 const SEARCH_MAX_TOKENS: u32 = 4096;
-const SEARCH_MAX_USES: u32 = 5;
+const SEARCH_MAX_USES: u32 = 10;
 /// 每查询返回来源上限（web searchMaxResults）。
 const SEARCH_MAX_RESULTS: usize = 20;
 /// 查询数上限（web maxQueries）。
@@ -88,6 +88,7 @@ pub struct WebSearchTool {
     api_key: String,
     base_url: String,
     model: String,
+    max_uses: u32,
 }
 
 impl WebSearchTool {
@@ -100,6 +101,7 @@ impl WebSearchTool {
             api_key,
             base_url: std::env::var("DSH_SEARCH_BASE_URL").unwrap_or_else(|_| DEEPSEEK_SEARCH_BASE_URL.into()),
             model: std::env::var("DSH_SEARCH_MODEL").unwrap_or_else(|_| DEEPSEEK_SEARCH_MODEL.into()),
+            max_uses: SEARCH_MAX_USES,
         })
     }
 
@@ -110,6 +112,22 @@ impl WebSearchTool {
             api_key,
             base_url: DEEPSEEK_SEARCH_BASE_URL.into(),
             model: DEEPSEEK_SEARCH_MODEL.into(),
+            max_uses: SEARCH_MAX_USES,
+        }
+    }
+
+    /// 设置卡驱动构造（web-search 设置卡：key/base URL/count 1-50）。
+    pub fn with_config(api_key: String, base_url: String, count: u32) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key,
+            base_url: if base_url.is_empty() {
+                DEEPSEEK_SEARCH_BASE_URL.into()
+            } else {
+                base_url
+            },
+            model: DEEPSEEK_SEARCH_MODEL.into(),
+            max_uses: count.clamp(1, 50),
         }
     }
 
@@ -120,7 +138,7 @@ impl WebSearchTool {
             "model": self.model,
             "max_tokens": SEARCH_MAX_TOKENS,
             "messages": [{ "role": "user", "content": [{ "type": "text", "text": query }] }],
-            "tools": [{ "type": "web_search_20250305", "name": "web_search", "max_uses": SEARCH_MAX_USES }],
+            "tools": [{ "type": "web_search_20250305", "name": "web_search", "max_uses": self.max_uses }],
         });
         let resp = self
             .client

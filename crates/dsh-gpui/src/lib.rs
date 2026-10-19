@@ -2,6 +2,8 @@
 //! 模型——从 bin 靶抽出以便集成测试直接驱动（bin 靶宏展开深度病态，
 //! #[test] 无法在其中展开）。
 
+pub mod credential_mask;
+
 /// 工具调用块（web 版 ToolRow）。
 #[derive(Clone)]
 pub struct ToolBlock {

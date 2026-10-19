@@ -19,7 +19,7 @@ $cb = [NativeQuiet.WinQ+EnumProc]{ param($h, $l)
     $sb = New-Object System.Text.StringBuilder 256
     [NativeQuiet.WinQ]::GetWindowText($h, $sb, 256) | Out-Null
     $t = $sb.ToString()
-    if ($t -eq 'DeepSeek Harness') { $script:target = $h }
+    if ($t -like '*WhaleMirror*' -or $t -eq 'DeepSeek Harness') { $script:target = $h }
     elseif ($t -ne '' -and $t -ne 'Program Manager') { [void]$others.Add($h) }
   }
   return $true

@@ -2422,7 +2422,12 @@ open: false,
                     })
                     .unwrap_or_default();
                 let t = this.clone();
-                let bubble_text = text.clone();
+                // #32 凭据掩码（上游 ui-secret-mask 语义）：命中已发布格式
+                // 则气泡显示掩码串，存储/发送原文不变（复制钮与编辑仍取
+                // entry 原文，智能体可用真值）；气泡本就纯文本渲染，`*`
+                // 无 markdown 冲突。
+                let bubble_text = dsh_gpui::credential_mask::mask_user_text(&text)
+                    .unwrap_or_else(|| text.clone());
                 let group: SharedString = format!("user-msg-{ei}").into();
                 let group_copy = group.clone();
                 // web MessageIconActions（alpha.4）：最新一条 user 行操作

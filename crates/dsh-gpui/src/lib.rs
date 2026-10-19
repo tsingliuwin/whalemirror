@@ -1865,9 +1865,10 @@ pub fn chat_content_width(column_w: f32) -> f32 {
     preferred.min((column_w - 32.0).max(320.0))
 }
 
-/// 输入卡上限 = 内容列 + 两侧 clearance 16px。
+/// 输入卡上限 = 内容列 + 两侧 clearance 16px；窄栏下同样保留 16px
+/// 侧留白（min(列宽 − 32)——否则中栏被 dock 挤窄时卡片会贴边）。
 pub fn composer_card_width(column_w: f32) -> f32 {
-    chat_content_width(column_w) + 32.0
+    (chat_content_width(column_w) + 32.0).min((column_w - 32.0).max(320.0))
 }
 
 #[cfg(test)]
@@ -1878,10 +1879,12 @@ mod column_width_tests {
     fn content_width_never_exceeds_narrow_column() {
         // dock 打开后的窄中栏：680 下限不得撑破 596 列
         let c = chat_content_width(596.0);
-        assert!(c + 32.0 <= 596.0, "composer clearance must fit: {c}");
         assert_eq!(c, 564.0);
+        // 输入卡在窄栏同样保留每侧 16px 留白（不贴边）
+        assert_eq!(composer_card_width(596.0), 564.0);
         // details 打开：676 列同样收窄
         assert_eq!(chat_content_width(676.0), 644.0);
+        assert_eq!(composer_card_width(676.0), 644.0);
     }
 
     #[test]

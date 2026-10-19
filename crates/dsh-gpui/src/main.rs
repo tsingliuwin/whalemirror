@@ -7621,6 +7621,12 @@ impl AppView {
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
+                // 编辑器文本样式随环境 text style 继承（TextElement 读
+                // window.text_style）——默认窗口 16/26 过大，对齐预览既有
+                // 12/20 等宽（旧源码预览形态）
+                .text_size(px(12.0))
+                .line_height(px(20.0))
+                .font_family(widgets::theme_mono())
                 .child(Editor::new(&editor)),
         )
     }

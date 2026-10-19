@@ -7611,6 +7611,10 @@ impl AppView {
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
+                // 留白对齐旧源码预览（p16/py12）：换行时折行于留白内，
+                // 不换行时文本在右留白边界裁切后再横向滚动——右缘不贴边
+                .px(px(16.0))
+                .py(px(12.0))
                 // 编辑器文本样式随环境 text style 继承（TextElement 读
                 // window.text_style）——默认窗口 16/26 过大，对齐预览既有
                 // 12/20 等宽（旧源码预览形态）

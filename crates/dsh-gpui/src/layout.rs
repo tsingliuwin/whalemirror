@@ -19,17 +19,9 @@ pub(crate) const DETAILS_MIN: f32 = 300.0;
 pub(crate) const DETAILS_MAX: f32 = 520.0;
 pub(crate) const DETAILS_DEFAULT: f32 = 360.0;
 
-/// 会话内容列宽（web ConversationRoot --dsh-chat-content-width）：
-/// clamp(680px, 中栏宽 × 0.64, 920px)——随中栏实时宽度自适应（收起
-/// 侧栏即变宽），上限 920 保行长可读性，下限 680。
-pub(crate) fn chat_content_width(column_w: f32) -> f32 {
-    (column_w * 0.64).clamp(680.0, 920.0)
-}
-
-/// 输入卡上限 = 内容列 + 两侧 clearance 16px。
-pub(crate) fn composer_card_width(column_w: f32) -> f32 {
-    chat_content_width(column_w) + 32.0
-}
+// 内容列与输入卡宽度实现迁 dsh-gpui lib（纯函数，可测；bin 测试会
+// 使 rustc 爆栈）：此处保持 layout:: 调用路径不变。
+pub(crate) use dsh_gpui::{chat_content_width, composer_card_width};
 
 /// 用户气泡宽度上限（web MessageItem：min(W×0.702, 82%)，0.702 < 0.82 恒成立）。
 pub(crate) fn user_bubble_max(column_w: f32) -> f32 {

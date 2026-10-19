@@ -1852,3 +1852,46 @@ mod read_page_root_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// 会话内容列宽（web ConversationRoot --dsh-chat-content-width）：
+/// clamp(680px, 中栏宽 × 0.64, 920px)——随中栏实时宽度自适应（收起
+/// 侧栏即变宽），上限 920 保行长可读性，下限 680。
+///
+/// 渲染侧 dock/details 打开时中栏可能被挤到不足 680（如 1316 宽窗口
+/// 280 侧栏 + 440 dock → 596）：下限仍须服从实际列宽（留 16×2 两侧
+/// clearance），否则内容与输入卡溢出中栏、被右侧面板裁切。
+pub fn chat_content_width(column_w: f32) -> f32 {
+    let preferred = (column_w * 0.64).clamp(680.0, 920.0);
+    preferred.min((column_w - 32.0).max(320.0))
+}
+
+/// 输入卡上限 = 内容列 + 两侧 clearance 16px。
+pub fn composer_card_width(column_w: f32) -> f32 {
+    chat_content_width(column_w) + 32.0
+}
+
+#[cfg(test)]
+mod column_width_tests {
+    use super::*;
+
+    #[test]
+    fn content_width_never_exceeds_narrow_column() {
+        // dock 打开后的窄中栏：680 下限不得撑破 596 列
+        let c = chat_content_width(596.0);
+        assert!(c + 32.0 <= 596.0, "composer clearance must fit: {c}");
+        assert_eq!(c, 564.0);
+        // details 打开：676 列同样收窄
+        assert_eq!(chat_content_width(676.0), 644.0);
+    }
+
+    #[test]
+    fn content_width_keeps_web_clamp_when_room_is_available() {
+        // 宽中栏：原 clamp 语义不变（下限 680 / 0.64 / 上限 920）
+        assert_eq!(chat_content_width(1024.0), 680.0);
+        assert_eq!(chat_content_width(1200.0), 768.0);
+        assert_eq!(chat_content_width(1600.0), 920.0);
+        for w in [1024.0, 1200.0, 1600.0] {
+            assert!(composer_card_width(w) <= w);
+        }
+    }
+}

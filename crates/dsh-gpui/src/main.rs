@@ -1790,17 +1790,6 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
-        // [临时验证] 启动即自动打开 dock md 预览（验证后移除）
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(2500))
-                .await;
-            let _ = this.update(cx, |v, cx| {
-                v.dock.open = true;
-                v.open_file_preview("README.md".into(), cx);
-            });
-        })
-        .detach();
         let subscription = cx.subscribe(&input, |chat, input, event, cx| {
             // plain Enter 按偏好投递；Ctrl+Enter（vendor secondary-enter）为
             // 加速手势：运行中按次取偏好反相（上游 resolveSubmitMode 表）
@@ -2540,7 +2529,8 @@ impl AppView {
             lines: Vec::new(),
             loaded_through: 0,
             eof: false,
-            wrap: false,
+            // 默认软换行（右缘不再裁切长行；H 钮可切回不换行+横向滚动）
+            wrap: true,
             failure: None,
         };
         if dsh_gpui::is_image_preview(&preview.path) {

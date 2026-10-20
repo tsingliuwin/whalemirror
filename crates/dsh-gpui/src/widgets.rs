@@ -663,11 +663,40 @@ pub(crate) fn fold_toggle(
         .child(label)
 }
 
+/// web ExitCodeBadge（Tag neutral 内嵌 4px 红点，#35①）：命令退出胶囊——
+/// 失败码/码缺失/信号的行尾中性胶囊；几何照 Tag.module.css（r999、
+/// padding 1/8、11/17 w500、底 module-platform、字 label-secondary）。
+pub(crate) fn exit_code_badge(label: String) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .rounded_full()
+        .px(px(8.0))
+        .py(px(1.0))
+        .text_size(px(11.0))
+        .line_height(px(17.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .bg(theme::t().module_platform)
+        .text_color(theme::t().text_2)
+        .child(
+            div()
+                .size(px(4.0))
+                .flex_none()
+                .rounded_full()
+                .bg(theme::t().error),
+        )
+        .child(label)
+}
+
 /// 终端卡（web TerminalBlock .block/.header/.output，行内绑定：
 /// mono 12/18、banner 上限 150 内滚动、输出上限 224 内滚动、gutter 30px
 /// 状态点列）。running 只画 banner；settled 有 l2 分隔线 + 输出（空输出
-/// 画「无输出」占位）。dsh-shell 无退出码元数据，状态只由点色承载：
-/// 运行 accent、成功 green、失败 error。
+/// 画「无输出」占位）。退出状态由 seam 标记解析而来（#35①）：失败退出
+/// 点转红 + banner 附状态 pill；调用级 error（spawn/超时）保持红点。
+/// output 传已剥标记的 body（标记留在正文会双重渲染）。
 pub(crate) fn terminal_card(
     uid: u64,
     command: &str,
@@ -675,12 +704,14 @@ pub(crate) fn terminal_card(
     output: Option<&str>,
     running: bool,
     error: bool,
+    exit: Option<&dsh_gpui::ShellExit>,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static + Clone,
 ) -> Div {
+    let exit_failed = exit.map(dsh_gpui::shell_exit_failed).unwrap_or(false);
     let dot_color = if running {
         theme::t().accent
-    } else if error {
+    } else if error || exit_failed {
         theme::t().error
     } else {
         theme::t().green
@@ -720,7 +751,25 @@ pub(crate) fn terminal_card(
                 ),
         );
     }
-    // banner：settled 且有非空输出时附「复制」（复制原始输出）
+    // banner：settled 且有非空输出时附「复制」（复制原始输出）；失败
+    // 退出的状态 pill 在复制钮之前（web Pill+css.status：中性胶囊红字、
+    // 顶齐首行）
+    let status_pill = exit
+        .and_then(dsh_gpui::shell_exit_label)
+        .map(|label| {
+            div()
+                .flex_none()
+                .rounded_full()
+                .px(px(8.0))
+                .py(px(1.0))
+                .text_size(px(11.0))
+                .line_height(px(17.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .whitespace_nowrap()
+                .bg(theme::t().module_platform)
+                .text_color(theme::t().error)
+                .child(label)
+        });
     let mut banner = div()
         .id(("term-banner", uid))
         .relative()
@@ -732,6 +781,9 @@ pub(crate) fn terminal_card(
         .pb(px(9.0))
         .pl(px(30.0))
         .child(prompt);
+    if let Some(pill) = status_pill {
+        banner = banner.child(pill);
+    }
     if !running
         && let Some(text) = output
         && !text.trim().is_empty()

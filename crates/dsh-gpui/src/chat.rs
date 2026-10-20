@@ -1757,8 +1757,20 @@ open: false,
                 let open = tool.open;
                 let (_, icon) = widgets::tool_display(&tool.name);
                 let (title, summary, file_path) = widgets::tool_row_texts(&tool.name, &tool.arguments);
-                // web ToolRow：失败行折叠摘要 = 输出首行（failureLine 替换语义）
-                let failure = if tool.error && tool.result.is_some() {
+                // #35① shell 退出标记解析（上游 terminal-card-model 语义）：
+                // 胶囊文案 + 剥标记后的卡体共用一次 parse
+                let shell_parsed = if matches!(tool.name.as_str(), "shell" | "bash") {
+                    tool.result.as_deref().map(dsh_gpui::parse_exit_status)
+                } else {
+                    None
+                };
+                let exit_label =
+                    shell_parsed.as_ref().and_then(|p| dsh_gpui::shell_exit_label(&p.exit));
+                // web ToolRow：失败行折叠摘要 = 输出首行（failureLine 替换
+                // 语义）；命令退出（胶囊在场）保留中性描述不染红——Generic
+                // failures retain their first result line; command exits keep
+                // their description
+                let failure = if tool.error && tool.result.is_some() && exit_label.is_none() {
                     Some(widgets::first_line(tool.result.as_deref().unwrap_or("")))
                 } else {
                     None
@@ -1883,8 +1895,9 @@ open: false,
                     )
                     .child(dot_sep());
                 // web fileLink：文件工具的 path 摘要渲染为下划线链接，
-                // 点击用宿主默认应用打开（阻断行点击的展开切换）
-                if file_path.is_some() && failure.is_none() {
+                // 点击用宿主默认应用打开（阻断行点击的展开切换）；命令
+                // 退出行不走链接（exitLabel 在场时 summary 是普通 span）
+                if file_path.is_some() && failure.is_none() && exit_label.is_none() {
                     let open_path = file_path.clone().unwrap_or_default();
                     header = header.child(
                         div()
@@ -1911,6 +1924,30 @@ open: false,
                                 }
                             })
                             .child(summary_text.clone()),
+                    );
+                } else if let Some(label) = exit_label {
+                    // web ExitCodeBadge：描述 + 胶囊打包一行（.summary flex
+                    // 语义——长描述省略号、胶囊 flex:none 不被挤）
+                    header = header.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(theme::FONT_ROW))
+                                    .line_height(px(theme::FONT_ROW_LEADING))
+                                    .text_color(theme::t().text_3)
+                                    .child(summary_text.clone()),
+                            )
+                            .child(widgets::exit_code_badge(label)),
                     );
                 } else {
                     header = header.child(
@@ -1970,9 +2007,10 @@ open: false,
                                 uid,
                                 &arg_str("command"),
                                 &self.cwd,
-                                tool.result.as_deref(),
+                                shell_parsed.as_ref().map(|p| p.body.as_str()),
                                 running,
                                 tool.error,
+                                shell_parsed.as_ref().map(|p| &p.exit),
                                 tool.expanded,
                                 move |_, _, cx| {
                                     t_fold.update(cx, |v, cx| {

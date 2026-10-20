@@ -44,6 +44,11 @@ GPUI 的 Input **吃 CUA 合成按键不可靠**（Delete/ctrl+a 常无效），
 
 ## 已知坑
 
+- **合成 BackSpace 在 0.7 TextareaState 失效（10-21 实证）**：CUA `type`/`typeText` 输入
+  有效（composer 打字/追加均可），但 `key BackSpace`（auto 与 event 策略、repeat 连发）
+  均不删字符——Delete/ctrl+a 同类失效风险。**文本改写路径不可用**；测试草稿的清理改用
+  `restart-host`（composer 草稿是内存态，重启即清）。§文本输入的「连发 BackSpace 逐字
+  删除」为 0.5 时代结论，已失效。
 - **TOPMOST 残留**：回归结束必须取消置顶（ui-quiet.ps1 结束时若不再继续操作，可手动
   `SetWindowPos(HWND_NOTOPMOST)`），否则用户屏幕上应用恒置顶。
 - **误点风险**：窗口不在预期屏时点击会落到用户其它窗口上——点击前必须截图确认窗口位置。
@@ -51,3 +56,7 @@ GPUI 的 Input **吃 CUA 合成按键不可靠**（Delete/ctrl+a 常无效），
   测完 `taskkill //F //IM python.exe` 清理；不要把用户真实密钥打进输入框。
 - **应用日志**：GPUI 应用无控制台输出；排障靠单测断言、examples（dump_lines/inspect_kinds
   解 zstd 会话日志）、以及 UI 截图对照上游源码数值。
+- **bash 卡实机验证零 token 路径**：DeepSeek 余额不足时不发真轮次——复制一个含 bash 调用
+  的真实会话目录为 scratch id，python+zstandard 解 v4 jsonl、给一个 tool/result 的 text
+  尾部追加 `\n[exit code: N]`（或 is_error 置 false）再压回，重启宿主点开即可驱动真实
+  渲染路径；验完走「删除会话」清理。

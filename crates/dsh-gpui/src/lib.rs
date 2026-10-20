@@ -3,6 +3,8 @@
 //! #[test] 无法在其中展开）。
 
 pub mod credential_mask;
+pub mod shell_exit;
+pub use shell_exit::{parse_exit_status, shell_exit_failed, shell_exit_label, ShellExit};
 
 /// 工具调用块（web 版 ToolRow）。
 #[derive(Clone)]

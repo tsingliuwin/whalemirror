@@ -221,11 +221,11 @@ async fn run(command: &str, timeout_ms: u64, workdir: &dsh_tools::Workdir) -> To
                 text.push_str("\n[stderr]\n");
                 text.push_str(&decode_output(&err));
             }
-            if status.success() {
-                ToolExecutionResult::text(text)
-            } else {
-                ToolExecutionResult::error(text)
-            }
+            append_exit_marker(&mut text, &status);
+            // 上游 seam 语义：命令失败也是 completed call（isError=false——
+            // 退出状态是结果数据，模型读标记自诊断）；调用级失败（spawn
+            // 失败/超时）才走 error，且不带标记（超时等事实留在正文）。
+            ToolExecutionResult::text(text)
         }
         Ok((_, _, Err(e))) => ToolExecutionResult::error(format!("spawn failed: {e}")),
         Err(_) => {
@@ -233,6 +233,26 @@ async fn run(command: &str, timeout_ms: u64, workdir: &dsh_tools::Workdir) -> To
             let _ = child.kill().await;
             ToolExecutionResult::error(format!("command timed out after {timeout_ms}ms"))
         }
+    }
+}
+
+/// 退出标记（上游 shell seam 共享约定）：渲染结果以机器可读一行收尾——
+/// `[exit code: N]`、无退出码时 `[exit code: null]`、信号终止时
+/// `[killed by signal: X]`——模型因此总能知道命令如何结束；呈现侧
+/// parseExitStatus 剥除标记还原结构化状态（终端卡把退出状态画成自己的
+/// pill，标记留在输出里就会双重渲染）。
+fn append_exit_marker(text: &mut String, status: &std::process::ExitStatus) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            text.push_str(&format!("\n[killed by signal: {sig}]"));
+            return;
+        }
+    }
+    match status.code() {
+        Some(code) => text.push_str(&format!("\n[exit code: {code}]")),
+        None => text.push_str("\n[exit code: null]"),
     }
 }
 
@@ -300,6 +320,26 @@ mod tests {
             })
             .unwrap_or_default();
         assert!(text.contains("hello"), "{text}");
+        // 退出标记（seam 约定）：成功也带码 0
+        assert!(text.ends_with("\n[exit code: 0]"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn failing_exit_stays_completed_with_marker() {
+        // 上游语义：非零退出是 completed call（isError=false，退出状态是
+        // 结果数据），标记 `[exit code: N]` 收尾供呈现侧剥出胶囊
+        let tool = ShellTool::default();
+        let result = tool.execute(&input(r#"{"command": "exit 3"}"#)).await;
+        let ToolExecutionResult { content, is_error, .. } = &result;
+        assert!(!is_error, "{result:?}");
+        let text = content
+            .iter()
+            .find_map(|b| match b {
+                dsh_llm::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(text.ends_with("\n[exit code: 3]"), "{text}");
     }
 
     #[tokio::test]

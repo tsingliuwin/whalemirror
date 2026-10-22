@@ -406,6 +406,10 @@ pub(crate) struct ChatView {
     /// 轮次交付文件（present 工具落的 deliverables/presented 事件按轮
     /// 归并；回放从日志收集，实时在轮终扫一次会话）——轮尾卡数据源。
     pub(crate) presented_by_turn: HashMap<u64, Vec<dsh_session::PresentedFile>>,
+    /// live 轮末 QUOTA 错误待发全窗 toast（上游 QuotaNoticeHost：只对
+    /// append 现场弹、历史/回放不弹——apply_event 无 window，置旗由宿主
+    /// 事件泵转 pending_toasts）。
+    pub(crate) pending_quota_notice: bool,
     /// 轮次过程折叠的本帧缓存（render 时算一次，render_item 逐可见行读取）
     folds_frame: RefCell<Rc<HashMap<u64, TurnFold>>>,
     /// 消息流虚拟列表（可变高、Top 对齐）
@@ -503,6 +507,7 @@ impl ChatView {
             turn_expanded: Default::default(),
             collapse_timing: dsh_gpui::CollapseTiming::Completion,
             presented_by_turn: HashMap::new(),
+            pending_quota_notice: false,
             folds_frame: Default::default(),
             // Top 对齐（web 同语义）：内容自顶排布，短会话首条消息在顶部；
             // 溢出后的吸底由 sync_chat_list 的 scroll_to_reveal_item 承担
@@ -1496,15 +1501,22 @@ open: false,
                     self.turn_expanded.remove(&turn);
                 }
             }
-            AgentEvent::Error { message, .. } => {
+            AgentEvent::Error { message, code } => {
                 self.running = false;
                 self.turn_started_at = None;
+                // live 轮末 QUOTA → 全窗 toast（上游 QuotaNoticeHost 的
+                // append 语义；宿主泵消费旗标转 pending_toasts）
+                if dsh_gpui::turn_error::is_quota_failure(&code) {
+                    self.pending_quota_notice = true;
+                }
                 self.entries.push(ChatEntry {
             echo_id: None,
                     step: None,
                     step_duration_ms: None,
                     role: Role::Error,
-                    blocks: vec![MsgBlock::Text(message)],
+                    // 与回放同存形 `[CODE] message`：渲染层解析出 code 做
+                    // 本地化文案与 chip（上游 displayFailure/TurnErrorItem）
+                    blocks: vec![MsgBlock::Text(format!("[{code}] {message}"))],
                     done: true,
                     elapsed: None, usage: None, ended_at_ms: None,
                     turn: self.ui_turn,
@@ -2579,6 +2591,9 @@ open: false,
                 div().w_full().child(col)
             }
             Role::Error => {
+                // web TurnErrorItem：8px 错点 + 标题（红 600）+ 本地化消息
+                // （已知 code 换文案，未知 code 保留原始诊断）+ 右贴 code
+                // chip（mono 12/18 三级色；INTERRUPTED 不显示）
                 let text = entry
                     .blocks
                     .first()
@@ -2587,33 +2602,54 @@ open: false,
                         _ => String::new(),
                     })
                     .unwrap_or_default();
-                div().w_full().child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .text_size(px(13.0))
-                        .line_height(px(20.0))
-                        .child(
-                            div()
-                                .mt(px(6.0))
-                                .size(px(8.0))
-                                .rounded_full()
-                                .flex_none()
-                                .bg(theme::t().error),
-                        )
-                        .child(
-                            div().child(
+                let (code, msg) = dsh_gpui::turn_error::split_error_text(&text);
+                let view = dsh_gpui::turn_error::turn_failure_view(code.as_deref(), &msg);
+                let mut row = div()
+                    .w_full()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .py(px(2.0))
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
+                    .child(
+                        div()
+                            .mt(px(5.0))
+                            .size(px(8.0))
+                            .rounded_full()
+                            .flex_none()
+                            .bg(theme::t().error),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_start()
+                            .child(
                                 div()
+                                    .flex_none()
+                                    .mr(px(6.0))
                                     .text_color(theme::t().error)
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("出错了"),
+                                    .child(view.title),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().text_color(theme::t().text_2).child(view.message),
                             ),
-                        )
-                        .child(
-                            div().flex_1().min_w_0().text_color(theme::t().text_2).child(text),
-                        ),
-                )
+                    );
+                if view.show_code && let Some(code) = code {
+                    row = row.child(
+                        div()
+                            .flex_none()
+                            .font_family(widgets::theme_mono())
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(theme::t().text_3)
+                            .child(code),
+                    );
+                }
+                div().w_full().child(row)
             }
             Role::Context => {
                 // 上下文注入行（web ContextInjectionRow，DisclosureRow from

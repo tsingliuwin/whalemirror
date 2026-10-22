@@ -4,6 +4,7 @@
 
 pub mod credential_mask;
 pub mod shell_exit;
+pub mod turn_error;
 pub use shell_exit::{parse_exit_status, shell_exit_failed, shell_exit_label, ShellExit};
 
 /// 工具调用块（web 版 ToolRow）。

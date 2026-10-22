@@ -44,6 +44,10 @@ GPUI 的 Input **吃 CUA 合成按键不可靠**（Delete/ctrl+a 常无效），
 
 ## 已知坑
 
+- **CUA 坐标点击间歇失败（10-22 实证）**：`click` 报 `the live pixel owner has no
+  stable WindowServer app/window identity` 且窗口被留在最小化态（bounds -32000）。
+  可用套路：同一 cell 内先 `getScreenshot({emit:false})`（会恢复窗口并绑定新帧）再点击；
+  仍失败时退回 PowerShell SendInput（ui-click.ps1）。点击前必须确认 bounds 不是 -32000。
 - **合成 BackSpace 在 0.7 TextareaState 失效（10-21 实证）**：CUA `type`/`typeText` 输入
   有效（composer 打字/追加均可），但 `key BackSpace`（auto 与 event 策略、repeat 连发）
   均不删字符——Delete/ctrl+a 同类失效风险。**文本改写路径不可用**；测试草稿的清理改用

@@ -2411,11 +2411,19 @@ impl AppView {
             self.running_sessions.routes_to_view(&owner) || owner == viewed
         };
         let app_level = if routes {
-            self.chat.update(cx, |c, cx| {
+            let (level, quota) = self.chat.update(cx, |c, cx| {
                 let r = c.apply_event(ev);
                 cx.notify();
-                r
-            })
+                (r, std::mem::take(&mut c.pending_quota_notice))
+            });
+            // 上游 QuotaNoticeHost：live 轮末 QUOTA 错误弹全窗 toast
+            //（历史/回放不弹——旧失败滚回来不是新闻）
+            if quota {
+                self.pending_toasts
+                    .push(dsh_gpui::turn_error::QUOTA_FAILURE_NOTICE.into());
+                cx.notify();
+            }
+            level
         } else {
             // peek：运行会话事件不进视图（sink 已落盘，切回时从日志重载）。
             // 也不升级为宿主刷新——delta/步结都只属运行会话，视图里的统计

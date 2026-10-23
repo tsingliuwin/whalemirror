@@ -791,7 +791,26 @@ impl ChatView {
                         open: false,
                     });
                 }
-                // 其余收尾（completed/aborted/…）：只清运行中标记
+                // 其余收尾（completed/aborted/…）：只清运行中标记；
+                // 输出上限收尾另落一条提示行（上游 turn-max-tokens 节点：
+                // 回答被截断的说明，位于该轮末）
+                SessionEvent::TurnEnd { reason: TurnEndReason::MaxTokens, .. } => {
+                    unfinished = false;
+                    self.entries.push(ChatEntry {
+            echo_id: None,
+                        step: None,
+                        step_duration_ms: None,
+                        role: Role::Notice,
+                        blocks: vec![MsgBlock::Text(
+                            dsh_gpui::turn_error::MAX_TOKENS_HINT.into(),
+                        )],
+                        done: true,
+                        elapsed: None, usage: None, ended_at_ms: None,
+                        turn: cur_turn,
+                        context: None,
+                        open: false,
+                    });
+                }
                 SessionEvent::TurnEnd { .. } => {
                     unfinished = false;
                 }
@@ -1426,6 +1445,9 @@ open: false,
             AgentEvent::TurnEnded { turn, reason } => {
                 self.running = false;
                 self.retire_unclaimed_echoes();
+                // 输出上限：轮末提示行（与回放同形；入列在下方本轮回放
+                // 的同位置——轮终戳已盖完，提示行不抢 footer/统计）
+                let max_tokens_end = dsh_gpui::turn_error::is_max_tokens_end(&reason);
                 // Aborted = cancel 打断（inbox 随之被弃）：排队条带同步清
                 // 空。其余轮终不清——排队的消息等下一轮 TurnStarted 消费。
                 if matches!(reason, TurnEndReason::Aborted { .. }) {
@@ -1493,6 +1515,20 @@ open: false,
                     e.ended_at_ms = Some(now_ms());
                 }
                 self.turn_started_at = None;
+                if max_tokens_end {
+                    self.entries.push(ChatEntry {
+                        echo_id: None,
+                        step: None,
+                        step_duration_ms: None,
+                        role: Role::Notice,
+                        blocks: vec![MsgBlock::Text(dsh_gpui::turn_error::MAX_TOKENS_HINT.into())],
+                        done: true,
+                        elapsed: None, usage: None, ended_at_ms: None,
+                        turn,
+                        context: None,
+                        open: false,
+                    });
+                }
                 // 收起时机（上游 deferCompletedTurns）：NextInput 下完成轮
                 // 保持展开（turn_open 不清），折回延迟到下一条消息发送
                 if dsh_gpui::fold_now_on_turn_end(self.collapse_timing) {
@@ -2797,25 +2833,71 @@ open: false,
                 }
                 div().w_full().v_flex().child(wrap)
             }
-            Role::Notice => {
-                // 压缩分隔条：居中 hairline + 说明文字（web compaction 提示行；
-                // alpha.4 全局 hairline 化，线宽随 0.5px）
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .py(px(4.0))
-                    .child(div().flex_1().h(px(0.5)).bg(theme::t().border_l2))
-                    .child(
+Role::Notice => {
+                // 两种 notice：压缩分隔条（无正文）与输出上限提示（正文=
+                // hint）。上游 turn-max-tokens 行：警告点 + 标题（amber
+                // 600）+ 截断说明（次级色），行几何同 turn-error
+                let body = entry.blocks.first().and_then(|b| match b {
+                    MsgBlock::Text(t) if !t.is_empty() => Some(t.clone()),
+                    _ => None,
+                });
+                match body {
+                    Some(hint) => div().w_full().child(
                         div()
-                            .flex_none()
-                            .text_size(px(theme::FONT_CAPTION))
-                            .line_height(px(theme::FONT_CAPTION_LEADING))
-                            .text_color(theme::t().text_3)
-                            .child("上下文已压缩 · 已生成摘要检查点"),
-                    )
-                    .child(div().flex_1().h(px(0.5)).bg(theme::t().border_l2))
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .py(px(2.0))
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .size(px(8.0))
+                                    .rounded_full()
+                                    .flex_none()
+                                    .bg(theme::t().warn_label),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_start()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .mr(px(6.0))
+                                            .text_color(theme::t().warn_label)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(dsh_gpui::turn_error::MAX_TOKENS_TITLE),
+                                    )
+                                    .child(
+                                        div().flex_1().min_w_0().text_color(theme::t().text_2).child(hint),
+                                    ),
+                            ),
+                    ),
+                    None => {
+                        // 压缩分隔条：居中 hairline + 说明文字（web compaction 提示行；
+                        // alpha.4 全局 hairline 化，线宽随 0.5px）
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .py(px(4.0))
+                            .child(div().flex_1().h(px(0.5)).bg(theme::t().border_l2))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(theme::FONT_CAPTION))
+                                    .line_height(px(theme::FONT_CAPTION_LEADING))
+                                    .text_color(theme::t().text_3)
+                                    .child("上下文已压缩 · 已生成摘要检查点"),
+                            )
+                            .child(div().flex_1().h(px(0.5)).bg(theme::t().border_l2))
+                    }
+                }
             }
         }
     }

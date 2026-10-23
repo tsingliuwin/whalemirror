@@ -40,6 +40,17 @@ pub fn is_quota_failure(code: &str) -> bool {
     code == "QUOTA" || code == "ACCOUNT_QUOTA"
 }
 
+/// 上游 zh locale `message.maxTokens`。
+pub const MAX_TOKENS_TITLE: &str = "已达到输出 token 上限";
+/// 上游 zh locale `message.maxTokens.hint`。
+pub const MAX_TOKENS_HINT: &str = "回答被截断，已有输出保留在对话中。发送“继续”可让模型接着输出。";
+
+/// 轮终是否需要「达到输出上限」提示行（上游 turn-max-tokens 节点：
+/// `turn/end` 的 `reason.kind == 'max-tokens'`；其余收尾无此行）。
+pub fn is_max_tokens_end(reason: &dsh_session::TurnEndReason) -> bool {
+    matches!(reason, dsh_session::TurnEndReason::MaxTokens)
+}
+
 /// 失败条目的内部存储格式 `[CODE] message` → (code, message)。
 /// 两个入列路径（实时 AgentEvent::Error 与回放 turn/end error）都经此
 /// 格式；无前缀时 code 为 None、全文即消息。
@@ -127,5 +138,30 @@ mod tests {
         let v = turn_failure_view(code.as_deref(), &msg);
         assert_eq!(v.message, QUOTA_FAILURE_NOTICE);
         assert!(v.show_code);
+    }
+
+    #[test]
+    fn max_tokens_only_for_max_tokens_reason() {
+        use dsh_session::TurnEndReason;
+        assert!(is_max_tokens_end(&TurnEndReason::MaxTokens));
+        assert!(!is_max_tokens_end(&TurnEndReason::Completed));
+        assert!(!is_max_tokens_end(&TurnEndReason::Blocked));
+        assert!(!is_max_tokens_end(&TurnEndReason::Aborted {
+            cancel_cause: dsh_session::CancelCause::Legacy
+        }));
+        assert!(!is_max_tokens_end(&TurnEndReason::Error {
+            failure: dsh_llm::LlmFailure {
+                message: "x".into(),
+                code: "QUOTA".into(),
+                status: None,
+                provider_retry_after_ms: None,
+                request_id: None,
+                offload_images: None,
+            }
+        }));
+        // 文案逐字锁（上游 message.maxTokens / .hint）
+        assert_eq!(MAX_TOKENS_TITLE, "已达到输出 token 上限");
+        assert!(MAX_TOKENS_HINT.contains("发送“继续”"));
+        assert!(MAX_TOKENS_HINT.starts_with("回答被截断"));
     }
 }

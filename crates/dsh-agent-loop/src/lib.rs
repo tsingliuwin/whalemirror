@@ -31,6 +31,7 @@ use dsh_tools::{ToolExecutionInput, ToolExecutionResult, ToolRegistry};
 use flume::{Receiver, Sender};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Notify;
 
@@ -228,7 +229,11 @@ pub struct ReactLoopAgent {
     system_head: Mutex<Option<(u64, String)>>,
     /// plan 模式激活态（上游 PlanModeController 的投影折叠：最后一条
     /// plan/mode 事件赢；无此事件 = 未激活）。pending 切换在轮终边界落盘。
-    plan_mode: Mutex<bool>,
+    plan_mode: Arc<AtomicBool>,
+    /// 本会话是否曾进入过 plan 模式（上游 plan 投影 stateVersion 4 的
+    /// `entered`）：`exit_plan_mode` 从首次进入起保持声明，离开只改
+    /// 指引——addition-only 路由不再因撤下声明丢前缀缓存。
+    plan_entered: Mutex<bool>,
     /// 待落盘的 plan 模式切换（轮终边界提交，上游 onBoundary 同语义）。
     plan_pending: Mutex<Option<bool>>,
 }
@@ -265,7 +270,8 @@ impl ReactLoopAgent {
             on_event: Mutex::new(None),
             _turn_boundary_registration: Mutex::new(Some(turn_boundary_registration)),
             system_head: Mutex::new(None),
-            plan_mode: Mutex::new(false),
+            plan_mode: Arc::new(AtomicBool::new(false)),
+            plan_entered: Mutex::new(false),
             plan_pending: Mutex::new(None),
         })
     }
@@ -303,7 +309,11 @@ impl ReactLoopAgent {
             SessionEvent::PlanMode { active, .. } => Some(*active),
             _ => None,
         });
-        *self.plan_mode.lock().unwrap() = plan_active.unwrap_or(false);
+        let plan_entered = session.entries().iter().any(|e| {
+            matches!(&e.event, SessionEvent::PlanMode { active: true, .. })
+        });
+        self.plan_mode.store(plan_active.unwrap_or(false), Ordering::Relaxed);
+        *self.plan_entered.lock().unwrap() = plan_entered;
         // v3 replace 语义要求换端点恰为当前 head：切换会话必须把内存 head
         // 重定基到日志末条 system/message 行——否则 None 分支会对已有 head
         // 重复 append（旧行残留），跨会话残留旧 seq 则写出悬空 replace 端点。
@@ -340,7 +350,10 @@ impl ReactLoopAgent {
         }
         let narrate = true;
         self.append_event(SessionEvent::PlanMode { active });
-        *self.plan_mode.lock().unwrap() = active;
+        self.plan_mode.store(active, Ordering::Relaxed);
+        if active {
+            *self.plan_entered.lock().unwrap() = true;
+        }
         // narration（上游 narration：最后 header 见证与目标不同才注入）
         let text = if active {
             "The user switched this session to plan mode."
@@ -367,7 +380,23 @@ impl ReactLoopAgent {
 
     /// plan 模式是否激活（内存折叠值）。
     pub fn plan_mode_active(&self) -> bool {
-        *self.plan_mode.lock().unwrap()
+        self.plan_mode.load(Ordering::Relaxed)
+    }
+
+    /// plan 激活态的共享句柄（exit_plan_mode 工具用：离开 plan 模式后的
+    /// 调用要在执行侧以「unavailable outside plan mode」失败）。
+    pub fn plan_active_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.plan_mode)
+    }
+
+    /// 声明面准入（上游 tools 条件注册的核心语义）：`exit_plan_mode`
+    /// 从首次进入 plan 模式起保持声明（`entered`），激活期内自然也在；
+    /// 其余工具无条件准入。未准入的调用在派发侧按未知工具拒绝。
+    fn tool_admitted(&self, name: &str) -> bool {
+        if name != "exit_plan_mode" {
+            return true;
+        }
+        self.plan_mode_active() || *self.plan_entered.lock().unwrap()
     }
 
     /// The projection registry this agent folds boundary facts into.
@@ -558,7 +587,15 @@ impl ReactLoopAgent {
         }
         PromptAssembly {
             system: parts.join("\n\n"),
-            tools: self.tools.schemas(),
+            // 按步准入（上游条件工具注册）：未准入的工具既不出现在声明
+            // 里，也不出现在指引/派发面（调用按未知工具失败）
+            tools: self
+                .tools
+                .list()
+                .iter()
+                .filter(|t| self.tool_admitted(&t.definition().name))
+                .map(|t| t.definition().to_schema())
+                .collect(),
         }
     }
 
@@ -1037,9 +1074,15 @@ impl ReactLoopAgent {
 
             let input =
                 ToolExecutionInput::with_raw_arguments(id.clone(), name.clone(), arguments.clone());
-            let result: ToolExecutionResult = match self.tools.execute(&input).await {
-                Some(r) => r,
-                None => ToolExecutionResult::error(format!("no tool \"{name}\"")),
+            // 未准入 = 未知工具（上游 UNKNOWN_TOOL）：声明面缺席的工具
+            // 即使模型硬调用也不执行
+            let result: ToolExecutionResult = if !self.tool_admitted(name) {
+                ToolExecutionResult::error(format!("unknown tool \"{name}\""))
+            } else {
+                match self.tools.execute(&input).await {
+                    Some(r) => r,
+                    None => ToolExecutionResult::error(format!("no tool \"{name}\"")),
+                }
             };
             concluded |= result.concludes_turn;
 

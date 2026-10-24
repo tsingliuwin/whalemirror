@@ -8470,6 +8470,9 @@ fn main() {
                         },
                     );
                     exit_plan_tool.set_review_hook(exit_hook);
+                    // 渐进披露（上游 plan 投影 entered）：工具从首次进入
+                    // plan 模式起保持声明，离开后的调用在工具侧失败
+                    exit_plan_tool.set_plan_active(agent.plan_active_flag());
                     view.read_with(cx, |v: &AppView, _| {
                         let _ = v;
                     });

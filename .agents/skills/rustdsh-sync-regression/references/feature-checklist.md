@@ -10,6 +10,7 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | A1 | 全 workspace 单测（adapter 流式身份/4xx 分类、projcache 双布局/戳保留/版本门、session 投影等 34 组） | 单测 | 0 failed |
 | A2 | 真实 ~/.dsh/sessions 全量加载（zstd 多帧 read_across_frames） | 语料 | load_web 列出全部会话无错误 |
 | A3 | projcache 双布局标题互通（per-record 优先、旧整档回退、版本门） | 语料 | share_check 标题数 >0 |
+| A4 | plan 渐进披露 + 按步工具准入（补缺 #41 首片）：首次进入 plan 前请求工具面无 exit_plan_mode；进入后出现；离开后仍声明（前缀缓存）；未准入硬调用按 unknown tool 拒绝；离开后调用按 unavailable outside plan mode 失败 | `cargo test -p dsh-agent-loop --test plan_tool_admission` | 3 测全绿 |
 
 ## B. 聊天流（chat.rs / widgets.rs）
 

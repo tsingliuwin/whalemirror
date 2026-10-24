@@ -388,16 +388,25 @@ pub type PlanReviewHook = std::sync::Arc<
 /// 反馈路径）；Dismissed 结束本轮（concludes_turn，不打扰模型等待）。
 pub struct ExitPlanModeTool {
     review: RwLock<Option<PlanReviewHook>>,
+    /// plan 激活态共享句柄（宿主在 agent 构造后接线）：离开 plan 模式后
+    /// 工具仍保持声明（前缀缓存），但调用以「unavailable outside plan
+    /// mode」失败（上游渐进披露语义）。None = 无校验（数据面测试缺省）。
+    plan_active: RwLock<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 impl ExitPlanModeTool {
     pub fn new() -> Self {
-        Self { review: RwLock::new(None) }
+        Self { review: RwLock::new(None), plan_active: RwLock::new(None) }
     }
 
     /// 注入审阅回调（宿主 UI；无回调时自动同意——数据面测试缺省）。
     pub fn set_review_hook(&self, hook: PlanReviewHook) {
         *self.review.write().unwrap() = Some(hook);
+    }
+
+    /// 注入 plan 激活态句柄（宿主在 agent 构造后调用）。
+    pub fn set_plan_active(&self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        *self.plan_active.write().unwrap() = Some(flag);
     }
 }
 
@@ -427,6 +436,13 @@ impl Tool for ExitPlanModeTool {
     }
 
     async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        // 渐进披露：声明保留（前缀缓存友好），但 plan 模式未激活（已
+        // 离开）时调用失败——上游「unavailable outside plan mode」
+        if let Some(flag) = self.plan_active.read().unwrap().as_ref()
+            && !flag.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return ToolExecutionResult::error("exit_plan_mode is unavailable outside plan mode");
+        }
         let plan = input
             .arguments
             .get("plan")

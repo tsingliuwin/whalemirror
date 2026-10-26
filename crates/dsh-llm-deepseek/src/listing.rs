@@ -391,10 +391,165 @@ pub fn listing_stale(age_ms: u64, max_age_ms: u64) -> bool {
     age_ms >= max_age_ms
 }
 
+/// 超时原因的标记码（上游 `LISTING_TIMEOUT`；出现在诊断文案里便于排障）。
+pub const LISTING_TIMEOUT: &str = "MODEL_LISTING_TIMEOUT";
+
+/// 拉取并解码一份 `/models` 列表（上游 `requestModelListing`）。
+///
+/// 重定向一律拒绝（凭据只留在被请求的源上，3xx 按 HTTP_<status> 失败）；
+/// 超时按 `TIMEOUT`、不可达按 `TRANSPORT`、非 2xx 按 `HTTP_<status>`、
+/// 非 JSON 或列表不可读按 `INVALID_RESPONSE` 失败。凭据用 `x-api-key`
+/// （官方 API-key 路由的鉴权头）。
+///
+/// 偏差：UA 沿用 rustdsh 的 `dsh-rust/*`（上游发 APP_IDENTITY 归属头）。
+pub async fn fetch_model_listing(
+    url: &str,
+    api_key: &str,
+    timeout_ms: u64,
+) -> Result<ModelListing, dsh_llm::LlmError> {
+    let invalid = |message: String| dsh_llm::LlmError::new(message, "INVALID_RESPONSE");
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("dsh-rust/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|_| dsh_llm::LlmError::new(format!("could not reach {url}"), "TRANSPORT"))?;
+    let request = client
+        .get(url)
+        .header("accept", "application/json")
+        .header("x-api-key", api_key);
+    let response = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), request.send()).await {
+        Err(_) => {
+            return Err(dsh_llm::LlmError::new(
+                format!(
+                    "DeepSeek model listing request to {url} timed out after {timeout_ms} ms ({LISTING_TIMEOUT})"
+                ),
+                "TIMEOUT",
+            ))
+        }
+        Ok(Err(_)) => {
+            return Err(dsh_llm::LlmError::new(format!("could not reach {url}"), "TRANSPORT"))
+        }
+        Ok(Ok(response)) => response,
+    };
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        return Err(dsh_llm::LlmError::new(
+            format!("{url} answered HTTP {status}"),
+            format!("HTTP_{status}"),
+        ));
+    }
+    let text = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), response.text()).await {
+        Err(_) => {
+            return Err(dsh_llm::LlmError::new(
+                format!(
+                    "DeepSeek model listing request to {url} timed out after {timeout_ms} ms ({LISTING_TIMEOUT})"
+                ),
+                "TIMEOUT",
+            ))
+        }
+        Ok(Err(_)) => {
+            return Err(dsh_llm::LlmError::new(format!("could not reach {url}"), "TRANSPORT"))
+        }
+        Ok(Ok(text)) => text,
+    };
+    let body: Value = serde_json::from_str(&text)
+        .map_err(|_| invalid(format!("{url} did not answer with JSON")))?;
+    parse_model_listing(&body).map_err(|e| invalid(e.message().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 起一个一次性本地服务：读掉请求头后回一段原始响应（None = 静默触发超时）。
+    async fn serve_once(response: Option<String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            if let Some(response) = response {
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        });
+        format!("http://{addr}/models")
+    }
+
+    /// 组装一份 HTTP/1.1 响应（content-length 按实际体长）。
+    fn response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn fetch_decodes_a_listing() {
+        let url = serve_once(Some(response(
+            r#"{"data":[{"id":"deepseek-flash","api_capabilities":{"anthropic_messages":{}}}]}"#,
+        )))
+        .await;
+        let listing = fetch_model_listing(&url, "k", 2_000).await.unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].id, "deepseek-flash");
+    }
+
+    #[tokio::test]
+    async fn fetch_reports_http_status_and_redirects() {
+        let url = serve_once(Some(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+        ))
+        .await;
+        let error = fetch_model_listing(&url, "k", 2_000).await.unwrap_err();
+        assert_eq!(error.failure.code, "HTTP_401", "{error:?}");
+        // 重定向不跟随：3xx 即失败（凭据不离开被请求的源）
+        let url = serve_once(Some(
+            "HTTP/1.1 302 Found\r\nlocation: http://evil.example/models\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+        ))
+        .await;
+        let error = fetch_model_listing(&url, "k", 2_000).await.unwrap_err();
+        assert_eq!(error.failure.code, "HTTP_302", "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn fetch_reports_invalid_response() {
+        let url = serve_once(Some(response("not json"))).await;
+        let error = fetch_model_listing(&url, "k", 2_000).await.unwrap_err();
+        assert_eq!(error.failure.code, "INVALID_RESPONSE", "{error:?}");
+        // 合法 JSON 但没有列表入口
+        let url = serve_once(Some(response("{}"))).await;
+        let error = fetch_model_listing(&url, "k", 2_000).await.unwrap_err();
+        assert_eq!(error.failure.code, "INVALID_RESPONSE", "{error:?}");
+        assert!(error.failure.message.contains("no \"data\" array"), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn fetch_times_out() {
+        let url = serve_once(None).await;
+        let started = std::time::Instant::now();
+        let error = fetch_model_listing(&url, "k", 120).await.unwrap_err();
+        assert_eq!(error.failure.code, "TIMEOUT", "{error:?}");
+        assert!(error.failure.message.contains(LISTING_TIMEOUT), "{error:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn fetch_reports_unreachable_endpoint() {
+        // 绑定后立即释放的端口：回环上无人监听。本机若配置了 HTTP 代理，
+        // 失败会以代理应答（HTTP_5xx）出现；无论路径如何都必须报错且带
+        // 端点信息——不断言具体码，保持环境无关。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let url = format!("http://{addr}/models");
+        let error = fetch_model_listing(&url, "k", 2_000).await.unwrap_err();
+        assert!(error.failure.message.contains(&url), "{error:?}");
+    }
+
 
     fn entry_body() -> Value {
         json!({

@@ -11,6 +11,7 @@
 mod adapter;
 mod discovery;
 pub mod listing;
+pub mod listing_cache;
 
 pub use adapter::DeepSeekAdapter;
 pub use discovery::{DiscoveredModel, DiscoveryError, discover_models};

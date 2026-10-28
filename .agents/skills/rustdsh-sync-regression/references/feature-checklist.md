@@ -11,7 +11,7 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | A2 | 真实 ~/.dsh/sessions 全量加载（zstd 多帧 read_across_frames） | 语料 | load_web 列出全部会话无错误 |
 | A3 | projcache 双布局标题互通（per-record 优先、旧整档回退、版本门） | 语料 | share_check 标题数 >0 |
 | A4 | plan 渐进披露 + 按步工具准入（补缺 #41 首片）：首次进入 plan 前请求工具面无 exit_plan_mode；进入后出现；离开后仍声明（前缀缓存）；未准入硬调用按 unknown tool 拒绝；离开后调用按 unavailable outside plan mode 失败 | `cargo test -p dsh-agent-loop --test plan_tool_admission` | 3 测全绿 |
-| A5 | DeepSeek /models 列表核心（补缺 #39 子批 a+b）：URL/解析（默认模态、模式映射含 null 与未知降级、不可用能力保留 id）/事实分层（cap/leading-only 移除/模态替换）/版本门/时序；fetch（redirect 拒绝/错误码分类/超时/不可达） | `cargo test -p dsh-llm-deepseek listing` | 15 测全绿 |
+| A5 | DeepSeek /models 列表核心（补缺 #39 子批 a+b+c）：URL/解析/事实分层/版本门/时序；fetch（redirect 拒绝/错误码/超时/不可达）；凭据作用域缓存（首次等待/过期后台刷新/失败保留且只报首条/invalidate/close/代际作废） | `cargo test -p dsh-llm-deepseek listing` | 22 测全绿（listing 15 + listing_cache 7） |
 
 ## B. 聊天流（chat.rs / widgets.rs）
 

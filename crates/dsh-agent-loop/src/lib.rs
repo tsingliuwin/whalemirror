@@ -389,14 +389,25 @@ impl ReactLoopAgent {
         Arc::clone(&self.plan_mode)
     }
 
-    /// 声明面准入（上游 tools 条件注册的核心语义）：`exit_plan_mode`
+    /// 声明面准入（上游条件工具注册的核心语义）：`exit_plan_mode`
     /// 从首次进入 plan 模式起保持声明（`entered`），激活期内自然也在；
     /// 其余工具无条件准入。未准入的调用在派发侧按未知工具拒绝。
     fn tool_admitted(&self, name: &str) -> bool {
-        if name != "exit_plan_mode" {
-            return true;
+        self.tools.admitted(name, &self.admission_context())
+    }
+
+    /// 本步的工具准入上下文（plan 折叠态 + 当前路由）。
+    fn admission_context(&self) -> dsh_tools::ToolAdmission {
+        let (provider, model) = {
+            let o = self.options.read().unwrap();
+            (o.provider.clone(), o.model.clone())
+        };
+        dsh_tools::ToolAdmission {
+            plan_active: self.plan_mode_active(),
+            plan_entered: *self.plan_entered.lock().unwrap(),
+            provider,
+            model,
         }
-        self.plan_mode_active() || *self.plan_entered.lock().unwrap()
     }
 
     /// The projection registry this agent folds boundary facts into.
@@ -591,9 +602,8 @@ impl ReactLoopAgent {
             // 里，也不出现在指引/派发面（调用按未知工具失败）
             tools: self
                 .tools
-                .list()
+                .list_admitted(&self.admission_context())
                 .iter()
-                .filter(|t| self.tool_admitted(&t.definition().name))
                 .map(|t| t.definition().to_schema())
                 .collect(),
         }

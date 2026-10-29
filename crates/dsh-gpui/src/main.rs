@@ -7989,7 +7989,16 @@ fn main() {
     // exit_plan_mode 审阅流（#2）：模型提交计划后经宿主审阅面板等用户
     // 决定（同意/要求修改/自行回复——上游 userQuestions.ask 单进程等价）
     let exit_plan_tool = Arc::new(dsh_tools::ExitPlanModeTool::new());
-    let _exit_plan = tools.register(exit_plan_tool.clone()).unwrap();
+    // exit_plan_mode 条件注册（上游渐进披露：首次进入 plan 模式前不在
+    // 工具面；进入后保持声明，离开只改行为——addition-only 路由前缀缓存友好）
+    let _exit_plan = tools
+        .register_when(
+            exit_plan_tool.clone(),
+            std::sync::Arc::new(|ctx: &dsh_tools::ToolAdmission| {
+                ctx.plan_active || ctx.plan_entered
+            }),
+        )
+        .unwrap();
     let prompt = Arc::new(SystemPrompt::new());
     // tool:edit section（上游 applyEditTool 同文）：read-before-edit 引导；
     // 偏差：上游默认 fs-observation-policy 硬门未实装，仅提示词引导

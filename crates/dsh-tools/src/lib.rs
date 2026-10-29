@@ -122,10 +122,29 @@ impl ToolDefinition {
     }
 }
 
+/// 步骤级工具准入上下文（上游条件注册 `when: ({ agent, modelSelection })`
+/// 的 rustdsh 等价子集：plan 折叠态 + 本步模型选择）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolAdmission {
+    pub plan_active: bool,
+    pub plan_entered: bool,
+    pub provider: String,
+    pub model: String,
+}
+
+/// 工具激活条件：为 false 的步骤不声明、不派发该工具（上游 conditional
+/// tool 语义；调用按未知工具失败）。
+pub type ToolCondition = Arc<dyn Fn(&ToolAdmission) -> bool + Send + Sync>;
+
+struct Registered {
+    tool: Arc<dyn Tool>,
+    condition: Option<ToolCondition>,
+}
+
 /// The scoped tool registry.
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    tools: Arc<RwLock<HashMap<String, Registered>>>,
     order: Arc<RwLock<Vec<String>>>,
 }
 
@@ -136,6 +155,23 @@ impl ToolRegistry {
 
     /// Register a tool under its name, returning its disposer.
     pub fn register(&self, tool: Arc<dyn Tool>) -> Result<Disposer, dsh_llm::LlmError> {
+        self.register_inner(tool, None)
+    }
+
+    /// 以激活条件注册（上游条件工具）：条件不满足的步骤不声明、不派发。
+    pub fn register_when(
+        &self,
+        tool: Arc<dyn Tool>,
+        condition: ToolCondition,
+    ) -> Result<Disposer, dsh_llm::LlmError> {
+        self.register_inner(tool, Some(condition))
+    }
+
+    fn register_inner(
+        &self,
+        tool: Arc<dyn Tool>,
+        condition: Option<ToolCondition>,
+    ) -> Result<Disposer, dsh_llm::LlmError> {
         let name = tool.definition().name.clone();
         {
             let map = self.tools.read().unwrap();
@@ -146,7 +182,10 @@ impl ToolRegistry {
                 ));
             }
         }
-        self.tools.write().unwrap().insert(name.clone(), tool);
+        self.tools
+            .write()
+            .unwrap()
+            .insert(name.clone(), Registered { tool, condition });
         self.order.write().unwrap().push(name.clone());
 
         let tools = Arc::clone(&self.tools);
@@ -158,14 +197,52 @@ impl ToolRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.read().unwrap().get(name).cloned()
+        self.tools
+            .read()
+            .unwrap()
+            .get(name)
+            .map(|registered| Arc::clone(&registered.tool))
     }
 
     /// Every registered tool in registration order.
     pub fn list(&self) -> Vec<Arc<dyn Tool>> {
         let order = self.order.read().unwrap();
         let map = self.tools.read().unwrap();
-        order.iter().filter_map(|n| map.get(n).cloned()).collect()
+        order
+            .iter()
+            .filter_map(|n| map.get(n).map(|r| Arc::clone(&r.tool)))
+            .collect()
+    }
+
+    /// 本步准入的工具（注册序；无条件工具恒在，条件工具按上下文过滤）。
+    pub fn list_admitted(&self, admission: &ToolAdmission) -> Vec<Arc<dyn Tool>> {
+        let order = self.order.read().unwrap();
+        let map = self.tools.read().unwrap();
+        order
+            .iter()
+            .filter_map(|n| {
+                let registered = map.get(n)?;
+                let admitted = registered
+                    .condition
+                    .as_ref()
+                    .map(|c| c(admission))
+                    .unwrap_or(true);
+                admitted.then(|| Arc::clone(&registered.tool))
+            })
+            .collect()
+    }
+
+    /// 单个工具的准入判定（未注册 = false；条件缺省 = true）。
+    pub fn admitted(&self, name: &str, admission: &ToolAdmission) -> bool {
+        let map = self.tools.read().unwrap();
+        let Some(registered) = map.get(name) else {
+            return false;
+        };
+        registered
+            .condition
+            .as_ref()
+            .map(|c| c(admission))
+            .unwrap_or(true)
     }
 
     /// The model-facing schemas for every registered tool.
@@ -574,5 +651,94 @@ step", PlanReviewDecision::Dismissed);
         let text = text_of(&r);
         assert!(text.contains("dismissed the plan review"), "{text}");
         assert!(text.contains("plan mode remains active"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod registry_admission_tests {
+    use super::*;
+
+    struct NamedTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl Tool for NamedTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.0.into(),
+                description: "test".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        async fn execute(&self, _input: &ToolExecutionInput) -> ToolExecutionResult {
+            ToolExecutionResult::text("ok")
+        }
+    }
+
+    fn names(tools: Vec<Arc<dyn Tool>>) -> Vec<String> {
+        tools.iter().map(|t| t.definition().name.clone()).collect()
+    }
+
+    #[test]
+    fn unconditional_tools_are_always_admitted() {
+        let registry = ToolRegistry::new();
+        let _a = registry.register(Arc::new(NamedTool("always"))).unwrap();
+        let ctx = ToolAdmission::default();
+        assert_eq!(names(registry.list_admitted(&ctx)), vec!["always"]);
+        assert!(registry.admitted("always", &ctx));
+        assert!(registry.schemas().iter().any(|s| s.name == "always"));
+    }
+
+    #[test]
+    fn conditional_tools_follow_the_admission_context() {
+        let registry = ToolRegistry::new();
+        let _plain = registry.register(Arc::new(NamedTool("plain"))).unwrap();
+        let _gated = registry
+            .register_when(
+                Arc::new(NamedTool("gated")),
+                Arc::new(|ctx: &ToolAdmission| ctx.plan_active),
+            )
+            .unwrap();
+        let _model_gated = registry
+            .register_when(
+                Arc::new(NamedTool("model-gated")),
+                Arc::new(|ctx: &ToolAdmission| ctx.model == "pro"),
+            )
+            .unwrap();
+
+        // 默认上下文：条件工具缺席
+        let ctx = ToolAdmission::default();
+        assert_eq!(names(registry.list_admitted(&ctx)), vec!["plain"]);
+        assert!(!registry.admitted("gated", &ctx));
+        assert!(!registry.admitted("model-gated", &ctx));
+        // 未注册的名字不是准入
+        assert!(!registry.admitted("missing", &ctx));
+
+        // plan 激活：plan 条件工具入场（entered 单独不满足 active 条件）
+        let ctx = ToolAdmission { plan_active: true, ..Default::default() };
+        assert_eq!(names(registry.list_admitted(&ctx)), vec!["plain", "gated"]);
+        let ctx = ToolAdmission { plan_entered: true, ..Default::default() };
+        assert!(!registry.admitted("gated", &ctx), "context 只携带事实，条件自行判断");
+
+        // 路由条件：模型名来自上下文
+        let ctx = ToolAdmission { model: "pro".into(), provider: "p".into(), ..Default::default() };
+        assert!(registry.admitted("model-gated", &ctx));
+        assert_eq!(names(registry.list_admitted(&ctx)), vec!["plain", "model-gated"]);
+    }
+
+    #[test]
+    fn disposer_removes_conditional_registrations_too() {
+        let registry = ToolRegistry::new();
+        let disposer = registry
+            .register_when(
+                Arc::new(NamedTool("temp")),
+                Arc::new(|ctx: &ToolAdmission| ctx.plan_active),
+            )
+            .unwrap();
+        let ctx = ToolAdmission { plan_active: true, ..Default::default() };
+        assert_eq!(names(registry.list_admitted(&ctx)), vec!["temp"]);
+        disposer();
+        assert!(registry.list_admitted(&ctx).is_empty());
+        assert!(registry.get("temp").is_none());
     }
 }

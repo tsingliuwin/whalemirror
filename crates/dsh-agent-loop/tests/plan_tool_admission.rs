@@ -81,6 +81,24 @@ impl Tool for EchoTool {
     }
 }
 
+/// 仅在 `mock-pro` 路由声明的工具：证条件读到本步模型选择。
+struct RouteGatedTool;
+
+#[async_trait]
+impl Tool for RouteGatedTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "route-gated".into(),
+            description: "route gated".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    async fn execute(&self, _input: &ToolExecutionInput) -> ToolExecutionResult {
+        ToolExecutionResult::text("ok")
+    }
+}
+
 fn spawn_agent(
     dir: &std::path::Path,
     script_plan_call: bool,
@@ -101,8 +119,21 @@ fn spawn_agent(
         .unwrap();
     let tools = Arc::new(ToolRegistry::new());
     let _echo = tools.register(Arc::new(EchoTool)).unwrap();
+    // 路由条件工具（证条件读到本步模型选择）：仅 mock-pro 路由声明
+    let _route_gated = tools
+        .register_when(
+            Arc::new(RouteGatedTool),
+            Arc::new(|ctx: &dsh_tools::ToolAdmission| ctx.model == "mock-pro"),
+        )
+        .unwrap();
     let plan_tool = Arc::new(ExitPlanModeTool::new());
-    let _exit = tools.register(Arc::clone(&plan_tool) as Arc<dyn Tool>).unwrap();
+    // 宿主同款条件注册：首次进入 plan 前不声明，进入后保持
+    let _exit = tools
+        .register_when(
+            Arc::clone(&plan_tool) as Arc<dyn Tool>,
+            Arc::new(|ctx: &dsh_tools::ToolAdmission| ctx.plan_active || ctx.plan_entered),
+        )
+        .unwrap();
     let agent = ReactLoopAgent::new(
         SessionId::new(format!(
             "session-plan-admission-{}-{script_plan_call}",
@@ -250,4 +281,34 @@ async fn call_after_leaving_plan_mode_fails_as_unavailable() {
         !results.iter().any(|t| t.contains("unknown tool")),
         "已准入（entered）不应按未知工具拒绝: {results:?}"
     );
+}
+
+#[tokio::test]
+async fn tool_admission_tracks_the_model_route() {
+    let dir = std::env::temp_dir().join(format!("dsh-plan-adm-r-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (agent, adapter, _tool, _tools) = spawn_agent(&dir, false);
+
+    // 默认路由（mock）：路由条件工具不声明
+    agent.followup("hi");
+    agent.when_idle().await;
+    {
+        let requests = adapter.requests.lock().unwrap();
+        let names = request_tool_names(&requests, 0);
+        assert!(!names.iter().any(|n| n == "route-gated"), "{names:?}");
+        assert!(names.iter().any(|n| n == "echo"));
+    }
+
+    // 切到 mock-pro：下一步的声明面跟随路由条件
+    agent.set_provider_and_model("mock", "mock-pro");
+    agent.followup("pro");
+    agent.when_idle().await;
+    {
+        let requests = adapter.requests.lock().unwrap();
+        let names = request_tool_names(&requests, 1);
+        assert!(
+            names.iter().any(|n| n == "route-gated"),
+            "条件按本步模型选择求值: {names:?}"
+        );
+    }
 }

@@ -2,6 +2,7 @@
 //! 模型——从 bin 靶抽出以便集成测试直接驱动（bin 靶宏展开深度病态，
 //! #[test] 无法在其中展开）。
 
+pub mod code_program;
 pub mod credential_mask;
 pub mod shell_exit;
 pub mod turn_error;

@@ -66,6 +66,12 @@
 | 51 | chat 转写稳态（ae07093132） | dsh-v0.2.2-alpha.2 | Turn 结束与 steer 落地时转写不跳动（布局/滚动锚定） | 需读上游 diff 比对 rustdsh 的 heights_dirty/贴底逻辑 | **待办（面内小批）** |
 | 52 | forge diff 审阅面板组（forge/forge-panel/forge-session 系列数十提交） | dsh-v0.2.2-alpha.2 | diff 订阅释放、保留审阅状态与复制头部路径、滚动锚定、取消/背压、worktree 操作排空 | 即 #1 的整文件级 review 面；交互形态需用户先定夺 | **待定向（依赖 #1）** |
 | 53 | 0.2.2-alpha 面外/观察组 | dsh-v0.2.2-alpha.2 | liveshare host/viewer/client share surfaces（#6749，新子系统）、vendor cordis 4.0.6-alpha.1 等 9 包升级、CI/desktop/windows/遥测、动态 bundle 压缩与 minify（含 revert 对）、EdgeOne purge、预合并检查脚本 | 远程协作/构建/部署架构依赖；rustdsh 无对应子系统 | **观察（面外）** |
+| 54 | 轨迹 run_code 单元记录事实解析（d10576ea02/728bf7e71c） | ce7073d512（alpha.2 后） | 程序语言只从记录推断：schema 顶层 ``Execute a program in `x` `` 行首声明（大小写敏感、语言须 typescript/python，否则整体不着色）、`parameters.properties.code.description` 旧式提示（ASCII 单词边界、忽略大小写）；两者取并集，冲突或皆无 → 不着色；description 空则回退首行非空源码（CRLF 去 \r）；description 存在但非字符串 → 记录不可用 | **已落 10-30**：`dsh-gpui::code_program` 纯函数 + 10 单测（含上游全部期望表）。剩余：轨迹单元接线（渲染侧消费 language 做高亮，属 #51） | **已完成（数据面）** |
+| 55 | apply_patch 工具组（ea4837abb1/d8243a3f52/fe5450b152/1f1a9cda72/5711d3aae7） | ce7073d512 | tool-fs 新增 apply_patch（整补丁预检 preflight、applyPatchGuard 绕过观察策略、patched 更新流、Web 标准预设默认开启、模型指引说明 whole-patch 语义）；feat(fs) 改为 default 不带 fs-observation-policy | rustdsh 现用 write/edit 两工具 + read-before-edit 提示词引导；apply_patch 需新工具 + 补丁语法（类似 git diff）解析器 + 与 sandbox 交互；影响面大（工具面/提示词/轨迹渲染） | **待办（面内大件，拆批）** |
+| 56 | sidebar 文件菜单与按分栏文件树（a7d2b5c214/2e6370fe1d/4b11531c86/13e8ca59a4/d04f1d3165/b74851c0a6） | ce7073d512 | 文件菜单支持「在侧栏/浮窗中打开」并移动已有标签；按分栏保留文件树；挂载插件处理打开；柔光反馈/停靠展开/铺满焦点交接；frame width 共享 | 依赖 dockkit 多标签引擎（backlog #16）与 sidebar 插件架构 | **待定向（依赖 #16）** |
+| 57 | hidden system-prompt 卡只能隐藏不能撤回（19956a1da9/ab627b91ce/b45eee4fca） | ce7073d512 | 已物化的 system-prompt 卡在 surface 替换导致顺序未知时只置 `visibility: hidden`、不能返回 null（否则 flush 抛错、「加载更早」失效到重载）；文档改述为「隐藏的提示节点」 | rustdsh 的系统提示行由回放直接构造、无 assembler 增量 flush，需先确认是否存在同类「再次求值返回空」路径；属 #51 组待核查项 | **待核查（可能无该缺陷面）** |
+| 58 | pi-ai 请求头大小写覆盖 + REQUEST_HEADERS 诊断脱敏（d54475a681） | ce7073d512 | profile 头名仅大小写不同时最后一个生效（构造器逐项 set 而非整体传对象）；贡献器失败时公开诊断含 provider 名 + 非 TypeError 顶层消息，TypeError 与非 Error 抛值改为安全指引（避免原生校验回显凭据）；嵌套 cause 不外泄 | rustdsh 无 pi-ai 路由（llm-pi-ai 面外）；但「错误诊断脱敏」原则可复用到 dsh-llm 的 provider 失败文案（待评估） | **观察（面外，原则可借鉴）** |
+| 59 | ui-schedule 独立任务接入 WebUI（341ea6eea4 等） | ce7073d512 | 定时任务页接入独立任务、批量清理菜单与搜索行 More 对齐、文案精简 | rustdsh 无 schedule 子系统 | **观察（面外）** |
 
 ## 批次三（长尾/观察）
 

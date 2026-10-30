@@ -72,6 +72,8 @@
 | 57 | hidden system-prompt 卡只能隐藏不能撤回（19956a1da9/ab627b91ce/b45eee4fca） | ce7073d512 | 已物化的 system-prompt 卡在 surface 替换导致顺序未知时只置 `visibility: hidden`、不能返回 null（否则 flush 抛错、「加载更早」失效到重载）；文档改述为「隐藏的提示节点」 | rustdsh 的系统提示行由回放直接构造、无 assembler 增量 flush，需先确认是否存在同类「再次求值返回空」路径；属 #51 组待核查项 | **待核查（可能无该缺陷面）** |
 | 58 | pi-ai 请求头大小写覆盖 + REQUEST_HEADERS 诊断脱敏（d54475a681） | ce7073d512 | profile 头名仅大小写不同时最后一个生效（构造器逐项 set 而非整体传对象）；贡献器失败时公开诊断含 provider 名 + 非 TypeError 顶层消息，TypeError 与非 Error 抛值改为安全指引（避免原生校验回显凭据）；嵌套 cause 不外泄 | rustdsh 无 pi-ai 路由（llm-pi-ai 面外）；但「错误诊断脱敏」原则可复用到 dsh-llm 的 provider 失败文案（待评估） | **观察（面外，原则可借鉴）** |
 | 59 | ui-schedule 独立任务接入 WebUI（341ea6eea4 等） | ce7073d512 | 定时任务页接入独立任务、批量清理菜单与搜索行 More 对齐、文案精简 | rustdsh 无 schedule 子系统 | **观察（面外）** |
+| 60 | composer 统计 pill 圆角/字号对齐上游（界面走查 1/n） | ui-chat chat/StatsPills.module.css + docs/ui-radius.md | 走查发现：统计 pill 用 `rounded(24px)` 全圆胶囊，上游 `.pill` 是 `--dsw-radius-sm`（R8）紧凑控件；圆角标准亦点名「composer statistics 与 context-occupancy trigger 用 R8，含 hover/展开/焦点态」。同时把上游数值（radius R4/R8/R12/R16/R20/R28、pill 字号 13-1=12、行高 20、padding 1/8、gap 6、图标 14）落成可单测常量 | **已落 10-31**：`dsh-gpui::ui_metrics`（圆角标尺六档 + pill 六项几何，2 单测锁定「R8 且高度 22px 落在 H20–28 档」）；theme 再导出，main.rs 两处 pill 消费常量。已知遗留：上游还有 `aria-expanded=true` 的常态底色与 `font-variant-numeric: tabular-nums`（GPUI 无对应属性），记入下方走查待办 | **已完成（1/1）** |
+| 61 | 界面走查待办清单（后续每轮取一项） | 2026-10-31 走查 | ①统计 pill：展开态常态底色（上游 `aria-expanded=true` → hover 底 + text_2）与等宽数字；②会话行菜单项 hover/焦点态与热区核对；③侧栏搜索框空态与清除钮；④工具栏/标签条点击热区（上游 dockkit `.tab` 命中区 35px 含 10px 外扩）；⑤消息流代码卡 header 滚动与复制钮焦点态；⑥composer 附件卡删除钮热区；⑦设置页各卡间距与折叠动画；⑧极窄窗口（<900px）下内容列与 dock 挤压 | 每项须先读上游对应 module.css 确认数值再改；纯视觉改动给截图前后判据 | **待办（按序推进）** |
 
 ## 批次三（长尾/观察）
 

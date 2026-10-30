@@ -403,3 +403,11 @@ pub const FONT_HERO: f32 = 26.0;
 pub const FONT_HERO_LEADING: f32 = 32.0;
 /// 品牌字 18/24 wt600。
 pub const FONT_BRAND: f32 = 18.0;
+
+// 圆角标尺与 composer 统计 pill 几何：实现在 dsh-gpui lib（可单测；
+// bin 靶的 #[test] 会爆栈），此处再导出保持 theme:: 调用路径不变。
+// 圆角标尺各档先按需再导出：目前只有统计 pill 一组被消费，其余档位
+// 待后续 UI 走查逐个替换局部值（10/14/18/24）时再挂进来。
+pub use dsh_gpui::ui_metrics::{
+    STATS_PILL_FONT_PX, STATS_PILL_LEADING_PX, STATS_PILL_RADIUS_PX,
+};

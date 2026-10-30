@@ -6187,6 +6187,8 @@ impl AppView {
                 || stats.tool_ms > 0
                 || stats.ttft_avg_ms.is_some()
                 || stats.tps.is_some();
+            // 上游 StatsPills .pill：紧凑控件 R8（--dsw-radius-sm）、
+            // padding 1/8、gap 6、字号 13-1=12、行长 20、数值等宽
             let gauge_pill = div()
                 .id("stat-pill-gauge")
                 .flex()
@@ -6194,9 +6196,9 @@ impl AppView {
                 .gap(px(6.0))
                 .px(px(8.0))
                 .py(px(1.0))
-                .rounded(px(24.0))
-                .text_size(px(theme::FONT_CAPTION))
-                .line_height(px(20.0))
+                .rounded(px(theme::STATS_PILL_RADIUS_PX))
+                .text_size(px(theme::STATS_PILL_FONT_PX))
+                .line_height(px(theme::STATS_PILL_LEADING_PX))
                 .text_color(if gauge_open {
                     theme::t().text_2
                 } else {
@@ -6235,9 +6237,9 @@ impl AppView {
                 .gap(px(6.0))
                 .px(px(8.0))
                 .py(px(1.0))
-                .rounded(px(24.0))
-                .text_size(px(theme::FONT_CAPTION))
-                .line_height(px(20.0))
+                .rounded(px(theme::STATS_PILL_RADIUS_PX))
+                .text_size(px(theme::STATS_PILL_FONT_PX))
+                .line_height(px(theme::STATS_PILL_LEADING_PX))
                 .text_color(if usage_open {
                     theme::t().text_2
                 } else {

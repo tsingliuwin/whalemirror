@@ -119,3 +119,10 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 - 会话原始日志：`~/.dsh/sessions/<dir>/<id>/session.jsonl.zstd`（zstd 多帧，用 `dump_lines`/`inspect_kinds` examples 解）
 - 配置：`~/.dsh/settings.yaml`（llm-pi-ai.providers 段）、`~/.dsh/settings.json`、`~/.dsh/.credentials.yaml`、`~/.dsh/storages/`（projcache 双布局）
 - UI 问题：CUA 截图 vs 上游 web 源码数值（packages/client/ui-*/src 与 *.module.css）
+
+## I. 界面几何与样式数值（界面走查）
+
+| # | 功能点 | 验证 | 通过判据 |
+|---|--------|------|----------|
+| I1 | 圆角标尺与 composer 统计 pill 几何（补缺 #60）：R4/R8/R12/R16/R20/R28 六档 + pill 半径 R8、字号 12、行高 20、padding 1/8、gap 6、图标 14 | `cargo test -p dsh-gpui ui_metrics` | 2 测全绿（标尺单调、pill 落 R8 档且总高 22px） |
+| I2 | 实机比对：composer 统计 pill 观感 | 宿主内发一轮消息 → 看输入框上方两个统计 pill | 圆角为 8px 方角感（非全圆胶囊）、hover 有底色、与图标/数字基线对齐 |

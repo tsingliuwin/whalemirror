@@ -7803,8 +7803,9 @@ fn click_anchor_y(click: &ClickEvent) -> f32 {
 }
 
 fn sb_menu_label(text: &'static str) -> Div {
+    // 菜单小节标题：与条目同一横向内距（上游 label 与 item 左缘对齐）
     div()
-        .px(px(10.0))
+        .px(px(dsh_gpui::ui_metrics::MENU_ITEM_PAD_X_PX))
         .py_1()
         .text_size(px(12.0))
         .line_height(px(16.0))
@@ -7826,15 +7827,16 @@ fn sb_menu_check_row(
     selected: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    // 与 .menuItem 同几何（上游 dense item 只在高度上略紧凑，圆角/内距同规）
     div()
         .id(id)
-        .h(px(34.0))
         .flex()
         .items_center()
-        .px(px(10.0))
-        .rounded(px(10.0))
-        .text_size(px(theme::FONT_ROW))
-        .line_height(px(22.0))
+        .px(px(dsh_gpui::ui_metrics::MENU_ITEM_PAD_X_PX))
+        .py(px(dsh_gpui::ui_metrics::MENU_ITEM_PAD_Y_PX))
+        .rounded(px(dsh_gpui::ui_metrics::MENU_ITEM_RADIUS_PX))
+        .text_size(px(dsh_gpui::ui_metrics::MENU_ITEM_FONT_PX))
+        .line_height(px(20.0))
         .text_color(theme::t().text)
         .hover(|s| s.bg(theme::t().hover))
         .cursor_pointer()
@@ -7882,15 +7884,17 @@ fn sb_menu_row(
     danger: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    // 上游 ui-dockkit .menuItem：padding 4px 7px、R12、字号 13-1=12、
+    // 行高 20（自然高 28）；曾用 H34 + padding 10 + R10（R10 不在标尺上）。
     div()
         .id(id)
-        .h(px(34.0))
         .flex()
         .items_center()
-        .px(px(10.0))
-        .rounded(px(10.0))
-        .text_size(px(theme::FONT_ROW))
-        .line_height(px(22.0))
+        .px(px(dsh_gpui::ui_metrics::MENU_ITEM_PAD_X_PX))
+        .py(px(dsh_gpui::ui_metrics::MENU_ITEM_PAD_Y_PX))
+        .rounded(px(dsh_gpui::ui_metrics::MENU_ITEM_RADIUS_PX))
+        .text_size(px(dsh_gpui::ui_metrics::MENU_ITEM_FONT_PX))
+        .line_height(px(20.0))
         .text_color(if danger { theme::t().error } else { theme::t().text })
         .cursor_pointer()
         .hover(|s| s.bg(theme::t().hover))

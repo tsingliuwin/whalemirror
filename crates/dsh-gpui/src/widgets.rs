@@ -362,13 +362,17 @@ pub(crate) fn session_row(
     div()
         .id(id)
         .group(group)
-        .h(px(32.0))
+        // 上游 Rows.module.css .sessionRow：H32、R12（标准单行 cell 档），
+        // `padding-inline-start: calc(row-padding 12 − paint-inset 3)` = 9，
+        // 行尾 8——底色内缩 3px 由左右内边距吸收（内容不动、底色窄 3px），
+        // gap 取 --dsh-sidebar-label-gap 6。曾误用 R8 + 左 16。
+        .h(px(dsh_gpui::ui_metrics::SIDEBAR_ROW_HEIGHT_PX))
         .flex()
         .items_center()
-        .pl(px(16.0))
-        .pr_2()
-        .gap_1()
-        .rounded(px(8.0))
+        .pl(px(dsh_gpui::ui_metrics::SIDEBAR_ROW_INSET_PX))
+        .pr(px(dsh_gpui::ui_metrics::SIDEBAR_INLINE_PADDING_PX))
+        .gap(px(dsh_gpui::ui_metrics::SIDEBAR_LABEL_GAP_PX))
+        .rounded(px(dsh_gpui::ui_metrics::SIDEBAR_ROW_RADIUS_PX))
         .relative()
         .cursor_pointer()
         .map(|d| if active { d.bg(theme::t().hover) } else { d })

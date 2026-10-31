@@ -5818,21 +5818,45 @@ impl AppView {
     }
 
     /// 对话 / 轨迹 tab 条（13/16 wt500，激活蓝 + 2px 底条）。
+    ///
+    /// 上游 ConversationRoot.module.css `.tab`：可视行 16px + 下 9px，但**按压区**
+    /// 35px——`padding: 10px 10px 9px` 配 `margin: -10px -10px 0`，负外边距把
+    /// 上 10px 与左右各 10px 撑进相邻留白，布局仍停在文本盒；激活条左右各内缩
+    /// 10px（只压文字，不压整块热区）。曾用 pb11 + 默认零左右内距（热区只有
+    /// 文字本身，且条与文字同宽）。
     fn render_tabs(&self, this: Entity<AppView>, snap: &ChatSnap) -> Div {
+        use dsh_gpui::ui_metrics as m;
         let t1 = this.clone();
         let t2 = this;
         let tab = |id: &'static str, label: &'static str, active: bool, t: Entity<AppView>| {
             div()
                 .id(id)
                 .cursor_pointer()
-                .pb(px(11.0))
-                .border_b_2()
-                .border_color(if active { theme::t().accent.into() } else { gpui::transparent_black() })
+                .h(px(m::TAB_PRESS_HEIGHT_PX))
+                .mt(px(-m::TAB_PAD_TOP_PX))
+                .px(px(m::TAB_HIT_INLINE_PX))
+                .pt(px(m::TAB_PAD_TOP_PX))
+                .pb(px(m::TAB_PAD_BOTTOM_PX))
+                .relative()
                 .text_size(px(theme::FONT_TAB))
-                .line_height(px(16.0))
+                .line_height(px(m::TAB_TEXT_HEIGHT_PX))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(if active { theme::t().accent } else { theme::t().text_3 })
                 .hover(|s| s.text_color(theme::t().text_2))
+                // 激活条：贴底 2px、左右内缩命中区外扩量（上游 ::after
+                // left/right: var(--dsh-tab-hit-inline)、bottom:-1px、R2）
+                .when(active, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .bottom(px(-1.0))
+                            .left(px(m::TAB_HIT_INLINE_PX))
+                            .right(px(m::TAB_HIT_INLINE_PX))
+                            .h(px(m::TAB_INDICATOR_HEIGHT_PX))
+                            .rounded(px(m::TAB_INDICATOR_RADIUS_PX))
+                            .bg(theme::t().accent),
+                    )
+                })
                 .on_click(move |_, _, cx| {
                     // tab 状态在 ChatView 上；其 notify 沿祖先链把 AppView
                     // 一并置脏，header 高亮下帧刷新
@@ -5845,11 +5869,12 @@ impl AppView {
                 })
                 .child(label)
         };
+        // 上游 .tabs：margin-top 10、padding-left 8、gap 20（曾用 gap 36）
         div()
-            .mt_1()
-            .pl_2()
+            .mt(px(m::TABS_MARGIN_TOP_PX))
+            .pl(px(m::TABS_PAD_LEFT_PX))
             .flex()
-            .gap(px(36.0))
+            .gap(px(m::TABS_GAP_PX))
             .child(tab("tab-chat", "对话", snap.tab == CenterTab::Conversation, t1))
             .child(tab("tab-traj", "轨迹", snap.tab == CenterTab::Trajectory, t2))
     }

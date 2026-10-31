@@ -14,6 +14,25 @@ pub const RADIUS_LG_PX: f32 = 16.0;
 pub const RADIUS_XL_PX: f32 = 20.0;
 pub const RADIUS_PANEL_PX: f32 = 28.0;
 
+// ---- 会话头标签条（上游 ui-conversation skeleton/ConversationRoot.module.css）----
+//
+// `.tab` 的可视文本行只有 25px（16px 行 + 下方 9px），但**按压区**是 35px：
+// `min-height: 35px` + `margin: -10px calc(-1*10px) 0` + `padding: 10px 10px 9px`
+// ——负外边距把 35px 盒撑进标题行上方的 10px 边距、并左右各外扩 10px，布局
+// 仍停在文本盒上。激活条（`::after`）高 2px、贴底 `-1px`，左右各内缩 10px
+// 让条只压在文字下方而不是整个按压区。`.tabs` 容器 gap 20、padding-left 8、
+// margin-top 10。
+pub const TAB_HIT_INLINE_PX: f32 = 10.0;
+pub const TAB_PAD_TOP_PX: f32 = 10.0;
+pub const TAB_PRESS_HEIGHT_PX: f32 = 35.0;
+pub const TAB_TEXT_HEIGHT_PX: f32 = 16.0;
+pub const TAB_PAD_BOTTOM_PX: f32 = 9.0;
+pub const TAB_INDICATOR_HEIGHT_PX: f32 = 2.0;
+pub const TAB_INDICATOR_RADIUS_PX: f32 = 2.0;
+pub const TABS_GAP_PX: f32 = 20.0;
+pub const TABS_PAD_LEFT_PX: f32 = 8.0;
+pub const TABS_MARGIN_TOP_PX: f32 = 10.0;
+
 // ---- 侧栏行与弹出菜单（上游 ui-sidebar / ui-workspace / ui-dockkit）----
 //
 // 上游 SidebarRoot.module.css 向子树注入四个可继承量：
@@ -137,5 +156,28 @@ mod tests {
         // 恰好落在 R8–R12 的紧凑/标准控件交界，上游取 R12 → 我们同取 R12
         let item_height = 20.0 + MENU_ITEM_PAD_Y_PX * 2.0;
         assert_eq!(item_height, 28.0);
+    }
+
+    #[test]
+    fn tab_hit_area_matches_upstream() {
+        // 上游 .tab：min-height 35 = 10(上 padding) + 16(行) + 9(下 padding)
+        assert_eq!(
+            TAB_PAD_TOP_PX + TAB_TEXT_HEIGHT_PX + TAB_PAD_BOTTOM_PX,
+            TAB_PRESS_HEIGHT_PX
+        );
+        // 负上边距 = 顶部 padding，盒不把布局推下去
+        assert_eq!(TAB_PAD_TOP_PX, 10.0);
+        // 左右外扩量（命中区加宽）
+        assert_eq!(TAB_HIT_INLINE_PX, 10.0);
+        // 激活条 2px、R2、左右内缩 = 命中区外扩量（条只压文字）
+        assert_eq!(TAB_INDICATOR_HEIGHT_PX, 2.0);
+        assert_eq!(TAB_INDICATOR_RADIUS_PX, 2.0);
+        // .tabs：gap 20 / padding-left 8 / margin-top 10
+        assert_eq!(TABS_GAP_PX, 20.0);
+        assert_eq!(TABS_PAD_LEFT_PX, 8.0);
+        assert_eq!(TABS_MARGIN_TOP_PX, 10.0);
+        // 按压区高度（35）远大于可视行（25）——这就是本轮要修的热区
+        let visual = TAB_TEXT_HEIGHT_PX + TAB_PAD_BOTTOM_PX;
+        assert!(TAB_PRESS_HEIGHT_PX > visual, "按压区 {TAB_PRESS_HEIGHT_PX} 应大于可视行 {visual}");
     }
 }

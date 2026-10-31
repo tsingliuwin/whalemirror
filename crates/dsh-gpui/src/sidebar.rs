@@ -604,11 +604,16 @@ impl Render for SidebarView {
                                     .child("工作区"),
                             )
                             .child(
-                                icon_btn("sb-search", IconName::Search, theme::t().text_2, "搜索会话", move |_, _, cx| {
-                                    t_search_toggle.update(cx, |v, cx| {
+                                icon_btn("sb-search", IconName::Search, theme::t().text_2, "搜索会话", move |_, window, cx| {
+                                    let input = t_search_toggle.update(cx, |v, cx| {
                                         v.search_open = true;
                                         cx.notify();
+                                        v.search_input.clone()
                                     });
+                                    // 上游展开即 `searchInput.current?.focus()`：
+                                    // 只用键盘时也必须直接落进输入框，否则要先
+                                    // 再点一次搜索框才能打字（此前缺这一步）
+                                    input.update(cx, |state, cx| state.focus(window, cx));
                                 }),
                             )
                         })
@@ -628,21 +633,24 @@ impl Render for SidebarView {
                                         *search_bounds.borrow_mut() = children.first().cloned();
                                     })
                                     .child(
+                                        // 上游 .searchExpanded：高 32、右内距 4、
+                                        // 0.5px l4 边、R12（radius-md），该态下
+                                        // 搜索钮 28×32——曾用 30 高 + R10（非标尺值）
                                         div()
                                             .id("sb-search-pill")
-                                            .h(px(30.0))
+                                            .h(px(dsh_gpui::ui_metrics::SEARCH_PILL_HEIGHT_PX))
                                             .flex()
                                             .items_center()
                                             .overflow_hidden()
-                                            .pr(px(4.0))
-                                            .rounded(px(10.0))
+                                            .pr(px(dsh_gpui::ui_metrics::SEARCH_PILL_PAD_RIGHT_PX))
+                                            .rounded(px(dsh_gpui::ui_metrics::SEARCH_PILL_RADIUS_PX))
                                             // web Input 原语（alpha.4）：0.5px，色阶 l2→l4
                                             .border(px(0.5))
                                             .border_color(theme::t().border_l4)
                                             .child(
                                                 div()
-                                                    .w(px(28.0))
-                                                    .h(px(30.0))
+                                                    .w(px(dsh_gpui::ui_metrics::SEARCH_BUTTON_WIDTH_PX))
+                                                    .h(px(dsh_gpui::ui_metrics::SEARCH_BUTTON_HEIGHT_PX))
                                                     .flex_none()
                                                     .flex()
                                                     .items_center()
@@ -664,18 +672,23 @@ impl Render for SidebarView {
                                                             .appearance(false)
                                                             .flex_1()
                                                             .min_w_0()
-                                                            .text_size(px(theme::FONT_TAB)),
+                                                            // 上游 .searchExpanded .searchInput：
+                                                            // margin-left -2px（贴住搜索钮）
+                                                            .ml(px(dsh_gpui::ui_metrics::SEARCH_INPUT_MARGIN_LEFT_PX))
+                                                            .text_size(px(dsh_gpui::ui_metrics::SEARCH_INPUT_FONT_PX)),
                                                     )
                                                     .child({
+                                                        // 上游 .clearButton：24×24、R8
+                                                        // （方形圆角，不是圆形钮）
                                                         div()
                                                             .id("sb-search-clear")
-                                                            .w(px(24.0))
-                                                            .h(px(24.0))
+                                                            .w(px(dsh_gpui::ui_metrics::SEARCH_CLEAR_SIZE_PX))
+                                                            .h(px(dsh_gpui::ui_metrics::SEARCH_CLEAR_SIZE_PX))
                                                             .flex_none()
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
-                                                            .rounded_full()
+                                                            .rounded(px(dsh_gpui::ui_metrics::SEARCH_CLEAR_RADIUS_PX))
                                                             .cursor_pointer()
                                                             .text_color(theme::t().text_2)
                                                             .hover(|s| s.bg(theme::t().hover))

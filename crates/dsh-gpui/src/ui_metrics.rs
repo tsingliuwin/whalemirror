@@ -14,6 +14,25 @@ pub const RADIUS_LG_PX: f32 = 16.0;
 pub const RADIUS_XL_PX: f32 = 20.0;
 pub const RADIUS_PANEL_PX: f32 = 28.0;
 
+// ---- 侧栏搜索药丸（上游 ui-workspace rows/WorkspaceBrowser.module.css）----
+//
+// 收起态 `.search`：28×28、R8、透明底、仅搜索钮（`.searchButton` 28×28）。
+// 展开态 `.searchExpanded`：整行宽、**高 32**、`padding: 0 4px 0 0`、
+// 0.5px `border-l4`、**R12**（radius-md），搜索钮在该态变 28×32，输入框
+// 左移 2px（`margin-left: -2px`）；清除钮 `.clearButton` 固定 24×24、**R8**
+// （不是圆形）。输入字号 13/18。
+pub const SEARCH_PILL_HEIGHT_PX: f32 = 32.0;
+pub const SEARCH_PILL_RADIUS_PX: f32 = RADIUS_MD_PX;
+pub const SEARCH_PILL_PAD_RIGHT_PX: f32 = 4.0;
+pub const SEARCH_BUTTON_WIDTH_PX: f32 = 28.0;
+pub const SEARCH_BUTTON_HEIGHT_PX: f32 = 32.0;
+pub const SEARCH_BUTTON_COLLAPSED_PX: f32 = 28.0;
+pub const SEARCH_INPUT_MARGIN_LEFT_PX: f32 = -2.0;
+pub const SEARCH_INPUT_FONT_PX: f32 = 13.0;
+pub const SEARCH_INPUT_LEADING_PX: f32 = 18.0;
+pub const SEARCH_CLEAR_SIZE_PX: f32 = 24.0;
+pub const SEARCH_CLEAR_RADIUS_PX: f32 = RADIUS_SM_PX;
+
 // ---- 会话头标签条（上游 ui-conversation skeleton/ConversationRoot.module.css）----
 //
 // `.tab` 的可视文本行只有 25px（16px 行 + 下方 9px），但**按压区**是 35px：
@@ -179,5 +198,25 @@ mod tests {
         // 按压区高度（35）远大于可视行（25）——这就是本轮要修的热区
         let visual = TAB_TEXT_HEIGHT_PX + TAB_PAD_BOTTOM_PX;
         assert!(TAB_PRESS_HEIGHT_PX > visual, "按压区 {TAB_PRESS_HEIGHT_PX} 应大于可视行 {visual}");
+    }
+
+    #[test]
+    fn sidebar_search_pill_matches_upstream() {
+        // .searchExpanded：高 32 / R12（radius-md）/ 右内距 4 / 搜索钮 28×32
+        assert_eq!(SEARCH_PILL_HEIGHT_PX, 32.0);
+        assert_eq!(SEARCH_PILL_RADIUS_PX, RADIUS_MD_PX);
+        assert_ne!(SEARCH_PILL_RADIUS_PX, 10.0, "10px 不是标尺档位（旧实现误用）");
+        assert_eq!(SEARCH_PILL_PAD_RIGHT_PX, 4.0);
+        assert_eq!(SEARCH_BUTTON_WIDTH_PX, 28.0);
+        assert_eq!(SEARCH_BUTTON_HEIGHT_PX, SEARCH_PILL_HEIGHT_PX);
+        // 收起态 .search：28×28
+        assert_eq!(SEARCH_BUTTON_COLLAPSED_PX, 28.0);
+        // 输入框负左边距与字号/行高
+        assert_eq!(SEARCH_INPUT_MARGIN_LEFT_PX, -2.0);
+        assert_eq!(SEARCH_INPUT_FONT_PX, 13.0);
+        assert_eq!(SEARCH_INPUT_LEADING_PX, 18.0);
+        // .clearButton：24×24 且 R8（不是圆形）
+        assert_eq!(SEARCH_CLEAR_SIZE_PX, 24.0);
+        assert_eq!(SEARCH_CLEAR_RADIUS_PX, RADIUS_SM_PX);
     }
 }

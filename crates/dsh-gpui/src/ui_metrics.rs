@@ -14,6 +14,23 @@ pub const RADIUS_LG_PX: f32 = 16.0;
 pub const RADIUS_XL_PX: f32 = 20.0;
 pub const RADIUS_PANEL_PX: f32 = 28.0;
 
+// ---- 消息流 markdown 代码块（上游 ui-primitives markdown/CodeBlock.module.css）----
+//
+// 上游 `.block`：外边距 `16px 0`（非末位 11px）、半径 `--dsw-radius-lg`（**R16**，
+// 不是紧凑控件的 R8/R12）；`.banner` 是 `padding: 9px 14px`、gap 12、
+// `font: 11px/18px`、底色 `markdown-code-block-banner`，且 `.bannerWrap`
+// 为 `position: sticky; top: 0`（长代码滚动时横幅吸顶）；`.infostring`
+// 11/18 mono 主色省略号。代码体 `pre` 内距 16。
+pub const CODE_BLOCK_MARGIN_Y_PX: f32 = 16.0;
+pub const CODE_BLOCK_MARGIN_Y_TIGHT_PX: f32 = 11.0;
+pub const CODE_BLOCK_RADIUS_PX: f32 = RADIUS_LG_PX;
+pub const CODE_BANNER_PAD_X_PX: f32 = 14.0;
+pub const CODE_BANNER_PAD_Y_PX: f32 = 9.0;
+pub const CODE_BANNER_GAP_PX: f32 = 12.0;
+pub const CODE_BANNER_FONT_PX: f32 = 11.0;
+pub const CODE_BANNER_LEADING_PX: f32 = 18.0;
+pub const CODE_BODY_PAD_PX: f32 = 16.0;
+
 // ---- 侧栏搜索药丸（上游 ui-workspace rows/WorkspaceBrowser.module.css）----
 //
 // 收起态 `.search`：28×28、R8、透明底、仅搜索钮（`.searchButton` 28×28）。
@@ -218,5 +235,24 @@ mod tests {
         // .clearButton：24×24 且 R8（不是圆形）
         assert_eq!(SEARCH_CLEAR_SIZE_PX, 24.0);
         assert_eq!(SEARCH_CLEAR_RADIUS_PX, RADIUS_SM_PX);
+    }
+
+    #[test]
+    fn code_block_metrics_match_upstream() {
+        // .block：R16（radius-lg，与改动卡同档）、外边距 16/11
+        assert_eq!(CODE_BLOCK_RADIUS_PX, RADIUS_LG_PX);
+        assert_ne!(CODE_BLOCK_RADIUS_PX, RADIUS_MD_PX, "代码块不是标准控件档");
+        assert_eq!(CODE_BLOCK_MARGIN_Y_PX, 16.0);
+        assert_eq!(CODE_BLOCK_MARGIN_Y_TIGHT_PX, 11.0);
+        // .banner：9/14 padding、gap 12、11px/18px
+        assert_eq!(CODE_BANNER_PAD_X_PX, 14.0);
+        assert_eq!(CODE_BANNER_PAD_Y_PX, 9.0);
+        assert_eq!(CODE_BANNER_GAP_PX, 12.0);
+        assert_eq!(CODE_BANNER_FONT_PX, 11.0);
+        assert_eq!(CODE_BANNER_LEADING_PX, 18.0);
+        // 横幅行高 18 + 上下 9 = 36px 横幅总高
+        assert_eq!(CODE_BANNER_LEADING_PX + CODE_BANNER_PAD_Y_PX * 2.0, 36.0);
+        // 代码体内距 16
+        assert_eq!(CODE_BODY_PAD_PX, 16.0);
     }
 }

@@ -40,7 +40,19 @@ pub(crate) fn base_text_view_style(theme: &crate::Theme) -> gpui_base::TextViewS
     table.corner_radii.bottom_left = Some(radius.into());
     table.corner_radii.bottom_right = Some(radius.into());
     let mut code_block = gpui::StyleRefinement::default();
-    code_block.corner_radii = table.corner_radii.clone();
+    // [dsh] 代码块几何对齐 DSH web（ui-primitives markdown/CodeBlock.module.css）：
+    // 半径 `--dsw-radius-lg` = R16（与改动卡同档，不是标准控件 R12/R8），
+    // 代码体内距 16（`.block :where(pre) padding: 16px`）。组件默认用的是
+    // gpui-component 的 radius.md（6px），与 web 的 16 差一档以上。
+    let code_radius: gpui::AbsoluteLength = gpui::px(16.).into();
+    code_block.corner_radii.top_left = Some(code_radius);
+    code_block.corner_radii.top_right = Some(code_radius);
+    code_block.corner_radii.bottom_left = Some(code_radius);
+    code_block.corner_radii.bottom_right = Some(code_radius);
+    code_block.padding.top = Some(gpui::px(16.).into());
+    code_block.padding.right = Some(gpui::px(16.).into());
+    code_block.padding.bottom = Some(gpui::px(16.).into());
+    code_block.padding.left = Some(gpui::px(16.).into());
     let table_head = gpui::StyleRefinement::default()
         .bg(theme.table_head)
         .text_color(theme.table_head_foreground);

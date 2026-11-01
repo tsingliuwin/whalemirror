@@ -3896,6 +3896,20 @@ impl AppView {
 
     /// 移除附件卡（跳过排队/中止传输——本地即丢弃草稿；已发布对象由
     /// 后续附件 GC 处理，上游同）
+    /// 统计弹层开合入口：把 UI 事件交给 `dsh_gpui::stat_popup` 状态机，
+    /// 保证「点同一颗关 / 点另一颗换 / 最多一个弹层」与上游一致。
+    fn toggle_stat_popup(&mut self, kind: dsh_gpui::stat_popup::StatPopup) {
+        use dsh_gpui::stat_popup::{stat_popup_next, StatPopup, StatPopupInput};
+        let current = self.stat_dialog.map(|k| match k {
+            StatDialogKind::Gauge => StatPopup::Gauge,
+            StatDialogKind::Usage => StatPopup::Usage,
+        });
+        self.stat_dialog = stat_popup_next(current, StatPopupInput::Toggle(kind)).map(|k| match k {
+            StatPopup::Gauge => StatDialogKind::Gauge,
+            StatPopup::Usage => StatDialogKind::Usage,
+        });
+    }
+
     fn remove_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
         self.attachments.retain(|d| d.id != id);
         if self.attachments.is_empty() {
@@ -6245,12 +6259,10 @@ impl AppView {
                 .when(gauge_timed, |d| {
                     let t = t_gauge.clone();
                     d.on_click(move |_, _, cx| {
+                        // 开合语义走 stat_popup 状态机（上游 useStatDialog：
+                        // 点同一颗关、点另一颗换，全 dock 至多一个弹层）
                         t.update(cx, |v, cx| {
-                            v.stat_dialog = if v.stat_dialog == Some(StatDialogKind::Gauge) {
-                                None
-                            } else {
-                                Some(StatDialogKind::Gauge)
-                            };
+                            v.toggle_stat_popup(dsh_gpui::stat_popup::StatPopup::Gauge);
                             cx.notify();
                         });
                     })
@@ -6287,23 +6299,93 @@ impl AppView {
                     let t = t_usage.clone();
                     d.on_click(move |_, _, cx| {
                         t.update(cx, |v, cx| {
-                            v.stat_dialog = if v.stat_dialog == Some(StatDialogKind::Usage) {
-                                None
-                            } else {
-                                Some(StatDialogKind::Usage)
-                            };
+                            v.toggle_stat_popup(dsh_gpui::stat_popup::StatPopup::Usage);
                             cx.notify();
                         });
                     })
                 });
+            // 弹层关闭语义（上游 useStatDialog：Escape 关、点面板外关、
+            // 点面板内不关——用户可能要选中数字）。此前只有点同一颗 pill
+            // 才能关，键盘用户与「点空白处」都关不掉。
+            let panel_bounds = std::rc::Rc::new(std::cell::RefCell::new(None::<Bounds<Pixels>>));
             strip = strip
                 .relative()
                 .child(gauge_pill)
                 .child(usage_pill)
-                .when(gauge_open, |d| d.child(stat_dialog_panel(StatDialogKind::Gauge, &stats)))
-                .when(usage_open, |d| d.child(stat_dialog_panel(StatDialogKind::Usage, &stats)));
+                .when(gauge_open, |d| {
+                    let pb = panel_bounds.clone();
+                    d.child(
+                        div()
+                            .on_children_prepainted(move |children, _, _| {
+                                *pb.borrow_mut() = children.first().cloned();
+                            })
+                            .child(stat_dialog_panel(StatDialogKind::Gauge, &stats)),
+                    )
+                })
+                .when(usage_open, |d| {
+                    let pb = panel_bounds.clone();
+                    d.child(
+                        div()
+                            .on_children_prepainted(move |children, _, _| {
+                                *pb.borrow_mut() = children.first().cloned();
+                            })
+                            .child(stat_dialog_panel(StatDialogKind::Usage, &stats)),
+                    )
+                });
         }
         area = area.child(strip);
+        // 点外关闭（上游 useStatDialog：面板外 pointerdown 即收）。绑在
+        // composer 区域而不是 strip 上——strip 只有 24px 高，点正文根本
+        // 进不了它的派发路径。composer 之内的点击（含面板本身）不关。
+        let panel_open = gauge_open || usage_open;
+        let t_out = this.clone();
+        let panel_bounds = std::rc::Rc::new(std::cell::RefCell::new(None::<Bounds<Pixels>>));
+        let pb_for_paint = panel_bounds.clone();
+        area = area
+            .child(
+                div().absolute().child(canvas(
+                    |_, _, _| {},
+                    // (paint 回调见下)
+                    // window.on_mouse_event 才是全局监听（不受 hitbox 限制，
+                    // 侧栏搜索的「点外收起」也用它）；capture_any_mouse_down
+                    // 只能收到落在自身 hitbox 内的按下。
+                    move |_, _, window, _| {
+                        if !panel_open {
+                            return;
+                        }
+                        let pb = pb_for_paint.clone();
+                        let t = t_out.clone();
+                        window.on_mouse_event(
+                            move |ev: &gpui::MouseDownEvent, phase, _, cx| {
+                                if phase != gpui::DispatchPhase::Bubble {
+                                    return;
+                                }
+                                let in_panel = pb
+                                    .borrow()
+                                    .as_ref()
+                                    .map(|b| b.contains(&ev.position))
+                                    .unwrap_or(false);
+                                if in_panel {
+                                    return;
+                                }
+                                t.update(cx, |v, cx| {
+                                    if v.stat_dialog.is_some() {
+                                        v.stat_dialog = None;
+                                        cx.notify();
+                                    }
+                                });
+                            },
+                        );
+                    },
+                )),
+            )
+            .when(panel_open, |d| {
+                let pb_record = panel_bounds.clone();
+                d.on_children_prepainted(move |children, _, _| {
+                    // 最后一个子节点是统计行（含面板），取其 bounds 作「面板内」判定
+                    *pb_record.borrow_mut() = children.last().cloned();
+                })
+            });
         area
     }
 

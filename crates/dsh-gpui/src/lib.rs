@@ -6,6 +6,7 @@ pub mod code_program;
 pub mod credential_mask;
 pub mod shell_exit;
 pub mod stat_popup;
+pub mod stat_reading;
 pub mod turn_error;
 pub mod ui_metrics;
 pub use shell_exit::{parse_exit_status, shell_exit_failed, shell_exit_label, ShellExit};

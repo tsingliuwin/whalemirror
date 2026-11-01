@@ -1416,6 +1416,24 @@ fn format_tps(tps: f64) -> String {
     if t >= 10.0 { format!("{:.0}", t) } else { format!("{:.1}", t) }
 }
 
+/// 统计 pill 读数：数字段走等宽字体（上游 `.pill` 的
+/// `font-variant-numeric: tabular-nums`——GPUI 无该属性，等价做法是数字
+/// 片段单用 mono，避免读数涨位时整条 pill 左右抖动）。
+fn stat_reading(text: impl Into<String>, color: Rgba) -> Div {
+    let text = text.into();
+    div()
+        .flex()
+        .items_center()
+        .text_color(color)
+        .children(dsh_gpui::stat_reading::split_reading(&text).into_iter().map(|run| {
+            if run.eq_width {
+                div().font_family(widgets::theme_mono()).child(run.text)
+            } else {
+                div().child(run.text)
+            }
+        }))
+}
+
 /// 延迟秒数（web formatLatencySeconds：<10s 一位小数，其余取整）。
 fn format_latency_seconds(ms: u64) -> String {
     let s = ms as f64 / 1000.0;
@@ -6252,9 +6270,9 @@ impl AppView {
                         .size(px(14.0))
                         .text_color(theme::t().text_3),
                 )
-                .child(counts.clone())
+                .child(stat_reading(counts.clone(), theme::t().text_3))
                 .children(tps_text.clone().map(|t| {
-                    div().ml(px(6.0)).text_color(theme::t().text_3).child(t)
+                    div().ml(px(6.0)).child(stat_reading(t, theme::t().text_3))
                 }))
                 .when(gauge_timed, |d| {
                     let t = t_gauge.clone();
@@ -6291,9 +6309,9 @@ impl AppView {
                         .size(px(14.0))
                         .text_color(theme::t().text_3),
                 )
-                .child(total_text)
+                .child(stat_reading(total_text, theme::t().text_3))
                 .children(cache_hit.map(|p| {
-                    div().ml(px(6.0)).text_color(theme::t().text_3).child(format!("缓存命中 {p}%"))
+                    div().ml(px(6.0)).child(stat_reading(format!("缓存命中 {p}%"), theme::t().text_3))
                 }))
                 .when(has_tokens, |d| {
                     let t = t_usage.clone();
@@ -7339,8 +7357,16 @@ impl AppView {
                 )
             } else {
                 {
-                    let ta = div().pl_4().pr_3().pt_1().child(Textarea::new(&self.input).appearance(false).w_full());
-                    ta
+                    // TODO(#67)：Esc 关闭统计弹层未接上。gpui-component 的
+                    // 输入框在 `Input` context 把 escape 绑成自用 action 并
+                    // stop_propagation（input/state.rs:1180）；实测三条路都不
+                    // 生效：祖先 capture_key_down、canvas paint 里的
+                    // window.on_key_event、物理 keybd_event + 上述两者。
+                    // Textarea 渲染成 Input，元素本身不挂 key handler，按键直接
+                    // 送到 TextareaState 的 focus handle，因此祖先根本收不到。
+                    // 正解需在 TextareaState 侧转发（vendor 补丁）或 App 级
+                    // binding + 根节点 action，留待单独一轮。
+                    div().pl_4().pr_3().pt_1().child(Textarea::new(&self.input).appearance(false).w_full())
                 }
             })
             .child(

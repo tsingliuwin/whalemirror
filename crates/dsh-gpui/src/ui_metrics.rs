@@ -69,6 +69,20 @@ pub const TABS_GAP_PX: f32 = 20.0;
 pub const TABS_PAD_LEFT_PX: f32 = 8.0;
 pub const TABS_MARGIN_TOP_PX: f32 = 10.0;
 
+// ---- 设置页行（上游 ui-primitives settings-form/fields.module.css）----
+//
+// `.field`：纵向 flex、`gap: 6px`、`padding: 12px 0`（行间距全在 padding，
+// 不另加 margin）；`.field + .field` 一条 0.5px `border-l2` 发丝作分隔；
+// `.label` 13px/1.5、`.help` 12px/1.6。曾用 gap 16 + 上下 padding 16 + 行间
+// border-bottom：行高比上游多 8px、标签字号大一档（14 vs 13）。
+pub const FIELD_PAD_Y_PX: f32 = 12.0;
+pub const FIELD_GAP_PX: f32 = 6.0;
+pub const FIELD_LABEL_FONT_PX: f32 = 13.0;
+pub const FIELD_LABEL_LEADING_PX: f32 = 19.5; // 13 × 1.5
+pub const FIELD_HELP_FONT_PX: f32 = 12.0;
+pub const FIELD_HELP_LEADING_PX: f32 = 19.2; // 12 × 1.6
+pub const FIELD_RULE_PX: f32 = 0.5;
+
 // ---- 侧栏行与弹出菜单（上游 ui-sidebar / ui-workspace / ui-dockkit）----
 //
 // 上游 SidebarRoot.module.css 向子树注入四个可继承量：
@@ -254,5 +268,22 @@ mod tests {
         assert_eq!(CODE_BANNER_LEADING_PX + CODE_BANNER_PAD_Y_PX * 2.0, 36.0);
         // 代码体内距 16
         assert_eq!(CODE_BODY_PAD_PX, 16.0);
+    }
+
+    #[test]
+    fn settings_field_geometry_matches_upstream() {
+        // .field：padding 12px 0 / gap 6px
+        assert_eq!(FIELD_PAD_Y_PX, 12.0);
+        assert_eq!(FIELD_GAP_PX, 6.0);
+        // .label 13px × 1.5、.help 12px × 1.6
+        assert_eq!(FIELD_LABEL_FONT_PX, 13.0);
+        assert!((FIELD_LABEL_LEADING_PX - 19.5).abs() < 0.01);
+        assert_eq!(FIELD_HELP_FONT_PX, 12.0);
+        assert!((FIELD_HELP_LEADING_PX - 19.2).abs() < 0.01);
+        // 行高 = 标签 + gap + 说明 + 上下 padding（单行说明时 12+6+19.5+19.2 ≈ 56.7）
+        let one_line = FIELD_LABEL_LEADING_PX + FIELD_GAP_PX + FIELD_HELP_LEADING_PX + FIELD_PAD_Y_PX * 2.0;
+        assert!((one_line - 68.7).abs() < 0.01, "row height {one_line}");
+        // 分隔线 0.5px 发丝
+        assert_eq!(FIELD_RULE_PX, 0.5);
     }
 }

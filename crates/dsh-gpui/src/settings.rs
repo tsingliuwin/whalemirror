@@ -281,38 +281,42 @@ fn nav_cell(
 /// 设置行（web 通用页行：label + 说明 + 右控件，行间 l2 发丝线）。
 fn settings_row(label: &str, desc: &str, control: impl IntoElement, last: bool) -> Div {
     let tk = theme::t();
+    // 上游 settings-form/fields.module.css `.field`：padding 12px 0、
+    // gap 6px、标签 13px/1.5、说明 12px/1.6；行间是 `.field + .field` 的
+    // 0.5px border-top 发丝（不是 border-bottom）。此前 gap 16 + 上下
+    // padding 16 + 标签 14px/22，行比上游高约 8px、字号大一档。
+    use dsh_gpui::ui_metrics::*;
     let mut row = div()
         .w_full()
         .flex()
         .items_center()
-        .gap_4()
-        .pt_4()
-        .pb_4()
+        .gap(px(16.0))
+        .py(px(FIELD_PAD_Y_PX))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .v_flex()
-                .gap(px(2.0))
+                .gap(px(FIELD_GAP_PX))
                 .child(
                     div()
-                        .text_size(px(theme::FONT_ROW))
-                        .line_height(px(22.0))
+                        .text_size(px(FIELD_LABEL_FONT_PX))
+                        .line_height(px(FIELD_LABEL_LEADING_PX))
                         .text_color(tk.text)
                         .child(label.to_string()),
                 )
                 .child(
                     div()
-                        .text_size(px(theme::FONT_CAPTION))
-                        .line_height(px(theme::FONT_CAPTION_LEADING))
+                        .text_size(px(FIELD_HELP_FONT_PX))
+                        .line_height(px(FIELD_HELP_LEADING_PX))
                         .text_color(tk.text_3)
                         .child(desc.to_string()),
                 ),
         )
         .child(control);
     if !last {
-        // web 设置行（alpha.4）：底线 0.5px 发丝
-        row = row.border_b(px(0.5)).border_color(tk.border_l2);
+        // `.field + .field { border-top: 0.5px }`——画在上边缘
+        row = row.border_t(px(FIELD_RULE_PX)).border_color(tk.border_l2);
     }
     row
 }

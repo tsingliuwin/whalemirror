@@ -3,6 +3,7 @@
 //! #[test] 无法在其中展开）。
 
 pub mod code_program;
+pub mod columns;
 pub mod credential_mask;
 pub mod shell_exit;
 pub mod stat_popup;

@@ -5185,7 +5185,10 @@ impl Render for AppView {
                             }
                         }
                         DragSide::Details => {
-                            let w = (vw - x).clamp(DETAILS_MIN, DETAILS_MAX);
+                            // 上限按上游 RIGHTBAR_MAX_RATIO = 视口 × 0.7
+                            // （不是固定 520），窄窗口下才能把右栏拖小
+                            let details_max = vw * dsh_gpui::columns::RIGHTBAR_MAX_RATIO;
+                            let w = (vw - x).clamp(DETAILS_MIN, details_max.max(DETAILS_MIN));
                             if (w - v.details_width).abs() >= 1.0 {
                                 v.details_width = w;
                                 cx.notify();

@@ -9,15 +9,19 @@ use gpui::*;
 use crate::theme;
 
 
-pub(crate) const SIDEBAR_MIN: f32 = 264.0;
-pub(crate) const SIDEBAR_MAX: f32 = 420.0;
-pub(crate) const SIDEBAR_DEFAULT: f32 = 280.0;
-pub(crate) const SIDEBAR_COLLAPSED: f32 = 56.0;
-pub(crate) const SIDEBAR_AUTO_COLLAPSE: f32 = 1024.0;
-pub(crate) const CENTER_MIN: f32 = 640.0;
-pub(crate) const DETAILS_MIN: f32 = 300.0;
-pub(crate) const DETAILS_MAX: f32 = 520.0;
+// 数值全部来自 lib 的 columns 契约（与上游 columns.ts 逐项对齐）：
+// 曾把 CENTER_MIN 写成 640（上游 400）且 DETAILS_MAX 520（上游按
+// viewport×0.7 算上限），窄窗口下右栏被过早让掉、中间列被压穿。
+pub(crate) use dsh_gpui::columns::{
+    RIGHTBAR_MIN_PX as DETAILS_MIN, SIDEBAR_AUTO_COLLAPSE_PX as SIDEBAR_AUTO_COLLAPSE,
+    SIDEBAR_COLLAPSED_PX as SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT_PX as SIDEBAR_DEFAULT, SIDEBAR_MAX_PX as SIDEBAR_MAX,
+    SIDEBAR_MIN_PX as SIDEBAR_MIN,
+};
+/// 右栏首开偏好（上游 `RIGHTBAR_DEFAULT_RATIO = 0.45 × frame`，在首次打开时
+/// 由调用方按视口换算；这里保留 360 作为宽屏下的落点）。
 pub(crate) const DETAILS_DEFAULT: f32 = 360.0;
+/// 右栏拖拽上限在宽屏下的实际夹点由 `viewport × 0.7` 决定（上游
+/// RIGHTBAR_MAX_RATIO），因此不再有固定 DETAILS_MAX 常量。
 
 // 内容列与输入卡宽度实现迁 dsh-gpui lib（纯函数，可测；bin 测试会
 // 使 rustc 爆栈）：此处保持 layout:: 调用路径不变。
@@ -28,22 +32,16 @@ pub(crate) fn user_bubble_max(column_w: f32) -> f32 {
     chat_content_width(column_w) * 0.702
 }
 
-/// columns.ts 的「让步链」。
+/// columns.ts 的列宽求解（实现迁到 lib 的 `dsh_gpui::columns` 以便单测，
+/// 这里保持 `layout::compute_columns` 的元组返回形状）。
 pub(crate) fn compute_columns(viewport: f32, sidebar_pref: f32, details_pref: f32) -> (f32, f32, f32) {
-    let s = if sidebar_pref <= 0.0 {
-        SIDEBAR_COLLAPSED
-    } else {
-        sidebar_pref.clamp(SIDEBAR_MIN, SIDEBAR_MAX)
-    };
-    let d0 = if details_pref <= 0.0 { 0.0 } else { details_pref.clamp(DETAILS_MIN, DETAILS_MAX) };
-    if s + d0 + CENTER_MIN <= viewport {
-        return (s, viewport - s - d0, d0);
-    }
-    let d1 = if d0 == 0.0 { 0.0 } else { (viewport - s - CENTER_MIN).max(DETAILS_MIN) };
-    if s + d1 + CENTER_MIN <= viewport {
-        return (s, CENTER_MIN, d1);
-    }
-    (s, (viewport - s).max(0.0), 0.0)
+    let c = dsh_gpui::columns::compute_columns(
+        viewport,
+        sidebar_pref,
+        details_pref,
+        dsh_gpui::columns::SIDEBAR_COLLAPSED_PX,
+    );
+    (c.sidebar, c.center, c.rightbar)
 }
 #[derive(Clone, Copy)]
 pub(crate) enum DragSide {

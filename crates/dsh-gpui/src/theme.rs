@@ -45,6 +45,9 @@ pub struct Tokens {
     pub surface_2: Rgba,
     /// 激活项 / elevated（暗=bluish-750；亮=bluish-75）。
     pub elevated: Rgba,
+    /// 导航/设置选中格填充（上游 `--dsw-specific-sidebar-nav-item-active`：
+    /// 亮=bluish-100 #EBEEF2、暗=bluish-750 #43454A）。与 hover 一档分离。
+    pub nav_active: Rgba,
     /// `--dsw-specific-bubble` 用户气泡（暗=850；亮=deepseek-50 淡蓝）。
     pub bubble: Rgba,
     /// `--dsw-alias-label-primary`。
@@ -124,6 +127,7 @@ pub const DARK: Tokens = Tokens {
     surface: rgb_const(0x2c2c2e),        // bluish-850 (input-major)
     surface_2: rgb_const(0x353638),      // bluish-800
     elevated: rgb_const(0x43454a),       // bluish-750
+    nav_active: rgb_const(0x43454a),     // bluish-750（与 elevated 同值）
     bubble: rgb_const(0x2c2c2e),         // bluish-850
     text: rgb_const(0xf9fafb),           // bluish-50
     text_2: rgb_const(0xcfd3d6),         // bluish-300
@@ -169,6 +173,7 @@ pub const LIGHT: Tokens = Tokens {
     surface: rgb_const(0xffffff),        // input-major 00
     surface_2: rgb_const(0xf5f6f7),      // bluish-60 (selector)
     elevated: rgb_const(0xf1f3f5),       // bluish-75 (hover-solid)
+    nav_active: rgb_const(0xebeef2),     // bluish-100（上游 nav-item-active）
     bubble: rgb_const(0xedf3fe),         // deepseek-50
     text: rgb_const(0x0f1115),           // bluish-1000
     text_2: rgb_const(0x61666b),         // bluish-700

@@ -276,7 +276,10 @@ fn nav_cell(
         .text_size(px(theme::FONT_ROW))
         .line_height(px(22.0))
         .text_color(tk.text)
-        .map(|d| if active { d.bg(tk.elevated) } else { d })
+        // 上游 .navCell.active 用 --dsw-specific-sidebar-nav-item-active
+        // （亮 bluish-100 / 暗 bluish-750），与 hover 一档分离；曾借 elevated，
+        // 亮色下比上游浅一档、与 hover 几乎不可分。
+        .map(|d| if active { d.bg(tk.nav_active) } else { d })
         .when(!active, |d| d.hover(|s| s.bg(tk.hover)))
         .cursor_pointer()
         .on_click(on_click)

@@ -69,6 +69,15 @@ pub const TABS_GAP_PX: f32 = 20.0;
 pub const TABS_PAD_LEFT_PX: f32 = 8.0;
 pub const TABS_MARGIN_TOP_PX: f32 = 10.0;
 
+// ---- 设置导航激活项填充（上游 design-platform.css 的色彩 token）----
+//
+// 上游侧栏/设置导航的选中格用 `--dsw-specific-sidebar-nav-item-active`：
+// 亮色 `neutral-bluish-100` = rgb(235,238,242)，暗色 `neutral-bluish-750`
+// = rgb(67,69,74)。rustdsh 之前借用 `elevated`（亮色 #f1f3f5 = bluish-75，
+// 那是 hover 一档），亮色下选中态比上游浅一档、与 hover 几乎不可分。
+pub const NAV_ACTIVE_FILL_LIGHT: (u8, u8, u8) = (235, 238, 242);
+pub const NAV_ACTIVE_FILL_DARK: (u8, u8, u8) = (67, 69, 74);
+
 // ---- 设置面板外壳（上游 ui-settings-general SettingsRoot.module.css）----
 //
 // `.panel`：宽 800、高 `min(800px, calc(100vh - 2 * max(24px, overlay-top)))`、
@@ -319,5 +328,14 @@ mod tests {
         assert_eq!(settings_panel_height(400.0), 352.0);
         // 极窄视口不给负高
         assert_eq!(settings_panel_height(40.0), 0.0);
+    }
+
+    #[test]
+    fn nav_active_fill_matches_upstream_tokens() {
+        // --dsw-static-neutral-bluish-100 / -750
+        assert_eq!(NAV_ACTIVE_FILL_LIGHT, (235, 238, 242));
+        assert_eq!(NAV_ACTIVE_FILL_DARK, (67, 69, 74));
+        // 与 hover 档（bluish-75 = 241,243,245）必须可区分，否则选中态看不出
+        assert_ne!(NAV_ACTIVE_FILL_LIGHT, (241, 243, 245));
     }
 }

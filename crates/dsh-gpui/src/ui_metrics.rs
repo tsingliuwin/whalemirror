@@ -69,6 +69,23 @@ pub const TABS_GAP_PX: f32 = 20.0;
 pub const TABS_PAD_LEFT_PX: f32 = 8.0;
 pub const TABS_MARGIN_TOP_PX: f32 = 10.0;
 
+// ---- 侧栏 dock 文件树（上游 ui-sidebar-files FileTree.module.css / FilesBody.module.css）----
+//
+// `.action`（行本体）：`padding: 5px 10px`、`gap: 6`、`border-radius:
+// var(--dsw-radius-md)` = **R12**；行高由内容决定（19.5 行高 + 上下 5px ≈
+// 29.5），不设固定高。`.level .level { padding-left: 18px }` 每层缩进 18。
+// `.note`（空目录/错误提示）`padding: 3px 10px`、12px 字。面板正文
+// `font-size: 13px; line-height: 1.5`（=19.5），不是 14/20。
+pub const FILE_TREE_INDENT_PX: f32 = 18.0;
+pub const FILE_TREE_ROW_PAD_X_PX: f32 = 10.0;
+pub const FILE_TREE_ROW_PAD_Y_PX: f32 = 5.0;
+pub const FILE_TREE_ROW_RADIUS_PX: f32 = RADIUS_MD_PX;
+pub const FILE_TREE_ROW_GAP_PX: f32 = 6.0;
+pub const FILE_TREE_FONT_PX: f32 = 13.0;
+pub const FILE_TREE_LEADING_PX: f32 = 19.5; // 13 × 1.5
+pub const FILE_TREE_NOTE_FONT_PX: f32 = 12.0;
+pub const FILE_TREE_NOTE_PAD_Y_PX: f32 = 3.0;
+
 // ---- 设置导航激活项填充（上游 design-platform.css 的色彩 token）----
 //
 // 上游侧栏/设置导航的选中格用 `--dsw-specific-sidebar-nav-item-active`：
@@ -337,5 +354,24 @@ mod tests {
         assert_eq!(NAV_ACTIVE_FILL_DARK, (67, 69, 74));
         // 与 hover 档（bluish-75 = 241,243,245）必须可区分，否则选中态看不出
         assert_ne!(NAV_ACTIVE_FILL_LIGHT, (241, 243, 245));
+    }
+
+    #[test]
+    fn file_tree_rows_match_upstream() {
+        // .action：padding 5/10、gap 6、R12（10 不在标尺上）
+        assert_eq!(FILE_TREE_ROW_PAD_X_PX, 10.0);
+        assert_eq!(FILE_TREE_ROW_PAD_Y_PX, 5.0);
+        assert_eq!(FILE_TREE_ROW_RADIUS_PX, RADIUS_MD_PX);
+        assert_eq!(FILE_TREE_ROW_GAP_PX, 6.0);
+        // 每层缩进 18
+        assert_eq!(FILE_TREE_INDENT_PX, 18.0);
+        // 面板正文 13/1.5，行高 = 19.5 + 上下 5 ≈ 29.5（旧固定 30 且 14/20）
+        assert_eq!(FILE_TREE_FONT_PX, 13.0);
+        assert!((FILE_TREE_LEADING_PX - 19.5).abs() < 0.01);
+        let row_h = FILE_TREE_LEADING_PX + FILE_TREE_ROW_PAD_Y_PX * 2.0;
+        assert!((row_h - 29.5).abs() < 0.01, "row height {row_h}");
+        // .note：3px 竖内距、12px 字
+        assert_eq!(FILE_TREE_NOTE_FONT_PX, 12.0);
+        assert_eq!(FILE_TREE_NOTE_PAD_Y_PX, 3.0);
     }
 }

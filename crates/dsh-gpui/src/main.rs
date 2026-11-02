@@ -2948,12 +2948,14 @@ impl AppView {
         let Some(level) = self.dock.levels.get(parent) else {
             return;
         };
+        // 上游 FileTree `.note`：padding 3px 10px、12px 字；缩进按层 18
         let note = |text: String| {
+            use dsh_gpui::ui_metrics as fm;
             div()
-                .pl(px(10.0 + depth as f32 * 18.0))
-                .pr(px(10.0))
-                .py(px(3.0))
-                .text_size(px(12.0))
+                .pl(px(fm::FILE_TREE_ROW_PAD_X_PX + depth as f32 * fm::FILE_TREE_INDENT_PX))
+                .pr(px(fm::FILE_TREE_ROW_PAD_X_PX))
+                .py(px(fm::FILE_TREE_NOTE_PAD_Y_PX))
+                .text_size(px(fm::FILE_TREE_NOTE_FONT_PX))
                 .line_height(px(18.0))
                 .text_color(theme::t().text_3)
                 .child(text)
@@ -2970,7 +2972,8 @@ impl AppView {
         }
         for e in order_entries(&level.entries) {
             let path = child_path(parent, &e.name);
-            let indent = px(10.0 + depth as f32 * 18.0);
+            use dsh_gpui::ui_metrics as fm;
+            let indent = px(fm::FILE_TREE_ROW_PAD_X_PX + depth as f32 * fm::FILE_TREE_INDENT_PX);
             match e.kind {
                 dsh_gpui::DirEntryKind::Directory => {
                     let expanded = self.dock.expanded.contains(&path);
@@ -2981,13 +2984,13 @@ impl AppView {
                             .id(SharedString::from(format!("dock-file-dir-{path}")))
                             .flex()
                             .items_center()
-                            .gap(px(6.0))
+                            .gap(px(fm::FILE_TREE_ROW_GAP_PX))
                             .pl(indent)
-                            .pr(px(10.0))
-                            .h(px(30.0))
-                            .rounded(px(10.0))
-                            .text_size(px(theme::FONT_ROW))
-                            .line_height(px(20.0))
+                            .pr(px(fm::FILE_TREE_ROW_PAD_X_PX))
+                            .py(px(fm::FILE_TREE_ROW_PAD_Y_PX))
+                            .rounded(px(fm::FILE_TREE_ROW_RADIUS_PX))
+                            .text_size(px(fm::FILE_TREE_FONT_PX))
+                            .line_height(px(fm::FILE_TREE_LEADING_PX))
                             .text_color(theme::t().text)
                             .cursor_pointer()
                             .hover(|st| st.bg(theme::t().hover))
@@ -3030,13 +3033,13 @@ impl AppView {
                             .id(SharedString::from(format!("dock-file-file-{path}")))
                             .flex()
                             .items_center()
-                            .gap(px(6.0))
+                            .gap(px(fm::FILE_TREE_ROW_GAP_PX))
                             .pl(indent)
-                            .pr(px(10.0))
-                            .h(px(30.0))
-                            .rounded(px(10.0))
-                            .text_size(px(theme::FONT_ROW))
-                            .line_height(px(20.0))
+                            .pr(px(fm::FILE_TREE_ROW_PAD_X_PX))
+                            .py(px(fm::FILE_TREE_ROW_PAD_Y_PX))
+                            .rounded(px(fm::FILE_TREE_ROW_RADIUS_PX))
+                            .text_size(px(fm::FILE_TREE_FONT_PX))
+                            .line_height(px(fm::FILE_TREE_LEADING_PX))
                             .text_color(theme::t().text)
                             .cursor_pointer()
                             .hover(|st| st.bg(theme::t().hover))
@@ -3069,11 +3072,11 @@ impl AppView {
                             .flex()
                             .items_center()
                             .pl(indent)
-                            .pr(px(10.0))
-                            .h(px(30.0))
-                            .rounded(px(10.0))
-                            .text_size(px(theme::FONT_ROW))
-                            .line_height(px(20.0))
+                            .pr(px(fm::FILE_TREE_ROW_PAD_X_PX))
+                            .py(px(fm::FILE_TREE_ROW_PAD_Y_PX))
+                            .rounded(px(fm::FILE_TREE_ROW_RADIUS_PX))
+                            .text_size(px(fm::FILE_TREE_FONT_PX))
+                            .line_height(px(fm::FILE_TREE_LEADING_PX))
                             .text_color(theme::t().text_3)
                             .child(
                                 div()

@@ -86,6 +86,24 @@ pub const FILE_TREE_LEADING_PX: f32 = 19.5; // 13 × 1.5
 pub const FILE_TREE_NOTE_FONT_PX: f32 = 12.0;
 pub const FILE_TREE_NOTE_PAD_Y_PX: f32 = 3.0;
 
+// ---- 预览头部路径行（上游 ui-sidebar-documentpreview TextPreview.module.css `.header`
+//      与 ui-sidebar-files FilesBody.module.css `.header`，两处同一条行；路径标签是
+//      ui-primitives PathLabel）----
+//
+// `.header { gap: 4px; height: 38px; padding: 0 6px 0 16px; border-bottom: 0.5px }`；
+// `.path { margin-right: 12px }`（与 4px gap 叠加，路径与首个工具钮相隔 16）。
+// 路径盒子 `flex: 1 1 auto; justify-content: flex-end; overflow: hidden`，内层
+// `.text { flex: none; margin-right: auto }`——auto 外边距吃满余量，**短路径贴左
+// （16px 处）、超长路径才靠右并被左侧裁掉**。rustdsh 旧实现只写 `justify_end`，
+// 短路径也被顶到右端。
+pub const PREVIEW_HEADER_H_PX: f32 = 38.0;
+pub const PREVIEW_HEADER_PAD_L_PX: f32 = 16.0;
+pub const PREVIEW_HEADER_PAD_R_PX: f32 = 6.0;
+pub const PREVIEW_HEADER_GAP_PX: f32 = 4.0;
+pub const PREVIEW_PATH_MARGIN_R_PX: f32 = 12.0;
+pub const PREVIEW_PATH_FONT_PX: f32 = 12.0;
+pub const PREVIEW_PATH_LEADING_PX: f32 = 18.0;
+
 // ---- 设置导航激活项填充（上游 design-platform.css 的色彩 token）----
 //
 // 上游侧栏/设置导航的选中格用 `--dsw-specific-sidebar-nav-item-active`：
@@ -373,5 +391,19 @@ mod tests {
         // .note：3px 竖内距、12px 字
         assert_eq!(FILE_TREE_NOTE_FONT_PX, 12.0);
         assert_eq!(FILE_TREE_NOTE_PAD_Y_PX, 3.0);
+    }
+
+    #[test]
+    fn preview_header_path_row_matches_upstream() {
+        // 上游 `.header`：高 38、左 16 / 右 6、gap 4、下边 0.5
+        assert_eq!(PREVIEW_HEADER_H_PX, 38.0);
+        assert_eq!(PREVIEW_HEADER_PAD_L_PX, 16.0);
+        assert_eq!(PREVIEW_HEADER_PAD_R_PX, 6.0);
+        assert_eq!(PREVIEW_HEADER_GAP_PX, 4.0);
+        // 路径与首个工具钮的实际间隔 = margin-right 12 + gap 4 = 16
+        // （上游注释：16px clear of reload）
+        assert_eq!(PREVIEW_PATH_MARGIN_R_PX + PREVIEW_HEADER_GAP_PX, 16.0);
+        // 路径标签 12px 字（上游 .path font-size: 12px）
+        assert_eq!(PREVIEW_PATH_FONT_PX, 12.0);
     }
 }

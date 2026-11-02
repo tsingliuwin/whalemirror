@@ -2804,20 +2804,20 @@ impl AppView {
                         .child("这个会话没有工作区目录。"),
                 );
         };
-        // 路径头：上游 pathPartsOf——尾段全墨，其余 directory 灰
-        let (dir_part, name_part) = match root.rsplit_once(['/', '\\']) {
-            Some((d, n)) if !n.is_empty() => (d.to_string(), n.to_string()),
-            _ => (String::new(), root.clone()),
-        };
+        // 路径头：上游 PathLabel/pathPartsOf——目录前缀（含原生分隔符）灰、
+        // 尾段全墨。内部规范路径用 `/` 拼，展示前归一成原生分隔符，避免
+        // `E:\rustproject/miaocr/` 这种混写。
+        let (dir_part, name_part) =
+            dsh_gpui::path_label::path_parts_of(&dsh_gpui::path_label::native_display_path(&root));
         let t_reload = this.clone();
         let header = div()
             .flex_none()
             .flex()
             .items_center()
-            .gap_1()
-            .h(px(38.0))
-            .pl(px(16.0))
-            .pr(px(6.0))
+            .gap(px(dsh_gpui::ui_metrics::PREVIEW_HEADER_GAP_PX))
+            .h(px(dsh_gpui::ui_metrics::PREVIEW_HEADER_H_PX))
+            .pl(px(dsh_gpui::ui_metrics::PREVIEW_HEADER_PAD_L_PX))
+            .pr(px(dsh_gpui::ui_metrics::PREVIEW_HEADER_PAD_R_PX))
             .border_b(px(0.5))
             .border_color(theme::t().border_l3)
             .child(
@@ -2825,21 +2825,22 @@ impl AppView {
                     .flex_1()
                     .min_w_0()
                     .flex()
-                    .justify_end()
+                    // 上游 `.path` 是 flex-end + 内层 auto 外边距（短路径贴左、
+                    // 超长才靠右并左裁）。GPUI/taffy 这套里 auto 外边距未吸收
+                    // 余量（实测），此处取 start：工作区根路径通常短，贴左与
+                    // 上游可见结果一致；超长根部路径的右裁差异见 backlog #75。
+                    .justify_start()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
+                    .mr(px(dsh_gpui::ui_metrics::PREVIEW_PATH_MARGIN_R_PX))
+                    .text_size(px(dsh_gpui::ui_metrics::PREVIEW_PATH_FONT_PX))
+                    .line_height(px(dsh_gpui::ui_metrics::PREVIEW_PATH_LEADING_PX))
                     .child(
                         div()
                             .flex_none()
                             .flex()
                             .when(!dir_part.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .text_color(theme::t().text_3)
-                                        .child(format!("{dir_part}/")),
-                                )
+                                d.child(div().text_color(theme::t().text_3).child(dir_part))
                             })
                             .child(div().text_color(theme::t().text).child(name_part)),
                     ),
@@ -7572,10 +7573,11 @@ impl AppView {
         let Some(f) = self.dock.files.get(fi) else {
             return div().flex_grow_1().min_h_0();
         };
-        let (dir_part, name_part) = match f.path.rsplit_once(['/', '\\']) {
-            Some((d, n)) if !n.is_empty() => (d.to_string(), n.to_string()),
-            _ => (String::new(), f.path.clone()),
-        };
+        // 上游 PathLabel：目录前缀含路径自身的分隔符（Windows 仍是 `\`），
+        // 不在拼接时补固定的 `/`。内部路径用 `/` 拼，展示前归一。
+        let (dir_part, name_part) = dsh_gpui::path_label::path_parts_of(
+            &dsh_gpui::path_label::native_display_path(&f.path),
+        );
         let t_wrap = this.clone();
         let t_reload = this.clone();
         let wrap_on = f.wrap;
@@ -7583,10 +7585,10 @@ impl AppView {
             .flex_none()
             .flex()
             .items_center()
-            .gap_1()
-            .h(px(38.0))
-            .pl(px(12.0))
-            .pr(px(6.0))
+            .gap(px(dsh_gpui::ui_metrics::PREVIEW_HEADER_GAP_PX))
+            .h(px(dsh_gpui::ui_metrics::PREVIEW_HEADER_H_PX))
+            .pl(px(dsh_gpui::ui_metrics::PREVIEW_HEADER_PAD_L_PX))
+            .pr(px(dsh_gpui::ui_metrics::PREVIEW_HEADER_PAD_R_PX))
             .border_b(px(0.5))
             .border_color(theme::t().border_l3)
             .child(
@@ -7594,17 +7596,24 @@ impl AppView {
                     .flex_1()
                     .min_w_0()
                     .flex()
+                    // 上游 `.path`：容器 flex-end，内层 `margin-right: auto`——
+                    // 短路径贴左（16px 处），超长路径才靠右并从左侧裁掉，
+                    // 文件名始终留在右端。GPUI/taffy 这套里 auto 外边距未
+                    // 吸收余量（实测短路径仍贴右），此处保留 flex-end：预览
+                    // 路径多为长路径，右贴+左裁与上游结果一致；短路径贴左
+                    // 的差异见 backlog #75。
                     .justify_end()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
+                    .mr(px(dsh_gpui::ui_metrics::PREVIEW_PATH_MARGIN_R_PX))
+                    .text_size(px(dsh_gpui::ui_metrics::PREVIEW_PATH_FONT_PX))
+                    .line_height(px(dsh_gpui::ui_metrics::PREVIEW_PATH_LEADING_PX))
                     .child(
                         div()
                             .flex_none()
                             .flex()
                             .when(!dir_part.is_empty(), |d| {
-                                d.child(div().text_color(theme::t().text_3).child(format!("{dir_part}/")))
+                                d.child(div().text_color(theme::t().text_3).child(dir_part))
                             })
                             .child(div().text_color(theme::t().text).child(name_part)),
                     ),

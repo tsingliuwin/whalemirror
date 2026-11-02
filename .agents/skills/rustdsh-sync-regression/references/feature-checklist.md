@@ -137,4 +137,6 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | I12 | 设置面板外壳（补缺 #72）：宽 800、高 min(800, 视口高−48)、半径 R28 | `cargo test -p dsh-gpui ui_metrics`；侧栏 ⚙ 打开设置 | 单测锁高度换算；实机面板高 = 视口−48（800 视口 → 752）、圆角为 R28 面板档 |
 | I13 | 设置导航选中格填充（补缺 #73）：亮 bluish-100 #EBEEF2 / 暗 bluish-750，且与 hover 档可分 | `cargo test -p dsh-gpui ui_metrics`；侧栏 ⚙ 打开设置 | 单测锁色值；实机选中格像素 = rgb(235,238,242) |
 | I14 | 侧栏 dock 文件树行几何（补缺 #74）：行高 19.5+2×5≈29.5（不设固定高）、半径 R12、每级缩进 18、gap 6、note 12/3 | `cargo test -p dsh-gpui ui_metrics`；中栏头部 📁 胶囊打开 dock 文件树 | 单测锁常量；实机行距 29/28px、悬停底板高 29 且角落内缩 11/7/5/4px（R12 曲线）、`crates`→子项图标左移 18px |
+
+| I15 | 预览/文件头路径标签（补缺 #75）：`pathPartsOf` 语义（目录含原生分隔符、去尾分隔符、纯分隔符全是名字）、头部行 38 / 左 16 / 右 6 / gap 4、路径 margin-right 12 | `cargo test -p dsh-gpui path_label` + `cargo test -p dsh-gpui ui_metrics`；dock 文件树点开 README.md | 6 测 + 1 测全绿；实机两处头部路径分隔符全为 `\`（无 `\`+`/` 混写），预览头路径右端到 wrap 钮 ≈16px |
 | I6 | 实机像素取证：激活条几何 | 截屏后按 accent 色扫描标签条下缘 | 激活条仅 2 行像素高、左右内缩 10px（条宽 = 文字宽，本机实测文字 629–653 / 条 628–653） |

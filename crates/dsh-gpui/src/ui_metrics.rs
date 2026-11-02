@@ -69,6 +69,24 @@ pub const TABS_GAP_PX: f32 = 20.0;
 pub const TABS_PAD_LEFT_PX: f32 = 8.0;
 pub const TABS_MARGIN_TOP_PX: f32 = 10.0;
 
+// ---- 设置面板外壳（上游 ui-settings-general SettingsRoot.module.css）----
+//
+// `.panel`：宽 800、高 `min(800px, calc(100vh - 2 * max(24px, overlay-top)))`、
+// 半径 `--dsw-radius-panel`（**R28**）、底色 `bg-layer-2`、elevation-prominent。
+// 面板高度取视口而非内容，是为了切换分节时不随内容抖动。rustdsh 旧实现把
+// 半径写成 24（非标尺档：面板档是 R28）且高度硬编码 700。
+pub const SETTINGS_PANEL_WIDTH_PX: f32 = 800.0;
+pub const SETTINGS_PANEL_MAX_HEIGHT_PX: f32 = 800.0;
+pub const SETTINGS_PANEL_AIR_PX: f32 = 24.0;
+pub const SETTINGS_PANEL_RADIUS_PX: f32 = RADIUS_PANEL_PX;
+
+/// 面板高度：`min(800, 视口高 − 2×24)`（上游面板上下各留 24px 空气）。
+pub fn settings_panel_height(viewport_h: f32) -> f32 {
+    (viewport_h - SETTINGS_PANEL_AIR_PX * 2.0)
+        .min(SETTINGS_PANEL_MAX_HEIGHT_PX)
+        .max(0.0)
+}
+
 // ---- 设置页行（上游 ui-primitives settings-form/fields.module.css）----
 //
 // `.field`：纵向 flex、`gap: 6px`、`padding: 12px 0`（行间距全在 padding，
@@ -285,5 +303,21 @@ mod tests {
         assert!((one_line - 68.7).abs() < 0.01, "row height {one_line}");
         // 分隔线 0.5px 发丝
         assert_eq!(FIELD_RULE_PX, 0.5);
+    }
+
+    #[test]
+    fn settings_panel_matches_upstream_shell() {
+        // 半径 = 面板档 R28（旧实现 24 不是标尺档位）
+        assert_eq!(SETTINGS_PANEL_RADIUS_PX, RADIUS_PANEL_PX);
+        assert_eq!(SETTINGS_PANEL_RADIUS_PX, 28.0);
+        assert_ne!(SETTINGS_PANEL_RADIUS_PX, 24.0);
+        assert_eq!(SETTINGS_PANEL_WIDTH_PX, 800.0);
+        // 高度取 min(800, vh − 48)：高视口封顶 800，矮视口让出上下各 24px
+        assert_eq!(settings_panel_height(2000.0), 800.0);
+        assert_eq!(settings_panel_height(848.0), 800.0);
+        assert_eq!(settings_panel_height(700.0), 652.0);
+        assert_eq!(settings_panel_height(400.0), 352.0);
+        // 极窄视口不给负高
+        assert_eq!(settings_panel_height(40.0), 0.0);
     }
 }

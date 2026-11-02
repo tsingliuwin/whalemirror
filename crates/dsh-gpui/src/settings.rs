@@ -132,12 +132,18 @@ pub(crate) fn render_settings(app: &AppView, this: Entity<AppView>, window: &mut
         .items_center()
         .justify_center()
         .child(
+            // 上游 SettingsRoot `.panel`：宽 800、高 min(800, vh−48)（高度取
+            // 视口而非内容——切换分节时面板不随内容抖动）、半径 R28
+            //（--dsw-radius-panel）、底色 bg-layer-2。曾用固定 700 高 + R24
+            //（24 不在标尺上，面板档是 R28）。
             div()
                 .relative()
-                .w(px(800.0))
-                .h(px(700.0))
+                .w(px(dsh_gpui::ui_metrics::SETTINGS_PANEL_WIDTH_PX))
+                .h(px(dsh_gpui::ui_metrics::settings_panel_height(
+                    window.viewport_size().height.into(),
+                )))
                 .flex()
-                .rounded(px(24.0))
+                .rounded(px(dsh_gpui::ui_metrics::SETTINGS_PANEL_RADIUS_PX))
                 .overflow_hidden()
                 .bg(tk.surface)
                 // web Modal 卡（alpha.4）：描边 l1 画进 elevation-prominent

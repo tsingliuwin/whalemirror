@@ -6488,7 +6488,9 @@ impl AppView {
                             .relative()
                             .flex()
                             .items_center()
-                            .pl(px(20.0))
+                            // 上游 `.workspaceRow { padding-left: 8px }`（曾写 20，
+                            // chip 整体右移 12px）
+                            .pl(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_ROW_PAD_L_PX))
                             .gap_1()
                             .child({
                                 let t = this.clone();
@@ -6498,14 +6500,20 @@ impl AppView {
                                     .and_then(|id| self.workspaces.iter().find(|w| &w.id == id))
                                     .map(|w| w.title.clone())
                                     .unwrap_or_else(|| "选择工作区".into());
+                                let menu_open = self.hero_ws_menu;
                                 div()
                                     .id("hero-ws-pick")
                                     .flex()
                                     .items_center()
-                                    .gap_1()
-                                    .px_2()
-                                    .h(px(28.0))
-                                    .rounded(px(14.0))
+                                    .gap(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_GAP_PX))
+                                    .px(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_PAD_X_PX))
+                                    .h(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_MIN_H_PX))
+                                    // 上游 `.workspace`：`--dsw-radius-sm` = R8
+                                    //（曾写 14，28px 高下成了胶囊），展开态与
+                                    // hover 同底色（aria-expanded 规则）
+                                    .rounded(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_RADIUS_PX))
+                                    .max_w(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_MAX_W_PX))
+                                    .map(|d| if menu_open { d.bg(theme::t().hover) } else { d })
                                     .cursor_pointer()
                                     .hover(|s| s.bg(theme::t().hover))
                                     .on_click(move |_, _, cx| {
@@ -6513,7 +6521,13 @@ impl AppView {
                                     })
                                     .child(Icon::new(IconName::FolderClosed).size(px(14.0)).text_color(theme::t().text))
                                     .child(
+                                        // 超宽省略号：上游 `.workspaceLabel` 的
+                                        // nowrap + ellipsis（长工作区名不撑破行）
                                         div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .text_size(px(theme::FONT_TAB))
                                             .line_height(px(theme::FONT_ROW_LEADING))
                                             .font_weight(FontWeight::MEDIUM)
@@ -6560,7 +6574,8 @@ impl AppView {
                             // 菜单上移动时不再波及下方的输入卡与 chip
                             .occlude()
                             .top(px(76.0))
-                            .left(px(20.0))
+                            // 与 chip 左缘对齐（行内距 8）
+                            .left(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_ROW_PAD_L_PX))
                             .w(px(220.0))
                             .v_flex()
                             .p(px(4.0))

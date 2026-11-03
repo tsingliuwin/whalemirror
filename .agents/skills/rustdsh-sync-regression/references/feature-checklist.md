@@ -140,4 +140,5 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 
 | I15 | 预览/文件头路径标签（补缺 #75）：`pathPartsOf` 语义（目录含原生分隔符、去尾分隔符、纯分隔符全是名字）、头部行 38 / 左 16 / 右 6 / gap 4、路径 margin-right 12 | `cargo test -p dsh-gpui path_label` + `cargo test -p dsh-gpui ui_metrics`；dock 文件树点开 README.md | 6 测 + 1 测全绿；实机两处头部路径分隔符全为 `\`（无 `\`+`/` 混写），预览头路径右端到 wrap 钮 ≈16px |
 | I16 | 设置页几何（补缺 #76）：导航 gap 4 / 格 40·R12·pad 9,12,16、行卡 R20·pad 12,14、卡间 8、标题块↔首卡 12、linkButton R8 | `cargo test -p dsh-gpui ui_metrics`；打开设置 → 模型页 | 单测全绿；实机导航行距 44（=40+4）、行卡左上圆角跨 ~8px（R20）、卡间 9px / 说明↔首卡 13px |
+| I17 | 空会话 hero 工作区行（补缺 #77）：行内距 8、chip R8/gap4/高28/pad8、cap 360 + 标签省略号、展开态着色 | `cargo test -p dsh-gpui ui_metrics`；点「新建会话」→ 点工作区 chip | 单测全绿；实机 chip 左缘距卡面 ~9px、展开填充首行左内缩 6px（R8）、下拉与 chip 同左缘 |
 | I6 | 实机像素取证：激活条几何 | 截屏后按 accent 色扫描标签条下缘 | 激活条仅 2 行像素高、左右内缩 10px（条宽 = 文字宽，本机实测文字 629–653 / 条 628–653） |

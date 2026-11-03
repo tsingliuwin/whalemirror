@@ -113,6 +113,23 @@ pub const PREVIEW_PATH_LEADING_PX: f32 = 18.0;
 pub const NAV_ACTIVE_FILL_LIGHT: (u8, u8, u8) = (235, 238, 242);
 pub const NAV_ACTIVE_FILL_DARK: (u8, u8, u8) = (67, 69, 74);
 
+// ---- 空会话 hero（上游 ui-conversation skeleton HeroShell.module.css）----
+//
+// `.stack { gap: 12px }`；`.headline` 26/32 wt500、列间距 10；`.workspaceRow`
+// `padding-left: 8px`；`.workspace` chip gap 4、`min-height: 28px`、`padding: 0 8px`、
+// `border-radius: --dsw-radius-sm` = **R8**（不是胶囊）、`max-width: min(100%, 360px)`，
+// 标签超宽省略号；展开态（aria-expanded）与 hover 同底色。
+pub const HERO_STACK_GAP_PX: f32 = 12.0;
+pub const HERO_HEADLINE_GAP_PX: f32 = 10.0;
+pub const HERO_HEADLINE_FONT_PX: f32 = 26.0;
+pub const HERO_HEADLINE_LEADING_PX: f32 = 32.0;
+pub const HERO_WORKSPACE_ROW_PAD_L_PX: f32 = 8.0;
+pub const HERO_WORKSPACE_GAP_PX: f32 = 4.0;
+pub const HERO_WORKSPACE_MAX_W_PX: f32 = 360.0;
+pub const HERO_WORKSPACE_MIN_H_PX: f32 = 28.0;
+pub const HERO_WORKSPACE_PAD_X_PX: f32 = 8.0;
+pub const HERO_WORKSPACE_RADIUS_PX: f32 = RADIUS_SM_PX;
+
 // ---- 设置导航 + 提供方行卡（上游 ui-settings-general SettingsRoot `.navCell`/
 //       `.navList` 与 ui-settings-models ModelsSection `.rowCard`）----
 //
@@ -463,5 +480,25 @@ mod tests {
         assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
         assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
         assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
+    }
+
+    #[test]
+    fn hero_matches_upstream_shell() {
+        // `.stack { gap: 12px }`、`.headline` 26/32 wt500、列间距 10
+        assert_eq!(HERO_STACK_GAP_PX, 12.0);
+        assert_eq!(HERO_HEADLINE_FONT_PX, 26.0);
+        assert_eq!(HERO_HEADLINE_LEADING_PX, 32.0);
+        assert_eq!(HERO_HEADLINE_GAP_PX, 10.0);
+        // `.workspaceRow { padding-left: 8px }`（曾写 20，chip 整体右移 12）
+        assert_eq!(HERO_WORKSPACE_ROW_PAD_L_PX, 8.0);
+        // `.workspace`：gap 4、min-height 28、pad 0 8、R8（曾写 14 胶囊）、cap 360
+        assert_eq!(HERO_WORKSPACE_GAP_PX, 4.0);
+        assert_eq!(HERO_WORKSPACE_MIN_H_PX, 28.0);
+        assert_eq!(HERO_WORKSPACE_PAD_X_PX, 8.0);
+        assert_eq!(HERO_WORKSPACE_RADIUS_PX, RADIUS_SM_PX);
+        assert_eq!(HERO_WORKSPACE_RADIUS_PX, 8.0);
+        assert_eq!(HERO_WORKSPACE_MAX_W_PX, 360.0);
+        // chip 里文字到卡面左缘 = 行 8 + chip 8 = 16（上游 figma 75:8208）
+        assert_eq!(HERO_WORKSPACE_ROW_PAD_L_PX + HERO_WORKSPACE_PAD_X_PX, 16.0);
     }
 }

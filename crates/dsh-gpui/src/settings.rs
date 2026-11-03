@@ -34,8 +34,9 @@ pub(crate) fn render_settings(app: &AppView, this: Entity<AppView>, window: &mut
         )
         .child(
             div()
+                // 上游 `.navList { gap: 4px }`（曾写 8）
                 .v_flex()
-                .gap_1()
+                .gap(px(dsh_gpui::ui_metrics::SETTINGS_NAV_GAP_PX))
                 .child(nav_cell("set-nav-general", IconName::Settings, "通用设置", app.settings_tab == SettingsTab::General, {
                     let t = this.clone();
                     move |_, _, cx| t.update(cx, |v, cx| { v.settings_tab = SettingsTab::General; cx.notify(); })
@@ -263,18 +264,21 @@ fn nav_cell(
     active: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    use dsh_gpui::ui_metrics as fm;
     let tk = theme::t();
     div()
         .id(id)
-        .h(px(40.0))
+        // 上游 `.navCell`：高 40、R12、pad(9,16,9,12)、14px/400 lh22
+        .h(px(fm::SETTINGS_NAV_CELL_H_PX))
         .flex()
         .items_center()
         .gap_2()
-        .pl_3()
-        .pr_4()
-        .rounded(px(12.0))
-        .text_size(px(theme::FONT_ROW))
-        .line_height(px(22.0))
+        .pl(px(fm::SETTINGS_NAV_CELL_PAD_L_PX))
+        .pr(px(fm::SETTINGS_NAV_CELL_PAD_R_PX))
+        .py(px(fm::SETTINGS_NAV_CELL_PAD_Y_PX))
+        .rounded(px(fm::SETTINGS_NAV_CELL_RADIUS_PX))
+        .text_size(px(fm::SETTINGS_NAV_CELL_FONT_PX))
+        .line_height(px(fm::SETTINGS_NAV_CELL_LEADING_PX))
         .text_color(tk.text)
         // 上游 .navCell.active 用 --dsw-specific-sidebar-nav-item-active
         // （亮 bluish-100 / 暗 bluish-750），与 hover 一档分离；曾借 elevated，
@@ -691,14 +695,23 @@ fn models_page(app: &AppView, this: &Entity<AppView>, _window: &mut Window, cx: 
                 }))
         }
     };
+    // 上游 `.section { gap: 12px }` + `.rows { margin: 12px 0 0; gap: 8px }`：
+    // 外壳 gap 12、说明块与首卡 12、卡之间 8（原实现 pt_2/gap_3 = 8/12，
+    // 两处都错位）。添加卡是 `</ul>` 之后的兄弟节点，不是行卡，故单独落
+    // 在 gap 12 的外壳层。
     div()
         .v_flex()
         .pt_2()
-        .gap_3()
+        .gap(px(dsh_gpui::ui_metrics::SETTINGS_SECTION_GAP_PX))
         .child(page_title("模型"))
         .child(page_intro("填入各提供方的 API 密钥即可使用其模型。"))
-        .child(deepseek_row)
-        .children(custom_rows)
+        .child(
+            div()
+                .v_flex()
+                .gap(px(dsh_gpui::ui_metrics::PROVIDER_ROWS_GAP_PX))
+                .child(deepseek_row)
+                .children(custom_rows),
+        )
         .child(add_block)
 }
 
@@ -832,13 +845,14 @@ fn provider_row(
 
     let mut card = div()
         .v_flex()
-        .gap_3()
-        // web ModelsSection .rowCard（alpha.4）：r16、0.5px、色阶 l2→l4
-        .rounded(px(16.0))
+        .gap(px(dsh_gpui::ui_metrics::PROVIDER_ROW_GAP_PX))
+        // web ModelsSection .rowCard（alpha.4）：`--dsw-radius-xl` = R20、
+        // 0.5px 发丝 l4、pad(12,14)、gap 12（曾写 R16）
+        .rounded(px(dsh_gpui::ui_metrics::PROVIDER_ROW_RADIUS_PX))
         .border(px(0.5))
         .border_color(tk.border_l4)
-        .px(px(14.0))
-        .py_3()
+        .px(px(dsh_gpui::ui_metrics::PROVIDER_ROW_PAD_X_PX))
+        .py(px(dsh_gpui::ui_metrics::PROVIDER_ROW_PAD_Y_PX))
         .child(head);
 
     // 展开的编辑卡（web rowCard 内嵌 ProviderEditor）
@@ -1664,8 +1678,11 @@ fn fetch_error_line(message: &str) -> Div {
 
 /// web ModelListEditor 的 fetch linkButton：busy 显「正在询问提供方…」；
 /// 不可探测（API 地址为空）时禁用——web 以 title 提示 fetchNeedsBaseUrl，
-/// 此处无 tooltip 通道，禁用态同款置灰。
+/// 此处无 tooltip 通道，禁用态同款置灰。几何照抄上游 ModelsSection
+/// `.linkButton`：高 28、pad 0 10px、`--dsw-radius-sm`（R8）、12px 字、
+/// hover 变 label-secondary + hover 底。
 fn fetch_link(app: &AppView, this: &Entity<AppView>, target: &FetchTarget, cx: &App) -> Stateful<Div> {
+    use dsh_gpui::ui_metrics as fm;
     let tk = theme::t();
     let busy = app.fetch_pending.as_ref() == Some(target);
     let askable = app.fetch_askable(target, cx);
@@ -1675,13 +1692,13 @@ fn fetch_link(app: &AppView, this: &Entity<AppView>, target: &FetchTarget, cx: &
     };
     let base = div()
         .id(SharedString::from(format!("fetch-models-{key}")))
-        .h(px(28.0))
-        .px(px(10.0))
+        .h(px(fm::LINK_BUTTON_H_PX))
+        .px(px(fm::LINK_BUTTON_PAD_X_PX))
         .flex()
         .items_center()
-        .rounded(px(14.0))
-        .text_size(px(theme::FONT_CAPTION))
-        .line_height(px(theme::FONT_CAPTION_LEADING))
+        .rounded(px(fm::LINK_BUTTON_RADIUS_PX))
+        .text_size(px(fm::LINK_BUTTON_FONT_PX))
+        .line_height(px(fm::LINK_BUTTON_LEADING_PX))
         .child(if busy { "正在询问提供方…" } else { "获取可用模型" });
     if busy || !askable {
         base.text_color(tk.text_3)

@@ -113,8 +113,37 @@ pub const PREVIEW_PATH_LEADING_PX: f32 = 18.0;
 pub const NAV_ACTIVE_FILL_LIGHT: (u8, u8, u8) = (235, 238, 242);
 pub const NAV_ACTIVE_FILL_DARK: (u8, u8, u8) = (67, 69, 74);
 
-// ---- 设置面板外壳（上游 ui-settings-general SettingsRoot.module.css）----
+// ---- 设置导航 + 提供方行卡（上游 ui-settings-general SettingsRoot `.navCell`/
+//       `.navList` 与 ui-settings-models ModelsSection `.rowCard`）----
 //
+// 上游 `.navList { gap: 4px }`（不是 8），`.navCell` 164×40、R12、pad(9,16,9,12)、
+// 14px/400 lh22、选中 fill `nav-item-active`（已由 #73 落）。
+// 上游 `.rowCard`（提供方行卡）`border-radius: --dsw-radius-xl` = **R20**
+//（不是 R16），描边 0.5px l4、底色 `bg-layer-2`、pad(12,14)、gap 12。
+pub const SETTINGS_NAV_GAP_PX: f32 = 4.0;
+pub const SETTINGS_NAV_CELL_H_PX: f32 = 40.0;
+pub const SETTINGS_NAV_CELL_RADIUS_PX: f32 = RADIUS_MD_PX;
+pub const SETTINGS_NAV_CELL_PAD_Y_PX: f32 = 9.0;
+pub const SETTINGS_NAV_CELL_PAD_L_PX: f32 = 12.0;
+pub const SETTINGS_NAV_CELL_PAD_R_PX: f32 = 16.0;
+pub const SETTINGS_NAV_CELL_FONT_PX: f32 = 14.0;
+pub const SETTINGS_NAV_CELL_LEADING_PX: f32 = 22.0;
+pub const PROVIDER_ROW_RADIUS_PX: f32 = RADIUS_XL_PX;
+pub const PROVIDER_ROW_PAD_X_PX: f32 = 14.0;
+pub const PROVIDER_ROW_PAD_Y_PX: f32 = 12.0;
+pub const PROVIDER_ROW_GAP_PX: f32 = 12.0;
+// 上游 `.rows`：提供方卡之间 8px（外壳 `.section { gap: 12px }` 管标题/说明
+// 块 ↔ 首卡，以及 rows 块 ↔ 添加卡）
+pub const PROVIDER_ROWS_GAP_PX: f32 = 8.0;
+pub const SETTINGS_SECTION_GAP_PX: f32 = 12.0;
+// 上游 linkButton（「获取可用模型」/「全选」等 ghost-sm 钮）：R8、28、pad 0 10
+pub const LINK_BUTTON_H_PX: f32 = 28.0;
+pub const LINK_BUTTON_PAD_X_PX: f32 = 10.0;
+pub const LINK_BUTTON_RADIUS_PX: f32 = RADIUS_SM_PX;
+pub const LINK_BUTTON_FONT_PX: f32 = 12.0;
+pub const LINK_BUTTON_LEADING_PX: f32 = 18.0;
+
+// ---- 设置面板外壳（上游 ui-settings-general SettingsRoot.module.css）----//
 // `.panel`：宽 800、高 `min(800px, calc(100vh - 2 * max(24px, overlay-top)))`、
 // 半径 `--dsw-radius-panel`（**R28**）、底色 `bg-layer-2`、elevation-prominent。
 // 面板高度取视口而非内容，是为了切换分节时不随内容抖动。rustdsh 旧实现把
@@ -405,5 +434,34 @@ mod tests {
         assert_eq!(PREVIEW_PATH_MARGIN_R_PX + PREVIEW_HEADER_GAP_PX, 16.0);
         // 路径标签 12px 字（上游 .path font-size: 12px）
         assert_eq!(PREVIEW_PATH_FONT_PX, 12.0);
+    }
+
+    #[test]
+    fn settings_nav_and_provider_rows_match_upstream() {
+        // `.navList { gap: 4px }`：曾写 8（差一档）
+        assert_eq!(SETTINGS_NAV_GAP_PX, 4.0);
+        // `.navCell`：164×40、R12、pad(9,16,9,12)、14px/400 lh22
+        assert_eq!(SETTINGS_NAV_CELL_H_PX, 40.0);
+        assert_eq!(SETTINGS_NAV_CELL_RADIUS_PX, RADIUS_MD_PX);
+        assert_eq!(SETTINGS_NAV_CELL_PAD_Y_PX, 9.0);
+        assert_eq!(SETTINGS_NAV_CELL_PAD_L_PX, 12.0);
+        assert_eq!(SETTINGS_NAV_CELL_PAD_R_PX, 16.0);
+        assert_eq!(SETTINGS_NAV_CELL_FONT_PX, 14.0);
+        assert_eq!(SETTINGS_NAV_CELL_LEADING_PX, 22.0);
+        // `.rowCard`：`--dsw-radius-xl` = **R20**（曾写 16），pad(12,14)、gap 12
+        assert_eq!(PROVIDER_ROW_RADIUS_PX, RADIUS_XL_PX);
+        assert_eq!(PROVIDER_ROW_RADIUS_PX, 20.0);
+        assert_eq!(PROVIDER_ROW_PAD_X_PX, 14.0);
+        assert_eq!(PROVIDER_ROW_PAD_Y_PX, 12.0);
+        assert_eq!(PROVIDER_ROW_GAP_PX, 12.0);
+        // `.rows`：卡间 8；`.section` 外壳 gap 12（标题块↔首卡、rows↔添加卡）
+        assert_eq!(PROVIDER_ROWS_GAP_PX, 8.0);
+        assert_eq!(SETTINGS_SECTION_GAP_PX, 12.0);
+        // `.linkButton`：R8 / 28 / pad 0 10 / 12-18
+        assert_eq!(LINK_BUTTON_RADIUS_PX, RADIUS_SM_PX);
+        assert_eq!(LINK_BUTTON_H_PX, 28.0);
+        assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
+        assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
+        assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
     }
 }

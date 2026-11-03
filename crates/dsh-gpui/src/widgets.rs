@@ -272,7 +272,9 @@ pub(crate) fn tip_keys(
     move |_window, cx| cx.new(|_| TipKeys { text, keys }).into()
 }
 
-/// 28px 圆形图标按钮（web .iconButton）。
+/// 28px 方形图标按钮（web `.iconButton` / FrontendControls `.tool`：28×28、
+/// 圆角 `--dsw-radius-sm` = **R8**）。曾用 `rounded_full()` 画成圆形——上游
+/// 只有「添加附件 / 队列行动作 / 发送」这三类 999px 胶囊钮，其余图标钮都是 R8。
 pub(crate) fn icon_btn(
     id: &'static str,
     icon: IconName,
@@ -287,7 +289,34 @@ pub(crate) fn icon_btn(
         .flex()
         .items_center()
         .justify_center()
+        .rounded(px(dsh_gpui::ui_metrics::RADIUS_SM_PX))
+        .text_color(color)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::t().hover))
+        .tooltip(tip(tooltip))
+        .on_click(on_click)
+        .child(Icon::new(icon).size(px(16.0)))
+}
+
+/// 28px 胶囊图标按钮（上游 InputBar `.add`：999px 正圆 + `--dsw-specific-selector`
+/// 填充 + 主色字形）。只给输入卡「+」这一类用；其余单图标钮走 icon_btn 的 R8。
+pub(crate) fn icon_btn_round(
+    id: &'static str,
+    icon: IconName,
+    color: impl Into<Hsla>,
+    fill: impl Into<gpui::Rgba>,
+    tooltip: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(dsh_gpui::ui_metrics::ICON_BUTTON_SIZE_PX))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
         .rounded_full()
+        .bg(fill.into())
         .text_color(color)
         .cursor_pointer()
         .hover(|s| s.bg(theme::t().hover))
@@ -313,7 +342,7 @@ pub(crate) fn svg_icon_btn(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_full()
+        .rounded(px(dsh_gpui::ui_metrics::RADIUS_SM_PX))
         .text_color(color)
         .cursor_pointer()
         .hover(|s| s.bg(theme::t().hover))

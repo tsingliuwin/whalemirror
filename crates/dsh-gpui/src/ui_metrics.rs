@@ -113,6 +113,18 @@ pub const PREVIEW_PATH_LEADING_PX: f32 = 18.0;
 pub const NAV_ACTIVE_FILL_LIGHT: (u8, u8, u8) = (235, 238, 242);
 pub const NAV_ACTIVE_FILL_DARK: (u8, u8, u8) = (67, 69, 74);
 
+// ---- 28px 图标按钮（上游 ui-sidebar HeaderLeadingControls `.iconButton` /
+//      SidebarRoot `.tool`、ui-sidebar-right `.tool`、ui-conversation InputBar `.select`）----
+//
+// 上游这类「单图标小方钮」一律 28×28 + `--dsw-radius-sm` = **R8**；只有三类
+// 控件是 999px 圆/胶囊：输入卡的「+」(28px)、队列行 `.action`(28px)、主发送
+// 钮 `.primary`(34px)。rustdsh 的 icon_btn/svg_icon_btn 曾用 rounded_full，
+// 侧栏收起/搜索/视图/加工作区、详情开合、composer「+」全被画成了圆。
+pub const ICON_BUTTON_SIZE_PX: f32 = 28.0;
+pub const ICON_BUTTON_RADIUS_PX: f32 = RADIUS_SM_PX;
+/// 上游主发送/停止钮（InputBar `.primary`）：34px 正圆、999px。
+pub const PRIMARY_SEND_SIZE_PX: f32 = 34.0;
+
 // ---- 空会话 hero（上游 ui-conversation skeleton HeroShell.module.css）----
 //
 // `.stack { gap: 12px }`；`.headline` 26/32 wt500、列间距 10；`.workspaceRow`
@@ -480,6 +492,18 @@ mod tests {
         assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
         assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
         assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
+    }
+
+    #[test]
+    fn icon_buttons_are_rounded_squares_not_circles() {
+        // 上游 28px 单图标钮：R8（`--dsw-radius-sm`），不是圆
+        assert_eq!(ICON_BUTTON_SIZE_PX, 28.0);
+        assert_eq!(ICON_BUTTON_RADIUS_PX, RADIUS_SM_PX);
+        assert_eq!(ICON_BUTTON_RADIUS_PX, 8.0);
+        // 半径 < 边长一半 → 直角可见，排除 rounded_full 的直径圆
+        assert!(ICON_BUTTON_RADIUS_PX < ICON_BUTTON_SIZE_PX / 2.0);
+        // 主发送钮仍是正圆（34px + 999px 胶囊 ≈ 直径）
+        assert_eq!(PRIMARY_SEND_SIZE_PX, 34.0);
     }
 
     #[test]

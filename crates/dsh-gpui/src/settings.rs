@@ -95,7 +95,8 @@ pub(crate) fn render_settings(app: &AppView, this: Entity<AppView>, window: &mut
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_full()
+                // 上游 SettingsRoot `.close`：28px + `--dsw-radius-sm` = R8（曾画成圆）
+                .rounded(px(dsh_gpui::ui_metrics::ICON_BUTTON_RADIUS_PX))
                 .text_color(tk.text)
                 .cursor_pointer()
                 .hover(|s| s.bg(tk.hover))

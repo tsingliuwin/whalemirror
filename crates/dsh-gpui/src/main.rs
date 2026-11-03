@@ -7176,7 +7176,8 @@ impl AppView {
             .child({
                 // 加号 = 命令菜单开关（上游 input.commands；locked 态无效）
                 let t_cmd = this.downgrade();
-                icon_btn("composer-add", IconName::Plus, theme::t().text, "添加文件或调用指令", move |_, _, cx| {
+                // 上游 InputBar `.add`：28px 正圆 + selector 填充（唯一一类圆形小钮）
+                widgets::icon_btn_round("composer-add", IconName::Plus, theme::t().text, theme::t().surface_2, "添加文件或调用指令", move |_, _, cx| {
                     if locked {
                         return;
                     }

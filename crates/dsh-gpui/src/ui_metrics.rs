@@ -113,6 +113,15 @@ pub const PREVIEW_PATH_LEADING_PX: f32 = 18.0;
 pub const NAV_ACTIVE_FILL_LIGHT: (u8, u8, u8) = (235, 238, 242);
 pub const NAV_ACTIVE_FILL_DARK: (u8, u8, u8) = (67, 69, 74);
 
+// ---- composer 输入卡（上游 ui-conversation skeleton InputBar.module.css `.card`）----
+//
+// `.card { gap: 12px; padding-top: 8px; border-radius: --dsw-radius-panel }`——
+// 面板档 **R28**。rustdsh 曾写 `rounded(22)`（22 不在半径标尺上）与 `pt_2p5`
+//（10），卡角比上游收得早、正文首行低 2px。
+pub const COMPOSER_CARD_RADIUS_PX: f32 = RADIUS_PANEL_PX;
+pub const COMPOSER_CARD_PAD_TOP_PX: f32 = 8.0;
+pub const COMPOSER_CARD_GAP_PX: f32 = 12.0;
+
 // ---- 28px 图标按钮（上游 ui-sidebar HeaderLeadingControls `.iconButton` /
 //      SidebarRoot `.tool`、ui-sidebar-right `.tool`、ui-conversation InputBar `.select`）----
 //
@@ -492,6 +501,15 @@ mod tests {
         assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
         assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
         assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
+    }
+
+    #[test]
+    fn composer_card_matches_upstream() {
+        // 上游 `.card`：`--dsw-radius-panel` = R28（曾写 22，标尺外数值）
+        assert_eq!(COMPOSER_CARD_RADIUS_PX, RADIUS_PANEL_PX);
+        assert_eq!(COMPOSER_CARD_RADIUS_PX, 28.0);
+        assert_eq!(COMPOSER_CARD_PAD_TOP_PX, 8.0);
+        assert_eq!(COMPOSER_CARD_GAP_PX, 12.0);
     }
 
     #[test]

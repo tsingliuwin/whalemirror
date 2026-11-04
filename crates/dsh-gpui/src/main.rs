@@ -7344,9 +7344,10 @@ impl AppView {
             .mx_auto()
             .flex_none()
             .v_flex()
-            .gap_3()
-            .pt_2p5()
-            .rounded(px(22.0))
+            .gap(px(dsh_gpui::ui_metrics::COMPOSER_CARD_GAP_PX))
+            .pt(px(dsh_gpui::ui_metrics::COMPOSER_CARD_PAD_TOP_PX))
+            // 上游 `.card`：`--dsw-radius-panel` = R28（曾写 22，不在标尺上）
+            .rounded(px(dsh_gpui::ui_metrics::COMPOSER_CARD_RADIUS_PX))
             // web InputBar.card（alpha.4）：border 撤掉，描边统一 l2 画进
             // elevation-soft（亮色主题描边由 l1 弱化档校正回 l2 档）
             .bg(theme::t().surface)

@@ -142,4 +142,5 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | I16 | 设置页几何（补缺 #76）：导航 gap 4 / 格 40·R12·pad 9,12,16、行卡 R20·pad 12,14、卡间 8、标题块↔首卡 12、linkButton R8 | `cargo test -p dsh-gpui ui_metrics`；打开设置 → 模型页 | 单测全绿；实机导航行距 44（=40+4）、行卡左上圆角跨 ~8px（R20）、卡间 9px / 说明↔首卡 13px |
 | I17 | 空会话 hero 工作区行（补缺 #77）：行内距 8、chip R8/gap4/高28/pad8、cap 360 + 标签省略号、展开态着色 | `cargo test -p dsh-gpui ui_metrics`；点「新建会话」→ 点工作区 chip | 单测全绿；实机 chip 左缘距卡面 ~9px、展开填充首行左内缩 6px（R8）、下拉与 chip 同左缘 |
 | I18 | 28px 图标钮族（补缺 #78）：R8 方钮（非圆），composer「+」为 999px 圆 + selector 底，发送 34px 圆 | `cargo test -p dsh-gpui ui_metrics`；悬停侧栏搜索钮 | 单测全绿；实机搜索钮 hover 底板首行左内缩 5px（R8）、「+」为灰底正圆 |
+| I19 | composer 输入卡（补缺 #79）：圆角 R28（面板档）、首行内距 8、行距 12 | `cargo test -p dsh-gpui ui_metrics`；任意会话底部输入卡 | 单测全绿；实机卡角曲线跨度 ~31px（R28）、改前改后差异只在两角与 2px 顶边带 |
 | I6 | 实机像素取证：激活条几何 | 截屏后按 accent 色扫描标签条下缘 | 激活条仅 2 行像素高、左右内缩 10px（条宽 = 文字宽，本机实测文字 629–653 / 条 628–653） |

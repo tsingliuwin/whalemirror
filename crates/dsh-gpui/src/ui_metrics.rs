@@ -113,6 +113,20 @@ pub const PREVIEW_PATH_LEADING_PX: f32 = 18.0;
 pub const NAV_ACTIVE_FILL_LIGHT: (u8, u8, u8) = (235, 238, 242);
 pub const NAV_ACTIVE_FILL_DARK: (u8, u8, u8) = (67, 69, 74);
 
+// ---- 菜单行（上游 ui-primitives Menu.module.css `.item`）----
+//
+// `.item { gap: 6px; min-height: 34px; padding: 6px 8px; border-radius:
+// --dsw-radius-md; font-size: 13px; line-height: 20px }`。rustdsh 三处菜单
+// （模型 / 权限 / 命令）各写一套：半径 10（标尺外）、左右内距 10（上游 8）、
+// 命令菜单行高 40（上游 34）、字号 14/22（上游 13/20）。
+pub const MENU_ENTRY_MIN_H_PX: f32 = 34.0;
+pub const MENU_ENTRY_PAD_X_PX: f32 = 8.0;
+pub const MENU_ENTRY_PAD_Y_PX: f32 = 6.0;
+pub const MENU_ENTRY_GAP_PX: f32 = 6.0;
+pub const MENU_ENTRY_RADIUS_PX: f32 = RADIUS_MD_PX;
+pub const MENU_ENTRY_FONT_PX: f32 = 13.0;
+pub const MENU_ENTRY_LEADING_PX: f32 = 20.0;
+
 // ---- 用户消息气泡（上游 ui-primitives UserMessageBubble.module.css `.bubble`）----
 //
 // `.bubble { border-radius: --dsw-radius-xl; padding: 10px 16px }` = **R20**、
@@ -510,6 +524,39 @@ mod tests {
         assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
         assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
         assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
+    }
+
+    #[test]
+    fn menu_rows_match_upstream() {
+        // 上游 `.item`：min-height 34、pad 6/8、gap 6、R12、13/20
+        assert_eq!(MENU_ENTRY_MIN_H_PX, 34.0);
+        assert_eq!(MENU_ENTRY_PAD_X_PX, 8.0);
+        assert_eq!(MENU_ENTRY_PAD_Y_PX, 6.0);
+        assert_eq!(MENU_ENTRY_GAP_PX, 6.0);
+        assert_eq!(MENU_ENTRY_RADIUS_PX, RADIUS_MD_PX);
+        assert_eq!(MENU_ENTRY_RADIUS_PX, 12.0);
+        assert_eq!(MENU_ENTRY_FONT_PX, 13.0);
+        assert_eq!(MENU_ENTRY_LEADING_PX, 20.0);
+        // 6 + 20 + 6 = 32 <= 34（min-height 由内距与行高共同决定）
+        assert!(MENU_ENTRY_PAD_Y_PX * 2.0 + MENU_ENTRY_LEADING_PX <= MENU_ENTRY_MIN_H_PX);
+    }
+
+    #[test]
+    fn menu_row_box_uses_the_upstream_padding_not_a_pill_inset() {
+        // 行左右内距 8：菜单卡 padding 4 + 行内距 8 → 文本距卡缘 12。
+        // 曾经是 10（文本距卡缘 14），与上游差 2px。
+        assert_eq!(MENU_ENTRY_PAD_X_PX, 8.0);
+        assert_eq!(MENU_ENTRY_PAD_X_PX + MENU_PAD_PX, 12.0);
+        // R12 圆角内缩序列（半径 12 的圆在前 8 行的水平内缩，向上取整）：
+        // 12-sqrt(144-(12-dy)^2)；dy=0 → 12，实际用 4 点采样核对单调收敛
+        let radius = MENU_ENTRY_RADIUS_PX;
+        let inset = |dy: f32| radius - (radius * radius - (radius - dy) * (radius - dy)).max(0.0).sqrt();
+        for dy in 0..8 {
+            let d = inset(dy as f32);
+            assert!(d <= radius, "dy={dy} 内缩不应超过半径");
+        }
+        assert!(inset(0.0) > inset(4.0), "圆角内缩应单调递减");
+        assert!(inset(11.0) < 1.5, "接近半径高度时内缩应收敛到 0");
     }
 
     #[test]

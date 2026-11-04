@@ -6843,16 +6843,7 @@ impl AppView {
             let desc = r.desc;
             let t_row = this.clone();
             menu = menu.child(
-                div()
-                    .id(SharedString::from(format!("cmd-{}", name)))
-                    .h(px(40.0))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px(px(10.0))
-                    .rounded(px(10.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::t().hover))
+                menu_item_base(SharedString::from(format!("cmd-{}", name)))
                     .on_click(move |_, window, cx| {
                         match name {
                             "file" => Self::pick_attachments(&t_row.downgrade(), cx),
@@ -7024,18 +7015,8 @@ impl AppView {
                     let pid = p.id.clone();
                     let mid = m.id.clone();
                     menu = menu.child(
-                        div()
-                            .id(SharedString::from(format!("model-{}-{}", p.id, m.id)))
-                            .h(px(34.0))
-                            .flex()
-                            .items_center()
-                            .px(px(10.0))
-                            .rounded(px(10.0))
-                            .text_size(px(theme::FONT_ROW))
-                            .line_height(px(22.0))
+                        menu_item_base(SharedString::from(format!("model-{}-{}", p.id, m.id)))
                             .text_color(theme::t().text)
-                            .hover(|s| s.bg(theme::t().hover))
-                            .cursor_pointer()
                             .on_click(move |_, _, cx| {
                                 t.update(cx, |v, cx| v.switch_model(pid.clone(), mid.clone(), cx));
                             })
@@ -7123,19 +7104,8 @@ impl AppView {
                 let t_pick = this.clone();
                 let key_s = (*key).to_string();
                 menu = menu.child(
-                    div()
-                        .id(SharedString::from(format!("perm-{}", key)))
-                        .h(px(34.0))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px(px(10.0))
-                        .rounded(px(10.0))
-                        .text_size(px(theme::FONT_ROW))
-                        .line_height(px(22.0))
+                    menu_item_base(SharedString::from(format!("perm-{}", key)))
                         .text_color(theme::t().text)
-                        .hover(|s| s.bg(theme::t().hover))
-                        .cursor_pointer()
                         .on_click(move |_, _, cx| {
                             t_pick.update(cx, |v, cx| {
                                 v.permission_menu = false;
@@ -7916,6 +7886,25 @@ impl AppView {
 
 
 
+
+/// 菜单行（上游 ui-primitives Menu `.item`：min-h 34、pad 6/8、gap 6、
+/// R12、13/20）。三处菜单曾各写一套（半径 10、左右 10、行高 40、14/22）。
+fn menu_item_base(id: impl Into<SharedString>) -> Stateful<Div> {
+    use dsh_gpui::ui_metrics as m;
+    div()
+        .id(id.into())
+        .min_h(px(m::MENU_ENTRY_MIN_H_PX))
+        .flex()
+        .items_center()
+        .gap(px(m::MENU_ENTRY_GAP_PX))
+        .px(px(m::MENU_ITEM_PAD_X_PX))
+        .py(px(m::MENU_ITEM_PAD_Y_PX))
+        .rounded(px(m::MENU_ITEM_RADIUS_PX))
+        .text_size(px(m::MENU_ITEM_FONT_PX))
+        .line_height(px(m::MENU_ENTRY_LEADING_PX))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::t().hover))
+}
 
 /// 详情面板散文块（消息正文/思考：13/20 逐行 div 保换行——gpui 0.2.2 无
 /// pre-wrap；工具面走 code_card）。

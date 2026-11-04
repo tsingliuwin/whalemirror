@@ -113,6 +113,15 @@ pub const PREVIEW_PATH_LEADING_PX: f32 = 18.0;
 pub const NAV_ACTIVE_FILL_LIGHT: (u8, u8, u8) = (235, 238, 242);
 pub const NAV_ACTIVE_FILL_DARK: (u8, u8, u8) = (67, 69, 74);
 
+// ---- 用户消息气泡（上游 ui-primitives UserMessageBubble.module.css `.bubble`）----
+//
+// `.bubble { border-radius: --dsw-radius-xl; padding: 10px 16px }` = **R20**、
+// 上下 10 / 左右 16。rustdsh 曾写 `rounded(22)`（标尺外数值）与 `px_4/py(10)`
+//（左右 16 已对，半径早收 2px）。
+pub const USER_BUBBLE_RADIUS_PX: f32 = RADIUS_XL_PX;
+pub const USER_BUBBLE_PAD_X_PX: f32 = 16.0;
+pub const USER_BUBBLE_PAD_Y_PX: f32 = 10.0;
+
 // ---- composer 输入卡（上游 ui-conversation skeleton InputBar.module.css `.card`）----
 //
 // `.card { gap: 12px; padding-top: 8px; border-radius: --dsw-radius-panel }`——
@@ -501,6 +510,15 @@ mod tests {
         assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
         assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
         assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
+    }
+
+    #[test]
+    fn user_bubble_matches_upstream() {
+        // 上游 `.bubble`：`--dsw-radius-xl` = R20、pad 10/16
+        assert_eq!(USER_BUBBLE_RADIUS_PX, RADIUS_XL_PX);
+        assert_eq!(USER_BUBBLE_RADIUS_PX, 20.0);
+        assert_eq!(USER_BUBBLE_PAD_X_PX, 16.0);
+        assert_eq!(USER_BUBBLE_PAD_Y_PX, 10.0);
     }
 
     #[test]

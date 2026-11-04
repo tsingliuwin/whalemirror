@@ -2559,13 +2559,15 @@ open: false,
                 user_col.child(
                         div()
                             .max_w(px(layout::user_bubble_max(content_w)))
-                            .rounded(px(22.0))
+                            // 上游 `.bubble`：`--dsw-radius-xl` = R20（曾写 22，
+                            // 标尺外数值）
+                            .rounded(px(dsh_gpui::ui_metrics::USER_BUBBLE_RADIUS_PX))
                             // web --dsw-specific-bubble（亮=deepseek-50 淡蓝 /
                             // 暗=bluish-850）：不能用 surface——亮色下是纯
                             // 白，白底白泡等于没有展示效果。
                             .bg(theme::t().bubble)
-                            .px_4()
-                            .py(px(10.0))
+                            .px(px(dsh_gpui::ui_metrics::USER_BUBBLE_PAD_X_PX))
+                            .py(px(dsh_gpui::ui_metrics::USER_BUBBLE_PAD_Y_PX))
                             .text_size(px(theme::FONT_BUBBLE))
                             .line_height(px(theme::FONT_BUBBLE_LEADING))
                             .text_color(theme::t().text)

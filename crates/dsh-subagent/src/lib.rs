@@ -148,6 +148,47 @@ pub enum SettlementStop {
     Error,
 }
 
+/// 给子目录事实派生一个合法的 v3 `name`：优先把 description 归一成小写
+/// 连字符形（上游 `isAgentName` 的字符集与长度规则），不满足时回退到
+/// 由 childId 派生的稳定短标识。两种情况都保证父目录内可命名、不撞 `lead`。
+pub fn catalog_child_name(description: &str, child_id: &str) -> String {
+    let slug: String = description
+        .chars()
+        .flat_map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                Some(c)
+            } else if c.is_ascii_uppercase() {
+                Some(c.to_ascii_lowercase())
+            } else {
+                Some('-')
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = slug.trim_matches('-').to_string();
+    if dsh_session::is_agent_name(&slug) {
+        return slug;
+    }
+    // 回退：`agent-` + childId 前 8 位（去掉非法字符后截断到 ≤32）
+    let fallback: String = child_id
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        .take(24)
+        .collect();
+    let fallback = if fallback.is_empty() { "child".to_string() } else { fallback };
+    let mut name = format!("agent-{fallback}");
+    name.truncate(dsh_session::AGENT_NAME_MAX_LEN);
+    if !dsh_session::is_agent_name(&name) {
+        name = format!("agent-{}", &name.chars().rev().take(6).collect::<String>().chars().rev().collect::<String>());
+        name.truncate(dsh_session::AGENT_NAME_MAX_LEN);
+    }
+    name
+}
+
 /// 结束摘要首行（上游 settlementSummary 逐字——`Background subagent {id}`
 /// 五分支文案；rustdsh 无 continuable 拒绝面，走 completed 不可续形）。
 pub fn settlement_summary_line(child_id: &str, stop: SettlementStop) -> String {
@@ -277,7 +318,11 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
                 parent.append_session_event(SessionEvent::SubagentCatalog {
                     child_id: child_id.as_str().to_string(),
                     child_created_at: created_at,
-                    mode: "one-shot".into(),
+                    // 上游 v3 必带 name（父目录内唯一、1–32 小写）；rustdsh 的子
+                    // 是宿主侧派生的一次性委派，name 从 description 派生，
+                    // 不满足上游命名规则时回退到合法短标识
+                    mode: "continuable".into(),
+                    name: Some(catalog_child_name(&description, child_id.as_str())),
                     label: Some(description.clone()),
                 });
             }

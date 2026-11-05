@@ -175,15 +175,22 @@ async fn child_session_persists_and_parent_logs_catalog() {
         .entries()
         .iter()
         .find_map(|e| match &e.event {
-            SessionEvent::SubagentCatalog { child_id, mode, label, .. } => {
-                Some((child_id.clone(), mode.clone(), label.clone()))
+            SessionEvent::SubagentCatalog { child_id, mode, name, label, .. } => {
+                Some((child_id.clone(), mode.clone(), name.clone(), label.clone()))
             }
             _ => None,
         })
         .expect("parent log carries subagent/catalog");
     drop(parent_session);
-    assert_eq!(catalog.1, "one-shot");
-    assert_eq!(catalog.2.as_deref(), Some("demo task"));
+    // v3 契约：mode 为 continuable（label 必填），且携带合法且唯一的 name
+    assert_eq!(catalog.1, "continuable");
+    let name = catalog.2.expect("v3 catalog fact carries a name");
+    assert!(
+        dsh_session::is_agent_name(&name),
+        "catalog name must satisfy upstream isAgentName, got {name:?}"
+    );
+    assert_ne!(name, "lead", "root agent name is reserved");
+    assert_eq!(catalog.3.as_deref(), Some("demo task"));
 
     // 子会话：真实会话文件可回读（标题=description + 完整轮次流）
     let child_id = catalog.0;

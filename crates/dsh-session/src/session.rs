@@ -180,13 +180,16 @@ pub enum SessionEvent {
     /// rustdsh 无审批管线，事件为跨端互通与回放保留）。
     ApprovalPolicy { policy: String },
     /// 直接子 agent 发现事实（log-only；web `subagent/catalog`，父所有）。
-    /// data = {version, childId, childCreatedAt, mode, label?}——version 由
-    /// 写侧固定 0（上游 SUBAGENT_CATALOG_VERSION）；mode 原文保留
-    /// （one-shot/continuable/unknown 开放词汇，上游 v0 已知/v1 扩 unknown）。
+    /// data = {version, childId, childCreatedAt, mode, name, label?}——
+    /// version 由写侧固定 3（上游 SUBAGENT_CATALOG_VERSION）；`name` 为模型面向的
+    /// 子名字段（`/^[a-z][a-z0-9-]{0,31}$/`、父目录内唯一；v3 必填，历史
+    /// v0–v2 行为 `None`）；mode 原文保留（one-shot/continuable/external/
+    /// unknown 开放词汇），continuable 时 label 必填（上游 continuableCatalogSchema）。
     SubagentCatalog {
         child_id: String,
         child_created_at: u64,
         mode: String,
+        name: Option<String>,
         label: Option<String>,
     },
     /// 交付文件声明（log-only；web `deliverables/presented`，present 工具

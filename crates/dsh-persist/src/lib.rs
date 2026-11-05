@@ -1288,6 +1288,8 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("one-shot")
                 .to_string(),
+            // v3 携带 name（历史 v0–v2 行无此键）；读侧照实保留，供侧栏/路径使用
+            name: data?.get("name").and_then(|v| v.as_str()).map(str::to_string),
             label: data?.get("label").and_then(|v| v.as_str()).map(str::to_string),
         }),
         "image/offload" => {
@@ -1881,14 +1883,15 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
         SessionEvent::PlanMode { active } => {
             Some(row("plan/mode", serde_json::json!({"active": active})))
         }
-        SessionEvent::SubagentCatalog { child_id, child_created_at, mode, label } => {
-            // 父所有的子 agent 发现事实（上游 establishCatalogChild）：
-            // {version:0, childId, childCreatedAt, mode, label?}
+        SessionEvent::SubagentCatalog { child_id, child_created_at, mode, name, label } => {
+            // 父所有的子 agent 发现事实（上游 establishCatalogChild，v3）：
+            // {version:3, childId, childCreatedAt, mode, name, label?}
             let mut data = serde_json::json!({
-                "version": 0,
+                "version": dsh_session::SUBAGENT_CATALOG_VERSION,
                 "childId": child_id,
                 "childCreatedAt": child_created_at,
                 "mode": mode,
+                "name": name,
             });
             if let Some(l) = label {
                 data["label"] = serde_json::json!(l);
@@ -2190,42 +2193,81 @@ mod tests {
 
     #[test]
     fn subagent_catalog_round_trips_through_web_row() {
-        // 父所有的子 agent 发现事实：写形 {version:0, childId,
-        // childCreatedAt, mode, label?}（label 缺省省略），读侧还原
+        // 父所有的子 agent 发现事实：写形 {version:3, childId,
+        // childCreatedAt, mode, name, label?}（label 缺省省略），读侧还原
         let ev = SessionEvent::SubagentCatalog {
             child_id: "session-child".into(),
             child_created_at: 1_724_000_000_000,
-            mode: "one-shot".into(),
+            mode: "continuable".into(),
+            name: Some("researcher".into()),
             label: Some("demo task".into()),
         };
         let row = event_to_web_line(&ev, 9, 100).unwrap();
         assert_eq!(row["type"], "subagent/catalog");
-        assert_eq!(row["data"]["version"], 0);
+        assert_eq!(row["data"]["version"], dsh_session::SUBAGENT_CATALOG_VERSION);
         assert_eq!(row["data"]["childId"], "session-child");
         assert_eq!(row["data"]["childCreatedAt"], 1_724_000_000_000u64);
-        assert_eq!(row["data"]["mode"], "one-shot");
+        assert_eq!(row["data"]["mode"], "continuable");
+        assert_eq!(row["data"]["name"], "researcher");
         assert_eq!(row["data"]["label"], "demo task");
 
         let parsed = web_line_to_event(&row).expect("known type parses back");
         match parsed {
-            SessionEvent::SubagentCatalog { child_id, child_created_at, mode, label } => {
+            SessionEvent::SubagentCatalog { child_id, child_created_at, mode, name, label } => {
                 assert_eq!(child_id, "session-child");
                 assert_eq!(child_created_at, 1_724_000_000_000);
-                assert_eq!(mode, "one-shot");
+                assert_eq!(mode, "continuable");
+                assert_eq!(name.as_deref(), Some("researcher"));
                 assert_eq!(label.as_deref(), Some("demo task"));
             }
             other => panic!("expected SubagentCatalog, got {other:?}"),
         }
 
-        // label 省略形（one-shot 的 label 可选）
+        // 历史行无 name（v0–v2）：读侧保留为 None，不回写键
         let ev = SessionEvent::SubagentCatalog {
             child_id: "session-child-2".into(),
             child_created_at: 7,
             mode: "one-shot".into(),
+            name: None,
             label: None,
         };
         let row = event_to_web_line(&ev, 10, 100).unwrap();
         assert!(row["data"].get("label").is_none(), "absent label stays absent");
+        assert!(row["data"]["name"].is_null(), "absent name stays null");
+
+        let parsed = web_line_to_event(&row).expect("historical row parses back");
+        match parsed {
+            SessionEvent::SubagentCatalog { name, label, .. } => {
+                assert_eq!(name, None, "historical row keeps no name");
+                assert_eq!(label, None);
+            }
+            other => panic!("expected SubagentCatalog, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subagent_catalog_legacy_v0_row_decodes_with_no_name() {
+        // 跨端互通：web 写的历史 v0/v1 行（无 name 键）必须仍能读，不能因
+        // 本次升级写 v3 而把旧日志判死
+        let row = serde_json::json!({
+            "type": "subagent/catalog",
+            "data": {
+                "version": 0,
+                "childId": "session-legacy",
+                "childCreatedAt": 123,
+                "mode": "one-shot",
+            },
+        });
+        let parsed = web_line_to_event(&row).expect("legacy v0 row parses");
+        match parsed {
+            SessionEvent::SubagentCatalog { child_id, mode, name, label, .. } => {
+                assert_eq!(child_id, "session-legacy");
+                assert_eq!(mode, "one-shot");
+                assert_eq!(name, None, "legacy v0 has no name field");
+                assert_eq!(label, None);
+            }
+            other => panic!("expected SubagentCatalog, got {other:?}"),
+        }
     }
 
     #[test]

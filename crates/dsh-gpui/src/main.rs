@@ -5805,18 +5805,7 @@ impl AppView {
                             .text_color(theme::t().text)
                             .child(title),
                     )
-                    .child(
-                        div().flex().items_center().gap_1().px_2().h(px(24.0)).rounded(px(12.0))
-                            .hover(|s| s.bg(theme::t().hover))
-                            .child(Icon::new(IconName::Bot).size(px(12.0)).text_color(theme::t().text_2))
-                            .child(
-                                div()
-                                    .text_size(px(theme::FONT_TAB))
-                                    .line_height(px(theme::FONT_ROW_LEADING))
-                                    .text_color(theme::t().text_2)
-                                    .child("标准模式"),
-                            ),
-                    )
+                    .child(agent_preset_label())
                     .child(div().flex_1())
                     .child({
                         // 文件 dock 开关（上游 guide 胶囊：amber folder sheet
@@ -6536,27 +6525,7 @@ impl AppView {
                                     )
                                     .child(Icon::new(IconName::ChevronDown).size(px(12.0)).text_color(theme::t().caption))
                             })
-                            .child(
-                                div()
-                                    .id("hero-mode")
-                                    .mx_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .px_2()
-                                    .h(px(24.0))
-                                    .rounded(px(12.0))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme::t().hover))
-                                    .child(Icon::new(IconName::Bot).size(px(12.0)).text_color(theme::t().text_2))
-                                    .child(
-                                        div()
-                                            .text_size(px(theme::FONT_TAB))
-                                            .line_height(px(theme::FONT_ROW_LEADING))
-                                            .text_color(theme::t().text_2)
-                                            .child("标准模式"),
-                                    ),
-                            ),
+                            .child(agent_preset_label()),
                     )
                     .child({
                         let c = self.composer_card(this, has_text, layout::composer_card_width(center_w), snap.running, snap.empty && self.current_workspace.is_none(), None);
@@ -7886,6 +7855,41 @@ impl AppView {
 
 
 
+
+/// 会话头智能体预设标签（上游 ui-agent-preset `AgentPresetLabel.module.css`
+/// `.label`）：**static chrome, never a control**——只读 span，没有 hover 填充、
+/// 没有 cursor:pointer、没有点击，2026-11 上游还去掉了图标 0.7 透明度。
+/// 几何：高 22 / R4 / gap 4 / 12-22 / 上限 180 / 右内距 2 / 图标 14。
+/// 会话的预设一经开始对话即固定，主机会拒绝切换；把它画成可点胶囊是
+/// 承诺一个不存在的开关。
+fn agent_preset_label() -> Div {
+    use dsh_gpui::ui_metrics as m;
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(m::PRESET_LABEL_GAP_PX))
+        .h(px(m::PRESET_LABEL_H_PX))
+        .pr(px(m::PRESET_LABEL_PAD_R_PX))
+        .max_w(px(m::PRESET_LABEL_MAX_W_PX))
+        .rounded(px(m::PRESET_LABEL_RADIUS_PX))
+        // 上游 `--dsw-alias-fill-tsp-secondary` 在本仓主题里未定义，取
+        // 最接近的静态次级填充（不给 hover/激活态，避免诈称可交互）。
+        .bg(theme::t().hover)
+        .overflow_hidden()
+        .child(Icon::new(IconName::Bot).size(px(m::PRESET_ICON_PX)).text_color(theme::t().caption))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(m::PRESET_LABEL_FONT_PX))
+                .line_height(px(m::PRESET_LABEL_LEADING_PX))
+                .text_color(theme::t().caption)
+                .child("标准模式"),
+        )
+}
 
 /// 菜单行（上游 ui-primitives Menu `.item`：min-h 34、pad 6/8、gap 6、
 /// R12、13/20）。三处菜单曾各写一套（半径 10、左右 10、行高 40、14/22）。

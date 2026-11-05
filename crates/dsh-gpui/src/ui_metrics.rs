@@ -113,6 +113,25 @@ pub const PREVIEW_PATH_LEADING_PX: f32 = 18.0;
 pub const NAV_ACTIVE_FILL_LIGHT: (u8, u8, u8) = (235, 238, 242);
 pub const NAV_ACTIVE_FILL_DARK: (u8, u8, u8) = (67, 69, 74);
 
+// ---- 会话头智能体预设标签（上游 ui-agent-preset AgentPresetLabel.module.css `.label`）----
+//
+// `.label { display:inline-flex; align-items:center; gap:4px; max-width:180px;
+// padding:0 2px 0 0; height:22px; border-radius: var(--dsw-radius-xs);
+// background: var(--dsw-alias-fill-tsp-secondary); font-size:12px;
+// line-height:22px; color: var(--dsw-alias-label-tertiary); white-space:nowrap;
+// overflow:hidden; text-overflow:ellipsis }`，注释明写 **static chrome, never a
+// control**；`.icon { flex:none }`、图标 14px；`@container (max-width:540px)`
+// 时整块隐藏。rustdsh 此前把它画成 24px / R12 / 可 hover 的胶囊、图标 12px、
+// 文字 text_2 —— 既几何不合，也诈称了一个上游主机根本不提供切换的控件。
+pub const PRESET_LABEL_H_PX: f32 = 22.0;
+pub const PRESET_LABEL_RADIUS_PX: f32 = RADIUS_XS_PX;
+pub const PRESET_LABEL_GAP_PX: f32 = 4.0;
+pub const PRESET_LABEL_MAX_W_PX: f32 = 180.0;
+pub const PRESET_LABEL_PAD_R_PX: f32 = 2.0;
+pub const PRESET_LABEL_FONT_PX: f32 = 12.0;
+pub const PRESET_LABEL_LEADING_PX: f32 = 22.0;
+pub const PRESET_ICON_PX: f32 = 14.0;
+
 // ---- 菜单行（上游 ui-primitives Menu.module.css `.item`）----
 //
 // `.item { gap: 6px; min-height: 34px; padding: 6px 8px; border-radius:
@@ -524,6 +543,24 @@ mod tests {
         assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
         assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
         assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
+    }
+
+    #[test]
+    fn preset_label_matches_upstream_chrome() {
+        // 上游 `.label`：高 22、`--dsw-radius-xs` = R4、12/22、gap 4、cap 180
+        assert_eq!(PRESET_LABEL_H_PX, 22.0);
+        assert_eq!(PRESET_LABEL_RADIUS_PX, RADIUS_XS_PX);
+        assert_eq!(PRESET_LABEL_RADIUS_PX, 4.0);
+        assert_eq!(PRESET_LABEL_FONT_PX, 12.0);
+        assert_eq!(PRESET_LABEL_LEADING_PX, 22.0);
+        assert_eq!(PRESET_LABEL_GAP_PX, 4.0);
+        assert_eq!(PRESET_LABEL_MAX_W_PX, 180.0);
+        assert_eq!(PRESET_LABEL_PAD_R_PX, 2.0);
+        assert_eq!(PRESET_ICON_PX, 14.0);
+        // 行高 = 高度：单行文字垂直居中不留溢白（上游同值 22）
+        assert_eq!(PRESET_LABEL_LEADING_PX, PRESET_LABEL_H_PX);
+        // 不是胶囊：半径远小于半高（旧实现 24 高 + R12）
+        assert!(PRESET_LABEL_RADIUS_PX < PRESET_LABEL_H_PX / 2.0);
     }
 
     #[test]

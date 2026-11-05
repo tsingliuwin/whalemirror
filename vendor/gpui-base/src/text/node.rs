@@ -2611,9 +2611,92 @@ fn slice_backgrounds(
     slice_ranges(backgrounds, start, end, |range, color| (range, *color))
 }
 
-const CELL_PAD_PX: f32 = 16.0; // px_2 horizontal padding
 const CELL_MIN_PX: f32 = 48.0;
-const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the last
+
+// [dsh] 表格几何对齐 DSH web（ui-primitives markdown/MarkdownText.module.css
+// `.tableScroll th/td`）：`padding: 10px 16px`，首列去左内距、末列去右内距
+// （`th:first-child` / `td:last-child`），让表格与正文左右缘对齐；字号
+// 13/22（`--dsw-font-markdown-table`），表头 500 字重（`...-table-head`）。
+// web 表格只有行底 0.5px 发丝，**无竖分隔线、无外框、无表头底色**。
+pub const TABLE_CELL_PAD_X_PX: f32 = 16.0;
+pub const TABLE_CELL_PAD_Y_PX: f32 = 10.0;
+pub const TABLE_FONT_SIZE_PX: f32 = 13.0;
+pub const TABLE_LINE_HEIGHT_PX: f32 = 22.0;
+pub const TABLE_FONT_WEIGHT_BODY: u16 = 400;
+pub const TABLE_FONT_WEIGHT_HEAD: u16 = 500;
+pub const TABLE_ROW_HAIRLINE_PX: f32 = 0.5;
+/// web `th/td { min-width: 100px }`：列再窄也保留 100，避免两三个汉字就折行。
+pub const TABLE_CELL_MIN_WIDTH_PX: f32 = 100.0;
+
+/// 单元格左内距：首列贴边（`th:first-child` / `td:first-child`）。
+pub fn table_cell_pad_left(ix: usize, _col_count: usize) -> f32 {
+    if ix == 0 { 0. } else { TABLE_CELL_PAD_X_PX }
+}
+
+/// 单元格右内距：末列贴边（`th:last-child` / `td:last-child`）。
+pub fn table_cell_pad_right(ix: usize, col_count: usize) -> f32 {
+    if ix + 1 == col_count {
+        0.
+    } else {
+        TABLE_CELL_PAD_X_PX
+    }
+}
+
+/// 单元格左右内距之和：首列左 0、末列右 0（单列表格因此零内距）。
+pub fn table_cell_pad_x(ix: usize, col_count: usize) -> f32 {
+    table_cell_pad_left(ix, col_count) + table_cell_pad_right(ix, col_count)
+}
+
+/// 单元格字重：表头 500（`--dsw-font-markdown-table-head`），正文 400。
+pub fn table_cell_font_weight(header: bool) -> u16 {
+    if header {
+        TABLE_FONT_WEIGHT_HEAD
+    } else {
+        TABLE_FONT_WEIGHT_BODY
+    }
+}
+
+/// 单元格公共装饰（内距/字号/字重/对齐）。web 侧没有竖分隔线，故不画边框；
+/// 表头只加 500 字重，不铺底色。
+fn decorate_table_cell(
+    div: Div,
+    style: &TextViewStyle,
+    align: ColumnumnAlign,
+    ix: usize,
+    col_count: usize,
+    header: bool,
+) -> Div {
+    div
+        .overflow_hidden()
+        .when(align == ColumnumnAlign::Center, |this| this.text_center())
+        .when(align == ColumnumnAlign::Right, |this| this.text_right())
+        .when(ix != 0, |this| this.pl(px(TABLE_CELL_PAD_X_PX)))
+        .when(ix + 1 != col_count, |this| this.pr(px(TABLE_CELL_PAD_X_PX)))
+        .pt(px(TABLE_CELL_PAD_Y_PX))
+        .pb(px(TABLE_CELL_PAD_Y_PX))
+        .text_size(px(TABLE_FONT_SIZE_PX))
+        .line_height(px(TABLE_LINE_HEIGHT_PX))
+        .font_weight(if header {
+            FontWeight::MEDIUM
+        } else {
+            FontWeight::NORMAL
+        })
+        .refine_style(&style.table_cell())
+}
+
+/// 表格行：整行底 0.5px 发丝（web `th`/`td` 的 `border-bottom`；表头 l3、
+/// 正文 l2——TextViewStyle 只暴露单一 border 色，这里取同一档），表头不铺底色。
+fn decorate_table_row(div: Div, style: &TextViewStyle, header: bool) -> Div {
+    div.w_full()
+        .border_b(px(TABLE_ROW_HAIRLINE_PX))
+        .border_color(style.border())
+        .flex()
+        .flex_row()
+        .when(header, |this| {
+            this.text_color(style.foreground())
+                .refine_style(&style.table_head())
+        })
+}
 
 /// The max-content width of every table column: the widest cell line,
 /// shaped with the runs the cell renders with, plus the cell's padding and
@@ -2672,12 +2755,7 @@ fn measure_table_columns(
         let cell = &table.children[row_ix].children[ix];
         let items = cell.children.inline_flow_items(None, &[], &[], node_cx, cx);
         let width = super::inline_flow::intrinsic_width(&items, window, cx);
-        let border = if ix + 1 < col_count {
-            CELL_BORDER_PX
-        } else {
-            0.
-        };
-        col_w[ix] = col_w[ix].max(f32::from(width) + CELL_PAD_PX + border);
+        col_w[ix] = col_w[ix].max(f32::from(width) + table_cell_pad_x(ix, col_count));
     }
     col_w
 }
@@ -2753,14 +2831,9 @@ fn measure_table_text_columns(
                 }
                 w = w.max(f32::from(line_w));
             }
-            // Border-box widths, so the padding and border the cell draws
-            // must leave the measured text its full width.
-            let border = if ix + 1 < col_count {
-                CELL_BORDER_PX
-            } else {
-                0.
-            };
-            *slot = slot.max(w + CELL_PAD_PX + border);
+            // Border-box widths, so the padding the cell draws must leave the
+            // measured text its full width.
+            *slot = slot.max(w + table_cell_pad_x(ix, col_count));
         }
     }
     (col_w, custom_cells)
@@ -3255,60 +3328,55 @@ impl BlockNode {
                     .map(|span| TextLeafKey::table_cell(span.start, cell_ordinal));
                 cell_ordinal += 1;
                 let align = table.column_align(ix);
-                let is_last_col = ix == row.children.len() - 1;
+                let col_count = row.children.len();
                 let width = col_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
                 let min_width = col_min_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
                 cells.push(
-                    div()
-                        // Measured max-content width is the flex-basis;
-                        // `flex_grow` (proportional to it) distributes extra
-                        // space so a narrow table still fills the frame, while
-                        // shrinking is clamped at `min_w` — the flex engine
-                        // squeezes columns (their text wraps) down to the
-                        // floors before the track starts to scroll.
-                        .flex_basis(px(width))
-                        .flex_grow(width)
-                        .flex_shrink(1.)
-                        .min_w(px(min_width))
-                        .overflow_hidden()
-                        .when(align == ColumnumnAlign::Center, |this| this.text_center())
-                        .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .px_2()
-                        .py_1()
-                        .when(!is_last_col, |this| {
-                            this.border_r_1().border_color(style.border())
-                        })
-                        .refine_style(&style.table_cell())
-                        .child(cell.children.render(fade_key, node_cx, window, cx)),
+                    // Measured max-content width is the flex-basis;
+                    // `flex_grow` (proportional to it) distributes extra
+                    // space so a narrow table still fills the frame, while
+                    // shrinking is clamped at `min_w` — the flex engine
+                    // squeezes columns (their text wraps) down to the
+                    // floors before the track starts to scroll.
+                    decorate_table_cell(
+                        div()
+                            .flex_basis(px(width))
+                            .flex_grow(width)
+                            .flex_shrink(1.)
+                            .min_w(px(min_width)),
+                        style,
+                        align,
+                        ix,
+                        col_count,
+                        row_ix == 0,
+                    )
+                    .child(cell.children.render(fade_key, node_cx, window, cx)),
                 );
             }
             rows.push(
-                div()
-                    .w_full()
-                    // [dsh] alpha.4：行分隔 0.5px 发丝
-                    .when(row_ix < row_count - 1, |this| this.border_b(px(0.5)))
-                    .border_color(style.border())
-                    .flex()
-                    .flex_row()
-                    // The first row is the header, as everywhere else that
-                    // reads a table (`table_data`, `to_markdown`). The
-                    // refinement comes last so it can override the defaults.
-                    .when(row_ix == 0, |this| {
-                        this.bg(style.code_background())
-                            .text_color(style.foreground())
-                            .refine_style(&style.table_head())
-                    })
-                    .children(cells),
+                // 第一行是表头（`table_data` / `to_markdown` 同此约定）；
+                // 表头只加 500 字重，不铺底色。
+                decorate_table_row(div(), style, row_ix == 0).children(cells),
             );
         }
+
+        // 调用方可显式给表格底色；web 默认透明，所以不做 surface 兜底。
+        let mut frame = StyleRefinement::default();
+        if let Some(bg) = style.table_background() {
+            frame = frame.bg(bg);
+        }
+        let frame = frame.refine_style(style.table());
 
         div()
             .pb(rems(1.))
             .w_full()
             .child(
                 // Scroll viewport owns the visible frame, including any
-                // caller-provided radius. Keeping the border here makes the
-                // rounded frame stable while the wider row track moves below it.
+                // caller-provided radius.
+                //
+                // [dsh] web 表格无外框、无底色（MarkdownText.module.css
+                // `.tableScroll` 只有 overflow），因此这里不再画 0.5px 外框，
+                // 也不铺 surface 底；行底发丝由 `decorate_table_row` 提供。
                 //
                 // `horizontal_scroll_area` clips with `overflow_hidden` and
                 // delegates the wheel to a sibling `ScrollableMask`, so the
@@ -3318,14 +3386,7 @@ impl BlockNode {
                 horizontal_scroll_area(
                     block_element_id("table", table.span, options.ix),
                     &scroll_handle,
-                    &StyleRefinement::default()
-                        .bg(style
-                            .table_background()
-                            .unwrap_or(cx.theme().tokens.colors.surface))
-                        // [dsh] alpha.4 hairline 化：web 表格线 0.5px
-                        .border(px(0.5))
-                        .border_color(style.border())
-                        .refine_style(style.table()),
+                    &frame,
                     // Row track sized to `max(viewport, column floors)`:
                     // `min_w_full` fills the frame while the columns can still
                     // shrink-to-fit (their text wrapping), the definite
@@ -3373,7 +3434,7 @@ impl BlockNode {
                     .map(|span| TextLeafKey::table_cell(span.start, cell_ordinal));
                 cell_ordinal += 1;
                 let align = table.column_align(ix);
-                let is_last_col = ix == row.children.len() - 1;
+                let col_count = row.children.len();
                 let len = col_lens
                     .get(ix)
                     .copied()
@@ -3381,39 +3442,24 @@ impl BlockNode {
                     .min(MAX_LENGTH);
 
                 cells.push(
-                    div()
-                        .overflow_hidden()
-                        .when(align == ColumnumnAlign::Center, |this| this.text_center())
-                        .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .min_w_16()
-                        .w(Length::Definite(relative(len as f32)))
-                        .px_2()
-                        .py_1()
-                        .when(!is_last_col, |this| {
-                            this.border_r_1().border_color(style.border())
-                        })
-                        .refine_style(&style.table_cell())
-                        .child(cell.children.render(fade_key, node_cx, window, cx)),
+                    decorate_table_cell(
+                        div()
+                            .min_w(px(TABLE_CELL_MIN_WIDTH_PX))
+                            .w(Length::Definite(relative(len as f32))),
+                        style,
+                        align,
+                        ix,
+                        col_count,
+                        row_ix == 0,
+                    )
+                    .child(cell.children.render(fade_key, node_cx, window, cx)),
                 );
             }
 
             rows.push(
-                div()
-                    .w_full()
-                    // [dsh] alpha.4：行分隔 0.5px 发丝
-                    .when(row_ix < row_count - 1, |this| this.border_b(px(0.5)))
-                    .border_color(style.border())
-                    .flex()
-                    .flex_row()
-                    // The first row is the header, as everywhere else that
-                    // reads a table (`table_data`, `to_markdown`). The
-                    // refinement comes last so it can override the defaults.
-                    .when(row_ix == 0, |this| {
-                        this.bg(style.code_background())
-                            .text_color(style.foreground())
-                            .refine_style(&style.table_head())
-                    })
-                    .children(cells),
+                // 第一行是表头（`table_data` / `to_markdown` 同此约定）；
+                // 表头只加 500 字重，不铺底色。
+                decorate_table_row(div(), style, row_ix == 0).children(cells),
             );
         }
 
@@ -3421,15 +3467,11 @@ impl BlockNode {
             .pb(rems(1.))
             .w_full()
             .child(
+                // [dsh] web 表格无外框、无底色，只有行底发丝。
                 div()
                     .w_full()
-                    .bg(style
-                        .table_background()
-                        .unwrap_or(cx.theme().tokens.colors.surface))
-                    // [dsh] alpha.4 hairline 化：web 表格线 0.5px
-                    .border(px(0.5))
-                    .border_color(style.border())
                     .overflow_hidden()
+                    .when_some(style.table_background(), |this, bg| this.bg(bg))
                     .children(rows)
                     .refine_style(&style.table()),
             )

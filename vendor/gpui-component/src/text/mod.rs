@@ -53,9 +53,11 @@ pub(crate) fn base_text_view_style(theme: &crate::Theme) -> gpui_base::TextViewS
     code_block.padding.right = Some(gpui::px(16.).into());
     code_block.padding.bottom = Some(gpui::px(16.).into());
     code_block.padding.left = Some(gpui::px(16.).into());
-    let table_head = gpui::StyleRefinement::default()
-        .bg(theme.table_head)
-        .text_color(theme.table_head_foreground);
+    // [dsh] web 表头无底色：MarkdownText.module.css `.tableScroll th` 只声明
+    // 字重（500）与行底 l3 发丝，文字仍是正文主色。组件默认的 table_head
+    // 底色会在表格首行铺一条灰带，与 web 不符，这里只保留字重与字色。
+    let mut table_head = gpui::StyleRefinement::default().text_color(theme.foreground);
+    table_head.text.font_weight = Some(gpui::FontWeight::MEDIUM);
 
     gpui_base::TextViewStyle::default()
         .with_foreground(theme.foreground)

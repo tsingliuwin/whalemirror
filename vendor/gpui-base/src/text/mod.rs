@@ -20,7 +20,12 @@ mod utils;
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
 pub use inline_element::*;
 pub use markdown_ext::*;
-pub use node::{CodeBlock, TableData};
+pub use node::{
+    CodeBlock, TableData, TABLE_CELL_MIN_WIDTH_PX, TABLE_CELL_PAD_X_PX, TABLE_CELL_PAD_Y_PX,
+    TABLE_FONT_SIZE_PX, TABLE_FONT_WEIGHT_BODY, TABLE_FONT_WEIGHT_HEAD, TABLE_LINE_HEIGHT_PX,
+    TABLE_ROW_HAIRLINE_PX, table_cell_font_weight, table_cell_pad_left, table_cell_pad_right,
+    table_cell_pad_x,
+};
 pub use range_highlight::{RangeHighlight, RangeHighlightError, RenderedText};
 pub use state::*;
 pub use stream_fade::TextViewMotion;

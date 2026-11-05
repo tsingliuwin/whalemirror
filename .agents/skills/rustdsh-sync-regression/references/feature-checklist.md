@@ -147,4 +147,5 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | I21 | 菜单行几何（补缺 #81）：min-h 34、左右内距 8（+菜单 4 = 12）、R12、13/20；与 dockkit 菜单家族区分 | `cargo test -p dsh-gpui ui_metrics`；点 composer 模型牌/权限钮/「+」命令菜单 | 2 测全绿；实机悬停行高 34px、左缘内缩 10/7/5/4/3/2/2/1（R12） |
 | I22 | 会话头预设标签（补缺 #82）：静态 chrome——高 22、R4、gap 4、12-22、cap 180、图标 14，无 hover/指针 | `cargo test -p dsh-gpui ui_metrics`；任意会话头部看标题右侧「标准模式」 | 单测全绿；实机标签高 22px、左上角内缩 3/1/1/0（R4）、悬停无底色变化 |
 | I23 | `subagent/catalog` v3 契约（补缺 #84）：写 `{version:3, mode:"continuable", name, label}`，`name` 满足 `/^[a-z][a-z0-9-]{0,31}$/` 且非 `lead`；读侧历史 v0–v2 行 `name=None` 仍可回读 | `cargo test -p dsh-session catalog_names`；`cargo test -p dsh-subagent`；`cargo test -p dsh-persist` | 11 + 7 测全绿；persist 往返保留 name、legacy v0 行解码不报错；`child_persistence` 断言 mode=continuable 且 name 合法非 `lead` |
+| I24 | markdown 表格几何（补缺 #86）：无竖线/无外框/无表头底色，单元格 10×16 且首末列贴边、13/22、表头 500、行底 0.5px 发丝、列最小宽 100 | `cargo test -p dsh-gpui --test table_geometry`；任意含表格的会话（如「熟悉一下」） | 5 测全绿；实机表格区竖线列 = 0、表头像素 = 白、行底发丝含表头下沿且表头行高 22px、短列不再竖排折字 |
 | I6 | 实机像素取证：激活条几何 | 截屏后按 accent 色扫描标签条下缘 | 激活条仅 2 行像素高、左右内缩 10px（条宽 = 文字宽，本机实测文字 629–653 / 条 628–653） |

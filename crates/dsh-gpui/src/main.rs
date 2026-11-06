@@ -4003,8 +4003,10 @@ impl AppView {
             .flex()
             .items_start()
             .gap(px(10.0))
-            .px(px(12.0))
-            .pt(px(4.0))
+            // 上游 ui-attachment `.rail { padding: 2px 10px 0; margin-bottom: -6px }`
+            .px(px(dsh_gpui::ui_metrics::COMPOSER_RAIL_PAD_X_PX))
+            .pt(px(dsh_gpui::ui_metrics::COMPOSER_RAIL_PAD_T_PX))
+            .mb(px(dsh_gpui::ui_metrics::COMPOSER_RAIL_MARGIN_BOTTOM_PX))
             .overflow_x_scroll();
         for draft in &self.attachments {
             let (name, meta_text, border_color, meta_color): (String, String, gpui::Hsla, gpui::Hsla) =
@@ -6205,7 +6207,7 @@ impl AppView {
             .when(!snap.queued.is_empty(), |d| {
                 d.child(self.queue_dock_render(&this, snap, card_w))
             })
-            .child(self.composer_card(this.clone(), has_text, card_w, snap.running, locked, snap.slash_query.as_deref()));
+            .child(self.composer_card(this.clone(), has_text, card_w, snap.running, locked, snap.slash_query.as_deref(), false));
         // web StatsPills（0.1.5-alpha.1）：输入卡下方两个图标 pill——
         // 仪表 pill（轮/步 + 输出速度）开「会话统计」对话框，数据 pill
         // （总 token + 缓存命中）开「Token 用量」对话框；互斥开合（exclusive
@@ -6426,7 +6428,10 @@ impl AppView {
                     .w_full()
                     .max_w(px(layout::composer_card_width(center_w)))
                     .v_flex()
-                    .gap_3()
+                    // web `.composerHero { gap: 8px; padding-bottom: 32px }`：
+                    // figma 三行各 12 的实际拆分——行上距 4 补回标题↔行 12，
+                    // 行↔卡取栈 gap 8。
+                    .gap(px(dsh_gpui::ui_metrics::HERO_STACK_GAP_PX))
                     .pb(px(32.0))
                     .child(
                         img("brands/hero-glow.png")
@@ -6477,10 +6482,14 @@ impl AppView {
                             .relative()
                             .flex()
                             .items_center()
-                            // 上游 `.workspaceRow { padding-left: 8px }`（曾写 20，
-                            // chip 整体右移 12px）
+                            // 上游 `.heroWorkspaceRow { padding: 0 16px 0 20px;
+                            // margin-top: 4px; gap: 2px }`——figma 左侧 8 后
+                            // +12，让 chip 文件夹与卡内控件对齐；右侧 16 给
+                            // 预设标签留出卡边空隙（曾按旧值 8/4/0 实现）。
                             .pl(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_ROW_PAD_L_PX))
-                            .gap_1()
+                            .pr(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_ROW_PAD_R_PX))
+                            .mt(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_ROW_MARGIN_TOP_PX))
+                            .gap(px(dsh_gpui::ui_metrics::HERO_WORKSPACE_ROW_GAP_PX))
                             .child({
                                 let t = this.clone();
                                 let label = self
@@ -6528,7 +6537,7 @@ impl AppView {
                             .child(agent_preset_label()),
                     )
                     .child({
-                        let c = self.composer_card(this, has_text, layout::composer_card_width(center_w), snap.running, snap.empty && self.current_workspace.is_none(), None);
+                        let c = self.composer_card(this, has_text, layout::composer_card_width(center_w), snap.running, snap.empty && self.current_workspace.is_none(), None, true);
                         c
                     })
                     // 下拉面板挂在栈层级（输入卡之后渲染 → 绘制在其上，
@@ -6941,12 +6950,18 @@ impl AppView {
 
     /// 输入卡（web InputBar .card）：r22、白 6% 描边、850 表面、
     /// 文本在上（16/24），控件行在下（+ / 模式 | 模型 / 发送）。
-    fn composer_card(&self, this: Entity<AppView>, has_text: bool, card_w: f32, running: bool, locked: bool, slash_query: Option<&str>) -> Stateful<Div> {
+    fn composer_card(&self, this: Entity<AppView>, has_text: bool, card_w: f32, running: bool, locked: bool, slash_query: Option<&str>, hero: bool) -> Stateful<Div> {
         // #5 真并发：异会话运行中 composer 不再让位（消息路由到被查看
         // 会话的 runtime）；运行态按钮跟被查看会话（chat.running 由按属主
         // 路由的事件驱动）。偏差：模型菜单/权限钮改动只落主 agent 配置，
         // runtime 的选项是 spawn 时快照
         let t_model_menu = this.clone();
+        // 上游 `.input { min-height: 36px }` / `.hero .input { min-height: 52px }`
+        let input_min_h = if hero {
+            dsh_gpui::ui_metrics::COMPOSER_HERO_INPUT_MIN_H_PX
+        } else {
+            dsh_gpui::ui_metrics::COMPOSER_INPUT_MIN_H_PX
+        };
 
         // 模型菜单（模型牌弹出）：各提供方分组 + 模型行，当前项带勾
         let mut model_menu_el: Option<AnyElement> = None;
@@ -7111,7 +7126,8 @@ impl AppView {
         let left = div()
             .flex()
             .items_center()
-            .gap_4()
+            // 上游 `.tools/.modes/.trailing { gap: 12px }`（figma 16/4 后统一 12）
+            .gap(px(dsh_gpui::ui_metrics::COMPOSER_TOOLBAR_GAP_PX))
             .child({
                 // 加号 = 命令菜单开关（上游 input.commands；locked 态无效）
                 let t_cmd = this.downgrade();
@@ -7305,10 +7321,17 @@ impl AppView {
                 d.child(self.attachment_rail(&this))
             })
             .child(if locked {
-                // web：inert 态编辑器不挂载，占位文案即引导。高度必须
-                // 等于 Input 单行外壳（input_py 8×2 + 行高 20 = 36），
-                // 否则选定工作区切换编辑器时垂直居中的 hero 会位移
-                div().pl_4().pr_3().pt_1().child(
+                // web：inert 态编辑器不挂载，占位文案即引导。外层按
+                // `.input` 地板取高（空态 52 / 停靠 36），内层保持单行
+                // 36 的文本壳，避免切换编辑器时行高跳动。
+                div()
+                    // 上游 `.input { padding: 4px 8px 0 14px }`（左 16→14）
+                    .pl(px(dsh_gpui::ui_metrics::COMPOSER_INPUT_PAD_L_PX))
+                    .pr(px(dsh_gpui::ui_metrics::COMPOSER_INPUT_PAD_R_PX))
+                    .pt(px(dsh_gpui::ui_metrics::COMPOSER_INPUT_PAD_T_PX))
+                    // 空态两行地板，停靠态单行外壳
+                    .min_h(px(input_min_h))
+                    .child(
                     div()
                         .h(px(36.0))
                         .flex()
@@ -7329,7 +7352,12 @@ impl AppView {
                     // 送到 TextareaState 的 focus handle，因此祖先根本收不到。
                     // 正解需在 TextareaState 侧转发（vendor 补丁）或 App 级
                     // binding + 根节点 action，留待单独一轮。
-                    div().pl_4().pr_3().pt_1().child(Textarea::new(&self.input).appearance(false).w_full())
+                    div()
+                        .pl(px(dsh_gpui::ui_metrics::COMPOSER_INPUT_PAD_L_PX))
+                        .pr(px(dsh_gpui::ui_metrics::COMPOSER_INPUT_PAD_R_PX))
+                        .pt(px(dsh_gpui::ui_metrics::COMPOSER_INPUT_PAD_T_PX))
+                        .min_h(px(input_min_h))
+                        .child(Textarea::new(&self.input).appearance(false).w_full())
                 }
             })
             .child(

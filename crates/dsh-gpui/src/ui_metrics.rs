@@ -176,22 +176,52 @@ pub const ICON_BUTTON_RADIUS_PX: f32 = RADIUS_SM_PX;
 /// 上游主发送/停止钮（InputBar `.primary`）：34px 正圆、999px。
 pub const PRIMARY_SEND_SIZE_PX: f32 = 34.0;
 
-// ---- 空会话 hero（上游 ui-conversation skeleton HeroShell.module.css）----
+// ---- 空会话 hero（上游 ui-conversation skeleton HeroShell.module.css +
+//       ConversationRoot `.composerHero`/`.heroWorkspaceRow`）----
 //
-// `.stack { gap: 12px }`；`.headline` 26/32 wt500、列间距 10；`.workspaceRow`
-// `padding-left: 8px`；`.workspace` chip gap 4、`min-height: 28px`、`padding: 0 8px`、
-// `border-radius: --dsw-radius-sm` = **R8**（不是胶囊）、`max-width: min(100%, 360px)`，
-// 标签超宽省略号；展开态（aria-expanded）与 hover 同底色。
-pub const HERO_STACK_GAP_PX: f32 = 12.0;
+// `.stack { gap: 12px }`；`.headline` 26/32 wt500、列间距 10；`.workspace` chip
+// gap 4、`min-height: 28px`、`padding: 0 8px`、`border-radius: --dsw-radius-sm`
+// = **R8**（不是胶囊）、`max-width: min(100%, 360px)`，标签超宽省略号；
+// 展开态（aria-expanded）与 hover 同底色。
+//
+// 栈内三行的实际间距由 `.composerHero { gap: 8px }` + `.heroWorkspaceRow
+// { margin-top: 4px }` 决定（figma 画的是三行各 12，后被拆成「标题↔行 12、
+// 行↔卡 8」）：标题↔工作区行仍是 12，工作区行↔输入卡是 8。工作区行
+// `padding: 0 16px 0 20px`（figma 左侧 8 后加 12，让 chip 的文件夹图标与
+// 输入卡内控件对齐；右侧 16 给预设标签留出卡边空隙），行内 gap 2。
+pub const HERO_STACK_GAP_PX: f32 = 8.0;
 pub const HERO_HEADLINE_GAP_PX: f32 = 10.0;
 pub const HERO_HEADLINE_FONT_PX: f32 = 26.0;
 pub const HERO_HEADLINE_LEADING_PX: f32 = 32.0;
-pub const HERO_WORKSPACE_ROW_PAD_L_PX: f32 = 8.0;
+pub const HERO_WORKSPACE_ROW_PAD_L_PX: f32 = 20.0;
+pub const HERO_WORKSPACE_ROW_PAD_R_PX: f32 = 16.0;
+pub const HERO_WORKSPACE_ROW_MARGIN_TOP_PX: f32 = 4.0;
+pub const HERO_WORKSPACE_ROW_GAP_PX: f32 = 2.0;
 pub const HERO_WORKSPACE_GAP_PX: f32 = 4.0;
 pub const HERO_WORKSPACE_MAX_W_PX: f32 = 360.0;
 pub const HERO_WORKSPACE_MIN_H_PX: f32 = 28.0;
 pub const HERO_WORKSPACE_PAD_X_PX: f32 = 8.0;
 pub const HERO_WORKSPACE_RADIUS_PX: f32 = RADIUS_SM_PX;
+
+// ---- composer 草稿与工具栏（上游 InputBar.module.css）----
+//
+// `.card` 顶内距 8（figma 10 → 8）、行间距 12；`.row` pad `2px 8px 6px`、
+// gap 12；`.tools`/`.modes`/`.trailing` 统一 gap 12（figma 画 16/4，后统一
+// 到 12）；`.input` pad `4px 8px 0 14px`（左内距 16→14），右侧再叠
+// `.scroll` 的 4px 条内缩，故文字列右侧总内缩 12。
+pub const COMPOSER_INPUT_PAD_L_PX: f32 = 14.0;
+pub const COMPOSER_INPUT_PAD_R_PX: f32 = 12.0;
+pub const COMPOSER_INPUT_PAD_T_PX: f32 = 4.0;
+pub const COMPOSER_TOOLBAR_GAP_PX: f32 = 12.0;
+// `.input { min-height: 36px }`（停靠态单行外壳 = 24 行高 + 4 上内距 + 8
+// 余量）；`.hero .input { min-height: 52px }`（空态两行地板，占位符两行截断）。
+pub const COMPOSER_INPUT_MIN_H_PX: f32 = 36.0;
+pub const COMPOSER_HERO_INPUT_MIN_H_PX: f32 = 52.0;
+// 上游 ui-attachment `.rail { padding: 2px 10px 0; margin-bottom: -6px }`：
+// 卡片行距统一 12，缩略图比其它行更贴近草稿，故底边回拉 6。
+pub const COMPOSER_RAIL_PAD_X_PX: f32 = 10.0;
+pub const COMPOSER_RAIL_PAD_T_PX: f32 = 2.0;
+pub const COMPOSER_RAIL_MARGIN_BOTTOM_PX: f32 = -6.0;
 
 // ---- 设置导航 + 提供方行卡（上游 ui-settings-general SettingsRoot `.navCell`/
 //       `.navList` 与 ui-settings-models ModelsSection `.rowCard`）----
@@ -719,13 +749,19 @@ mod tests {
 
     #[test]
     fn hero_matches_upstream_shell() {
-        // `.stack { gap: 12px }`、`.headline` 26/32 wt500、列间距 10
-        assert_eq!(HERO_STACK_GAP_PX, 12.0);
+        // 上游 `.composerHero { gap: 8px }`（figma 三行 12 后的实际值）
+        assert_eq!(HERO_STACK_GAP_PX, 8.0);
         assert_eq!(HERO_HEADLINE_FONT_PX, 26.0);
         assert_eq!(HERO_HEADLINE_LEADING_PX, 32.0);
         assert_eq!(HERO_HEADLINE_GAP_PX, 10.0);
-        // `.workspaceRow { padding-left: 8px }`（曾写 20，chip 整体右移 12）
-        assert_eq!(HERO_WORKSPACE_ROW_PAD_L_PX, 8.0);
+        // `.heroWorkspaceRow { padding: 0 16px 0 20px; margin-top: 4px; gap: 2px }`
+        //（figma 左侧 8 → +12；曾按旧的 `padding-left: 8px` 实现）
+        assert_eq!(HERO_WORKSPACE_ROW_PAD_L_PX, 20.0);
+        assert_eq!(HERO_WORKSPACE_ROW_PAD_R_PX, 16.0);
+        assert_eq!(HERO_WORKSPACE_ROW_MARGIN_TOP_PX, 4.0);
+        assert_eq!(HERO_WORKSPACE_ROW_GAP_PX, 2.0);
+        // 标题↔行 = 栈 gap 8 + 行上距 4 = 12；行↔卡 = 栈 gap 8
+        assert_eq!(HERO_STACK_GAP_PX + HERO_WORKSPACE_ROW_MARGIN_TOP_PX, 12.0);
         // `.workspace`：gap 4、min-height 28、pad 0 8、R8（曾写 14 胶囊）、cap 360
         assert_eq!(HERO_WORKSPACE_GAP_PX, 4.0);
         assert_eq!(HERO_WORKSPACE_MIN_H_PX, 28.0);
@@ -733,7 +769,30 @@ mod tests {
         assert_eq!(HERO_WORKSPACE_RADIUS_PX, RADIUS_SM_PX);
         assert_eq!(HERO_WORKSPACE_RADIUS_PX, 8.0);
         assert_eq!(HERO_WORKSPACE_MAX_W_PX, 360.0);
-        // chip 里文字到卡面左缘 = 行 8 + chip 8 = 16（上游 figma 75:8208）
-        assert_eq!(HERO_WORKSPACE_ROW_PAD_L_PX + HERO_WORKSPACE_PAD_X_PX, 16.0);
+        // chip 里文件夹图标到卡面左缘 = 行 20 + chip 8 = 28
+        assert_eq!(HERO_WORKSPACE_ROW_PAD_L_PX + HERO_WORKSPACE_PAD_X_PX, 28.0);
+    }
+
+    #[test]
+    fn composer_draft_and_toolbar_match_upstream() {
+        // `.card`：顶 8、行距 12（见 composer_card_matches_upstream）
+        assert_eq!(COMPOSER_CARD_PAD_TOP_PX, 8.0);
+        assert_eq!(COMPOSER_CARD_GAP_PX, 12.0);
+        // `.input { padding: 4px 8px 0 14px }`，文字列右侧 = 8 + `.scroll` 4 = 12
+        assert_eq!(COMPOSER_INPUT_PAD_L_PX, 14.0);
+        assert_eq!(COMPOSER_INPUT_PAD_T_PX, 4.0);
+        assert_eq!(COMPOSER_INPUT_PAD_R_PX, 12.0);
+        // `.row` / `.tools` / `.modes` / `.trailing` 统一 gap 12（曾写 16）
+        assert_eq!(COMPOSER_TOOLBAR_GAP_PX, 12.0);
+        assert_ne!(COMPOSER_TOOLBAR_GAP_PX, 16.0);
+        // `.input { min-height: 36px }`、`.hero .input { min-height: 52px }`
+        assert_eq!(COMPOSER_INPUT_MIN_H_PX, 36.0);
+        assert_eq!(COMPOSER_HERO_INPUT_MIN_H_PX, 52.0);
+        assert!(COMPOSER_HERO_INPUT_MIN_H_PX > COMPOSER_INPUT_MIN_H_PX);
+        // 附件栏 `.rail { padding: 2px 10px 0; margin-bottom: -6px }`
+        assert_eq!(COMPOSER_RAIL_PAD_X_PX, 10.0);
+        assert_eq!(COMPOSER_RAIL_PAD_T_PX, 2.0);
+        assert_eq!(COMPOSER_RAIL_MARGIN_BOTTOM_PX, -6.0);
+        assert!(COMPOSER_RAIL_MARGIN_BOTTOM_PX < 0.0);
     }
 }

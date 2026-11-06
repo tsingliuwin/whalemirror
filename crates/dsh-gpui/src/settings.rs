@@ -699,12 +699,16 @@ fn models_page(app: &AppView, this: &Entity<AppView>, _window: &mut Window, cx: 
                 .gap(px(10.0))
                 .child(add_button("set-add-known", "添加提供方", move |_, _, cx| {
                     t1.update(cx, |v, cx| {
+                        let focus = dsh_gpui::provider_cards::focus_after_add(&form_focus(v));
+                        v.editing_provider = focus.editing;
                         v.adding = AddingMode::Adopt;
                         cx.notify();
                     });
                 }))
                 .child(add_button("set-add-custom", "添加自定义提供方", move |_, _, cx| {
                     t2.update(cx, |v, cx| {
+                        let focus = dsh_gpui::provider_cards::focus_after_add(&form_focus(v));
+                        v.editing_provider = focus.editing;
                         v.adding = AddingMode::Declare;
                         cx.notify();
                     });
@@ -749,6 +753,14 @@ fn page_intro(text: &str) -> Div {
         .line_height(px(22.0))
         .text_color(tk.text_3)
         .child(text.to_string())
+}
+
+/// 当前提供方表单焦点（行编辑 + 添加卡），喂给 `provider_cards` 的纯函数。
+fn form_focus(app: &AppView) -> dsh_gpui::provider_cards::ProviderFormFocus {
+    dsh_gpui::provider_cards::ProviderFormFocus {
+        editing: app.editing_provider.clone(),
+        add_open: !matches!(app.adding, AddingMode::None),
+    }
 }
 
 /// 已配置提供方行卡（web .rowCard：l2 描边 r12 pad 12/14 gap 12）。
@@ -819,45 +831,45 @@ fn provider_row(
             .bg(if has_key { tk.green } else { tk.error }),
     );
     // web 的 rowCard 只有 编辑/删除，没有启用动作（当前模型由
-    // composer 的模型选择器管理，不是行卡职责）
-    head = head.child(div().flex_1());
-    head = head.child(
-        // 编辑（secondary h36 r18）
-        action_button(
+    // composer 的模型选择器管理，不是行卡职责）。行操作是 `Button.sm`
+    // 紧凑档，`rowActions` 自带右对齐与 4px 间距（行头 gap 10 不参与）。
+    let mut actions = div()
+        .flex()
+        .items_center()
+        .gap(px(dsh_gpui::ui_metrics::PROVIDER_ROW_ACTIONS_GAP_PX))
+        .ml_auto()
+        .child(compact_action_button(
             SharedString::from(format!("prov-edit-{id}")),
             "编辑",
             false,
             move |_, _, cx| {
                 let id = edit_id.clone();
                 t_edit.update(cx, |v, cx| {
-                    v.editing_provider = if v.editing_provider.as_deref() == Some(&id) {
-                        None
-                    } else {
-                        Some(id)
-                    };
+                    let focus = dsh_gpui::provider_cards::focus_after_edit(&form_focus(v), &id);
+                    v.editing_provider = focus.editing;
+                    // 上游「一次只开一张卡」：行编辑展开时收添加卡
+                    v.adding = AddingMode::None;
                     cx.notify();
                 });
             },
-        ),
-    );
+        ));
     if !is_deepseek {
         let t_del = this.clone();
         let del_id = id.to_string();
-        head = head.child(
-            action_button(
-                SharedString::from(format!("prov-del-{id}")),
-                "删除",
-                false,
-                move |_, _, cx| {
-                    let id = del_id.clone();
-                    t_del.update(cx, |v, cx| {
-                        v.confirm_delete = Some(id);
-                        cx.notify();
-                    });
-                },
-            ),
-        );
+        actions = actions.child(compact_action_button(
+            SharedString::from(format!("prov-del-{id}")),
+            "删除",
+            true,
+            move |_, _, cx| {
+                let id = del_id.clone();
+                t_del.update(cx, |v, cx| {
+                    v.confirm_delete = Some(id);
+                    cx.notify();
+                });
+            },
+        ));
     }
+    head = head.child(actions);
 
     let mut card = div()
         .v_flex()
@@ -1573,12 +1585,13 @@ fn action_button(
     let tk = theme::t();
     div()
         .id(id)
-        .h(px(36.0))
-        .px(px(14.0))
+        .h(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_MD_H_PX))
+        .px(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_MD_PAD_X_PX))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(18.0))
+        // web Button 基座 `--dsw-radius-md` = R12（曾写 R18 胶囊）
+        .rounded(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_MD_RADIUS_PX))
         .map(|d| {
             if primary {
                 // web button-primary：fill=brand-primary（暗=近白/亮=墨），字=foreground 反色
@@ -1593,11 +1606,46 @@ fn action_button(
                     .hover(|s| s.bg(tk.hover))
             }
         })
-        .text_size(px(theme::FONT_ROW))
-        .line_height(px(22.0))
+        .text_size(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_MD_FONT_PX))
+        .line_height(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_MD_LEADING_PX))
         .cursor_pointer()
         .on_click(on_click)
         .child(label)
+}
+
+/// 紧凑档行内按钮（web `Button.sm`：高 28、pad 0 10、R8、12/18）——
+/// 提供方行卡的编辑/删除，不占页脚 md 档的尺寸。`danger` 走 web
+/// `.dangerButton`：无描边、错误色文字、红色 hover 底。
+fn compact_action_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    danger: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let tk = theme::t();
+    let mut button = div()
+        .id(id)
+        .h(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_SM_H_PX))
+        .px(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_SM_PAD_X_PX))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_SM_RADIUS_PX))
+        .text_size(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_SM_FONT_PX))
+        .line_height(px(dsh_gpui::ui_metrics::SETTINGS_BUTTON_SM_LEADING_PX))
+        .cursor_pointer();
+    button = if danger {
+        button
+            .text_color(tk.error)
+            .hover(|s| s.bg(tk.danger_hover))
+    } else {
+        button
+            .border(px(0.5))
+            .border_color(tk.border_l3)
+            .text_color(tk.text)
+            .hover(|s| s.bg(tk.hover))
+    };
+    button.on_click(on_click).child(label)
 }
 
 /// h28 linkButton（web .linkButton：透明、12/18 tertiary、hover 白8%）。

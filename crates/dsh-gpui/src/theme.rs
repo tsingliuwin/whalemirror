@@ -90,6 +90,9 @@ pub struct Tokens {
     pub hover: Hsla,
     /// `--dsw-alias-interactive-bg-active`。
     pub active: Hsla,
+    /// `--dsw-alias-interactive-bg-hover-danger`（危险按钮 hover：亮 5% 红、
+    /// 暗 15% 红）。
+    pub danger_hover: Hsla,
     /// `--dsw-alias-bg-mask-1`（设置弹层遮罩）。
     pub mask: Hsla,
     /// 滚动条 thumb（scrollbar-bg-l2 对）。
@@ -149,6 +152,7 @@ pub const DARK: Tokens = Tokens {
     border_l4: hsla_const(0.0, 0.0, 1.0, 0.20),
     hover: hsla_const(0.0, 0.0, 1.0, 0.08),
     active: hsla_const(0.0, 0.0, 1.0, 0.14),
+    danger_hover: hsla_const(0.0, 0.854, 0.651, 0.15), // rgba(242,90,90,.15)
     mask: hsla_const(0.0, 0.0, 0.0, 0.5),
     scrollbar_thumb: rgb_const(0x545557),       // neutral-600
     scrollbar_thumb_hover: rgb_const(0x65676b), // neutral-550
@@ -195,6 +199,7 @@ pub const LIGHT: Tokens = Tokens {
     border_l4: hsla_const(0.0, 0.0, 0.0, 0.16),
     hover: hsla_const(0.625, 0.31, 0.216, 0.06),  // rgba(38,49,72,.06)
     active: hsla_const(0.625, 0.31, 0.216, 0.10), // rgba(38,49,72,.10)
+    danger_hover: hsla_const(0.0, 0.851, 0.5, 0.05), // rgba(236,19,19,.05)
     mask: hsla_const(0.0, 0.0, 0.0, 0.24),
     scrollbar_thumb: rgb_const(0xe5e5e5),       // neutral-200
     scrollbar_thumb_hover: rgb_const(0xd4d4d4), // neutral-300

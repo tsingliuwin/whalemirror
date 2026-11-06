@@ -245,6 +245,22 @@ pub const PROVIDER_ROW_GAP_PX: f32 = 12.0;
 // 上游 `.rows`：提供方卡之间 8px（外壳 `.section { gap: 12px }` 管标题/说明
 // 块 ↔ 首卡，以及 rows 块 ↔ 添加卡）
 pub const PROVIDER_ROWS_GAP_PX: f32 = 8.0;
+// 上游 `.rowActions { gap: 4px; margin-left: auto }`：编辑/删除是紧凑档
+// （`Button.sm` = 高 28、pad 0 10、R8、12/18），行头本身 gap 10。
+pub const PROVIDER_ROW_ACTIONS_GAP_PX: f32 = 4.0;
+// 上游 `Button` 两档（ui-primitives Button.module.css）：`.button` 基座
+// R12/14-22/pad 0 14，`.md` 高 36（设置页编辑器与弹层页脚），`.sm` 高 28、
+// 12/18、pad 0 10、R8（行内紧凑操作）。曾把两档都写成 R18 胶囊。
+pub const SETTINGS_BUTTON_MD_H_PX: f32 = 36.0;
+pub const SETTINGS_BUTTON_MD_PAD_X_PX: f32 = 14.0;
+pub const SETTINGS_BUTTON_MD_RADIUS_PX: f32 = RADIUS_MD_PX;
+pub const SETTINGS_BUTTON_MD_FONT_PX: f32 = 14.0;
+pub const SETTINGS_BUTTON_MD_LEADING_PX: f32 = 22.0;
+pub const SETTINGS_BUTTON_SM_H_PX: f32 = 28.0;
+pub const SETTINGS_BUTTON_SM_PAD_X_PX: f32 = 10.0;
+pub const SETTINGS_BUTTON_SM_RADIUS_PX: f32 = RADIUS_SM_PX;
+pub const SETTINGS_BUTTON_SM_FONT_PX: f32 = 12.0;
+pub const SETTINGS_BUTTON_SM_LEADING_PX: f32 = 18.0;
 pub const SETTINGS_SECTION_GAP_PX: f32 = 12.0;
 // 上游 linkButton（「获取可用模型」/「全选」等 ghost-sm 钮）：R8、28、pad 0 10
 pub const LINK_BUTTON_H_PX: f32 = 28.0;
@@ -573,6 +589,25 @@ mod tests {
         assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
         assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
         assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
+        // `Button.md`：高 36、pad 0 14、R12、14/22（编辑器页脚与弹层页脚）
+        assert_eq!(SETTINGS_BUTTON_MD_H_PX, 36.0);
+        assert_eq!(SETTINGS_BUTTON_MD_PAD_X_PX, 14.0);
+        assert_eq!(SETTINGS_BUTTON_MD_RADIUS_PX, RADIUS_MD_PX);
+        assert_eq!(SETTINGS_BUTTON_MD_RADIUS_PX, 12.0);
+        assert_eq!(SETTINGS_BUTTON_MD_FONT_PX, 14.0);
+        assert_eq!(SETTINGS_BUTTON_MD_LEADING_PX, 22.0);
+        // `Button.sm`：高 28、pad 0 10、R8、12/18（提供方行内编辑/删除）
+        assert_eq!(SETTINGS_BUTTON_SM_H_PX, 28.0);
+        assert_eq!(SETTINGS_BUTTON_SM_PAD_X_PX, 10.0);
+        assert_eq!(SETTINGS_BUTTON_SM_RADIUS_PX, RADIUS_SM_PX);
+        assert_eq!(SETTINGS_BUTTON_SM_RADIUS_PX, 8.0);
+        assert_eq!(SETTINGS_BUTTON_SM_FONT_PX, 12.0);
+        assert_eq!(SETTINGS_BUTTON_SM_LEADING_PX, 18.0);
+        // 两档不是同一胶囊：半径与行高都必须分开（旧实现统一 R18）
+        assert_ne!(SETTINGS_BUTTON_MD_RADIUS_PX, SETTINGS_BUTTON_SM_RADIUS_PX);
+        assert_ne!(SETTINGS_BUTTON_MD_H_PX, SETTINGS_BUTTON_SM_H_PX);
+        // `.rowActions { gap: 4px }`
+        assert_eq!(PROVIDER_ROW_ACTIONS_GAP_PX, 4.0);
     }
 
     /// 设置左轨：标题文字内缩 24、格子内缩 12、标题行 24 + 8 下距、

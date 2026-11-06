@@ -151,4 +151,5 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | I25 | 设置左轨纵向节奏（补缺 #88）：`.nav` 上内距 10/左右 12、标题行 24 高 + 8 下距（16px 字、文字左缘 24）、格子左缘 12、格间 4 | `cargo test -p dsh-gpui --lib ui_metrics`；侧栏 ⚙ 打开设置 | 单测全绿；实机选中格填充带相对面板顶 42（改前 64）、标题文字 y 170–183（改前 181–194）、格子左缘 x = 面板左 + 12 |
 | I26 | GPUI 生态基线（补缺 #89）：gpui-pre/-platform 0.3.11 + gpui-base/component/assets 0.9.0，vendor 23 处 [dsh] 补丁重放（表格几何/排版/粘贴/opener/代码块 R16） | `cargo test --workspace`；`cargo check -p gpui-base`；打开含表格会话 | 360/0 全绿 + regression-core GREEN；实机表格竖线=0、表头白底、设置 nav 几何不变（y 195–234） |
 | I27 | prompt 重试去重（补缺 #90）：同一 `MessageId` 只接纳一次——入列即记收据，认领/移除不撤销；日志 `user/message` 行是收据恢复源；收据按确切会话缓存 | `cargo test -p dsh-agent-loop --test prompt_dedup`；`cargo test -p dsh-agent contains` | 6 + 1 测全绿；重复 `send` 返回 false、收件箱与日志各只有一条同 id 输入 |
+| I28 | 模型页提供方卡按钮两档 + 一次只开一张卡（补缺 #92）：md 36/R12/14-22/pad14、sm 28/R8/12-18/pad10、行操作 gap 4、删除为错误色无描边、添加卡与行编辑卡互斥 | `cargo test -p dsh-gpui --lib ui_metrics`；`cargo test -p dsh-gpui --lib provider_cards`；设置 → 模型 | 单测全绿；实机提供方卡高 54（改前 62）、编辑钮 28 高且顶边 R8、删除文字 rgb(236,19,19)、开添加卡后点编辑只剩一张表单 |
 | I6 | 实机像素取证：激活条几何 | 截屏后按 accent 色扫描标签条下缘 | 激活条仅 2 行像素高、左右内缩 10px（条宽 = 文字宽，本机实测文字 629–653 / 条 628–653） |

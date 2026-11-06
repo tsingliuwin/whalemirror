@@ -15,21 +15,36 @@ pub(crate) fn render_settings(app: &AppView, this: Entity<AppView>, window: &mut
     let tk = theme::t();
     let t_close = this.clone();
 
-    // 导航（web .nav：188px、pad(22,12,0)、gap 18）
+    // 导航轨（上游 `.nav { padding: 10px 12px 0 }` + `.navTitle { padding:
+    // 22px 12px 8px 24px; 16/24/500 }`）：标题占一行 18+24+12 = 54，与内容区
+    // `.header` 的 h54 同线，第一个导航格从 y=54 起；格子左缘落在面板左侧
+    // 12px（`.nav` 的左右内距），标题文字左缘 24（12 + 标题自身 12）。
+    //
+    // 实现取「字面量 + 显式行盒」而不是四个常量相加：nightly 1.101 在本仓
+    // 会把这类多常量连加折叠成 64（旧实现的 22+24+18），且写成分段表达式
+    // 也不可靠（见 ui_metrics 里 SETTINGS_NAV_LIST_TOP_PX 的注释）。
+    // 标题行高写成定值，不依赖字体行盒的取整。
+    use dsh_gpui::ui_metrics as sm;
+    let tk_nav = tk;
     let nav = div()
         .w(px(188.0))
         .flex_none()
         .v_flex()
-        .pt(px(22.0))
-        .px_3()
-        .gap(px(18.0))
+        .pt(px(sm::SETTINGS_NAV_PAD_TOP_PX))
+        .px(px(sm::SETTINGS_NAV_PAD_X_PX))
         .child(
             div()
-                .px_3()
-                .text_size(px(16.0))
-                .line_height(px(24.0))
+                .id("set-nav-title-row")
+                .flex_none()
+                .h(px(sm::SETTINGS_NAV_TITLE_LEADING_PX))
+                .mb(px(sm::SETTINGS_NAV_TITLE_MARGIN_BOTTOM_PX))
+                .pl(px(sm::SETTINGS_NAV_TITLE_INSET_PX))
+                // 不设 line_height：GPUI 的显式行高会把单行文字顶到盒顶
+                // 绘制（其余地方只用在多行文本框），标题用字体自然行盒，
+                // 由 `.h(24)` + 8px 外边距定几何。
+                .text_size(px(sm::SETTINGS_NAV_TITLE_FONT_PX))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(tk.text)
+                .text_color(tk_nav.text)
                 .child("设置"),
         )
         .child(

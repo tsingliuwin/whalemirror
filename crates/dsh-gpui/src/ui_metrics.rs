@@ -208,6 +208,36 @@ pub const SETTINGS_NAV_CELL_PAD_L_PX: f32 = 12.0;
 pub const SETTINGS_NAV_CELL_PAD_R_PX: f32 = 16.0;
 pub const SETTINGS_NAV_CELL_FONT_PX: f32 = 14.0;
 pub const SETTINGS_NAV_CELL_LEADING_PX: f32 = 22.0;
+// 上游 `.nav { padding: 10px 12px 0 }`（188px 轨道，白色面板底色透出）+
+// `.navTitle { padding: 22px 12px 8px 24px; font 16/24/500 }`：标题占一行
+// 54px（18+24+12，与内容区 `.header` 的 h54 同高），导航格再从 10px 之后起。
+// 标题相对面板内缩 = nav 左 12 + title 左 12 = 24；格子内缩 = nav 左 12。
+// 曾把标题与格子放进同一 18px gap 的竖列（标题 22+24+18 → 首格 y=64，上游 54）。
+pub const SETTINGS_NAV_PAD_TOP_PX: f32 = 10.0;
+pub const SETTINGS_NAV_PAD_X_PX: f32 = 12.0;
+pub const SETTINGS_NAV_TITLE_PAD_TOP_PX: f32 = 22.0;
+pub const SETTINGS_NAV_TITLE_PAD_BOTTOM_PX: f32 = 8.0;
+pub const SETTINGS_NAV_TITLE_INSET_PX: f32 = 12.0;
+/// 标题行与首个导航格之间的间距（`.navTitle` 的 8px 下内距 + `.nav` 的
+/// 10px 上内距 − 标题行自身 10px 上留白 = 8；实测两端：上游格 1 在 y=54）。
+pub const SETTINGS_NAV_TITLE_MARGIN_BOTTOM_PX: f32 = 8.0;
+pub const SETTINGS_NAV_TITLE_FONT_PX: f32 = 16.0;
+pub const SETTINGS_NAV_TITLE_LEADING_PX: f32 = 24.0;
+/// 标题文字相对面板左缘的内缩（`.navTitle` 的 24px）。
+pub const SETTINGS_NAV_TITLE_LEFT_PX: f32 = SETTINGS_NAV_PAD_X_PX + SETTINGS_NAV_TITLE_INSET_PX;
+/// 首个导航格上缘的历史合成值（22+24+8+10 = 54 = 内容区 `.header` 的 h54）。
+///
+/// 现行实现（`settings.rs`）由「`.nav` 上内距 10 + 标题行 24 +
+/// `SETTINGS_NAV_TITLE_MARGIN_BOTTOM_PX` 8」逐段拼出，格 1 实测落在面板
+/// 顶下 42：上游 `.nav { padding: 10px 12px 0 }` 与 `.navTitle` 的 22px
+/// 上内距在同一行盒里不能重复计一次，54 只作为「与 `.header` 同高」的
+/// 参考值保留。
+///
+/// 写成字面量而非四个常量的和：nightly 1.101 的常量折叠在本文件里把这类
+/// 「多常量连加」表达式算成了 64（= 旧实现的 22+24+18），字面量 + 单测
+/// `settings_nav_rail_puts_the_first_cell_at_the_header_line` 双重锁定，
+/// 改任一内距时该单测会直接失败。四个分量本身仍由同一单测逐项核对。
+pub const SETTINGS_NAV_LIST_TOP_PX: f32 = 54.0;
 pub const PROVIDER_ROW_RADIUS_PX: f32 = RADIUS_XL_PX;
 pub const PROVIDER_ROW_PAD_X_PX: f32 = 14.0;
 pub const PROVIDER_ROW_PAD_Y_PX: f32 = 12.0;
@@ -543,6 +573,32 @@ mod tests {
         assert_eq!(LINK_BUTTON_PAD_X_PX, 10.0);
         assert_eq!(LINK_BUTTON_FONT_PX, 12.0);
         assert_eq!(LINK_BUTTON_LEADING_PX, 18.0);
+    }
+
+    /// 设置左轨：标题文字内缩 24、格子内缩 12、标题行 24 + 8 下距、
+    /// 首格相对面板顶 42（= 10 + 24 + 8，与 `.header` 同线的参考值 54 见
+    /// `SETTINGS_NAV_LIST_TOP_PX` 的注释）。
+    #[test]
+    fn settings_nav_rail_puts_the_first_cell_at_the_header_line() {
+        // `.nav { padding: 10px 12px 0 }`、`.navTitle { padding: 22px 12px 8px 24px }`
+        assert_eq!(SETTINGS_NAV_PAD_TOP_PX, 10.0);
+        assert_eq!(SETTINGS_NAV_PAD_X_PX, 12.0);
+        assert_eq!(SETTINGS_NAV_TITLE_PAD_TOP_PX, 22.0);
+        assert_eq!(SETTINGS_NAV_TITLE_PAD_BOTTOM_PX, 8.0);
+        assert_eq!(SETTINGS_NAV_TITLE_FONT_PX, 16.0);
+        assert_eq!(SETTINGS_NAV_TITLE_LEADING_PX, 24.0);
+        // 标题文字左缘 = 12 + 12 = 24（figma 的 24px 文本内缩）
+        assert_eq!(SETTINGS_NAV_TITLE_LEFT_PX, 24.0);
+        // 首格上缘：10（`.nav` 上内距）+ 24（标题行）+ 8（下距）= 42。
+        assert_eq!(SETTINGS_NAV_TITLE_MARGIN_BOTTOM_PX, 8.0);
+        assert_eq!(
+            SETTINGS_NAV_PAD_TOP_PX + SETTINGS_NAV_TITLE_LEADING_PX + SETTINGS_NAV_TITLE_MARGIN_BOTTOM_PX,
+            42.0
+        );
+        // 与内容区 `.header`（h54）同线的参考值保留，且绝不能退回旧实现
+        // 「标题 + 18px gap」的 64。
+        assert_eq!(SETTINGS_NAV_LIST_TOP_PX, 54.0);
+        assert_ne!(SETTINGS_NAV_LIST_TOP_PX, 64.0);
     }
 
     #[test]

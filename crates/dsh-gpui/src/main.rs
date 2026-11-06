@@ -176,6 +176,8 @@ struct ContextInfo {
     label: Option<String>,
     /// notice 形态的一行摘要（120 字符截断）
     summary: Option<String>,
+    /// 压缩分隔行的展示事实（仅压缩行；上游 CompactionItem 的计数与摘要）
+    compaction: Option<dsh_gpui::compaction_row::CompactionRowFacts>,
 }
 
 #[derive(Clone)]
@@ -1761,7 +1763,7 @@ fn context_info(
         }
     });
     let _ = form;
-    ContextInfo { title, label, summary: bounded }
+    ContextInfo { title, label, summary: bounded, compaction: None }
 }
 
 fn non_empty(s: String) -> Option<String> {

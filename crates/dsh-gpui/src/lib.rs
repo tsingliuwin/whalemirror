@@ -4,6 +4,7 @@
 
 pub mod code_program;
 pub mod columns;
+pub mod compaction_row;
 pub mod credential_mask;
 pub mod path_label;
 pub mod provider_cards;

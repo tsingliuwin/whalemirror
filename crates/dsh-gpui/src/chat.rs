@@ -926,6 +926,7 @@ impl ChatView {
                             title: if replace.is_some() { "系统提示词更新" } else { "系统提示词" },
                             label: None,
                             summary: None,
+                            compaction: None,
                         }),
                         open: false,
                     });
@@ -1037,11 +1038,27 @@ impl ChatView {
                         }
                     }
                 }
-                SessionEvent::Compaction { .. } => {
+                SessionEvent::Compaction {
+                    summary,
+                    shadowed_seqs,
+                    shadowed_token_count,
+                    ..
+                } => {
+                    let facts = dsh_gpui::compaction_row::CompactionRowFacts {
+                        shadowed_items: shadowed_seqs.len() as u64,
+                        shadowed_tokens: *shadowed_token_count,
+                        summary: summary.clone(),
+                    };
                     self.entries.push(ChatEntry {
             echo_id: None,
 step: None,
-step_duration_ms: None, role: Role::Notice, blocks: vec![], done: true, elapsed: None, usage: None, ended_at_ms: None, turn: cur_turn, context: None,
+step_duration_ms: None, role: Role::Notice, blocks: vec![], done: true, elapsed: None, usage: None, ended_at_ms: None, turn: cur_turn,
+context: Some(crate::ContextInfo {
+    title: facts.title(),
+    label: None,
+    summary: Some(facts.summary_text()),
+    compaction: Some(facts),
+}),
 open: false,
 });
                 }
@@ -2880,24 +2897,150 @@ Role::Notice => {
                             ),
                     ),
                     None => {
-                        // 压缩分隔条：居中 hairline + 说明文字（web compaction 提示行；
-                        // alpha.4 全局 hairline 化，线宽随 0.5px）
-                        div()
+                        // 压缩分隔行（上游 ui-chat CompactionItem）：24 高
+                        // 可展开行「上下文已压缩 · 已压缩 N 条历史记录（约 T
+                        // tokens）」，展开体为摘要原文；无摘要时禁用展开。
+                        let facts = entry
+                            .context
+                            .as_ref()
+                            .and_then(|c| c.compaction.clone())
+                            .unwrap_or_default();
+                        let open = entry.open;
+                        let expandable = facts.expandable();
+                        let t = this.clone();
+                        let row_group: SharedString = format!("cmp-row-{ei}").into();
+                        let leading = if open {
+                            div()
+                                .flex_none()
+                                .w(px(16.0))
+                                .h(px(16.0))
+                                .mr(px(6.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(Icon::new(IconName::ChevronDown).size(px(14.0)).text_color(theme::t().text_3))
+                        } else {
+                            // 静止为注入图标，行 hover 淡入右向箭头（同
+                            // DisclosureRow 的 leading 规则）
+                            div()
+                                .relative()
+                                .flex_none()
+                                .w(px(16.0))
+                                .h(px(16.0))
+                                .mr(px(6.0))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .right_0()
+                                        .bottom_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            Icon::new(IconName::ChevronRight)
+                                                .size(px(14.0))
+                                                .text_color(theme::t().text_3),
+                                        )
+                                        .opacity(0.0)
+                                        .group_hover(row_group.clone(), |s| s.opacity(1.0)),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .right_0()
+                                        .bottom_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            gpui::svg()
+                                                .path("icons/context-injection.svg")
+                                                .w(px(14.0))
+                                                .h(px(14.0))
+                                                .flex_none()
+                                                .text_color(theme::t().text_3),
+                                        )
+                                        .group_hover(row_group.clone(), |s| s.opacity(0.0)),
+                                )
+                        };
+                        let mut row = div()
+                            .id(("cmp-row", ei as u64))
+                            .group(row_group)
                             .w_full()
                             .flex()
                             .items_center()
-                            .gap_3()
-                            .py(px(4.0))
-                            .child(div().flex_1().h(px(0.5)).bg(theme::t().border_l2))
+                            .h(px(24.0))
+                            .rounded(px(dsh_gpui::ui_metrics::RADIUS_SM_PX))
+                            .text_color(theme::t().text_3)
+                            .child(leading)
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(theme::FONT_CAPTION))
-                                    .line_height(px(theme::FONT_CAPTION_LEADING))
+                                    .text_size(px(theme::FONT_TAB))
+                                    .line_height(px(24.0))
                                     .text_color(theme::t().text_3)
-                                    .child("上下文已压缩 · 已生成摘要检查点"),
+                                    .child(facts.title()),
                             )
-                            .child(div().flex_1().h(px(0.5)).bg(theme::t().border_l2))
+                            .child(
+                                // 分隔点（上游 .compactionSep：2px 方点，两侧 8）
+                                div()
+                                    .flex_none()
+                                    .mx(px(8.0))
+                                    .w(px(2.0))
+                                    .h(px(2.0))
+                                    .rounded(px(1.0))
+                                    .bg(theme::t().caption),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(theme::FONT_TAB))
+                                    .line_height(px(24.0))
+                                    .text_color(theme::t().text_3)
+                                    .child(facts.summary_text()),
+                            );
+                        if expandable {
+                            row = row.cursor_pointer().hover(|s| s.bg(theme::t().hover)).on_click(
+                                move |_, _, cx| {
+                                    t.update(cx, |v, cx| {
+                                        if let Some(e) = v.entries.get_mut(ei) {
+                                            e.open = !e.open;
+                                        }
+                                        cx.notify();
+                                    });
+                                },
+                            );
+                        }
+                        let mut wrap = div()
+                            .w_full()
+                            .v_flex()
+                            .py(px(2.0))
+                            .child(row);
+                        if open && expandable {
+                            wrap = wrap.child(
+                                div()
+                                    .w_full()
+                                    .pt(px(4.0))
+                                    .pb(px(4.0))
+                                    .pl(px(22.0))
+                                    .text_size(px(theme::FONT_TAB))
+                                    .line_height(px(24.0))
+                                    .text_color(theme::t().text_3)
+                                    .child(widgets::MarkdownBlock {
+                                        text: facts.summary.clone(),
+                                        id: 7700 + ei,
+                                    }),
+                            );
+                        }
+                        wrap
                     }
                 }
             }

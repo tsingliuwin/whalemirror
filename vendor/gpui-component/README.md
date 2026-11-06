@@ -27,7 +27,7 @@ gpui-kit             The one crate applications depend on
 
 `gpui-kit` pins the matching GPUI release and re-exports GPUI, base, component,
 and assets, so a Rust application lists a single dependency. JavaScript extension
-hosts add `gpui-shell` separately; `gpui-component-shell` supplies the styled catalog.
+hosts add `gpui-shell` separately; its default `components` feature supplies the styled catalog.
 
 See the [executable application recipe and AI-assisted development acceptance checks](examples/ai_recipes/README.md) for a tested starting point and verification commands.
 
@@ -127,6 +127,22 @@ default icon set are on by default. Turn default
 features off to keep only the layers you use. The `gpui-component` features (`inspector`, `decimal`,
 `tree-sitter`, and each `tree-sitter-<language>`) are available under the same
 names.
+
+### GPUI Fast
+
+Enable the optional `gpui-fast` feature to select [GPUI Fast](https://github.com/longbridge/gpui-fast)
+for the core, native platforms, WebAssembly, and every enabled Kit layer:
+
+```toml
+[dependencies]
+gpui-kit = { version = "0.7", features = ["gpui-fast"] }
+```
+
+Keep the same imports, initialization, and test macros; no application `[patch]`
+or crate alias is needed. The default backend remains the pinned upstream GPUI
+snapshot. Cargo features are additive, so upstream packages still compile when
+Fast is selected. See [Getting Started](https://gpui-kit.com/docs/getting-started)
+for feature combinations and comparison commands.
 
 ### Basic Example
 
@@ -236,6 +252,10 @@ Check out [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
 ## Compare to others
 
 See the [comparison with Iced, egui and Qt 6](https://gpui-kit.com/docs/comparison) on the site.
+
+## Related project: Native Shell
+
+[Native Shell](https://nsh.dev) ([source](https://github.com/longbridge/native-shell)) is a sibling project that lets AI generate UI and renders it natively on iOS, Android, Linux (GTK) and macOS (AppKit). Its GPUI desktop backend is in development and will be built on GPUI Kit.
 
 ## License
 

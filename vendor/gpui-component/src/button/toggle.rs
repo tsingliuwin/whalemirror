@@ -1,4 +1,4 @@
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
     AnyElement, App, Axis, Corners, Edges, ElementId, InteractiveElement, IntoElement,
@@ -71,6 +71,14 @@ impl Toggle {
     /// Set tooltip text for the toggle.
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
         self.tooltip.text = Some((tooltip.into(), None));
+        self
+    }
+
+    /// Overrides how long the pointer must rest before the tooltip shows.
+    ///
+    /// Defaults to [`gpui_base::TooltipDefaults::show_delay`].
+    pub fn tooltip_show_delay(mut self, delay: Duration) -> Self {
+        self.tooltip.show_delay = Some(delay);
         self
     }
 
@@ -459,7 +467,8 @@ mod tests {
     }
 
     fn activate_key(cx: &mut VisualTestContext, key: &str) {
-        let keystroke = Keystroke::parse(key).unwrap();
+        let keystroke =
+            cx.update(|_, cx| Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
             is_held: false,

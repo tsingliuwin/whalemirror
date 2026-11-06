@@ -86,6 +86,18 @@ impl TextView {
             stream_fade: None,
         }
     }
+    /// Overrides the source of every document image, including embedded data URLs.
+    ///
+    /// Used for both rendering and intrinsic-size measurement. The returned source
+    /// is authoritative: pending or failed loads never fall back to the document URL.
+    /// Without this override, images use Base's default URI and data URL handling.
+    pub fn image_source<F>(mut self, resolver: F) -> Self
+    where
+        F: Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync + 'static,
+    {
+        self.inner = self.inner.image_source(resolver);
+        self
+    }
     /// Sets the style, folded onto the one derived from the active theme.
     pub fn style(mut self, style: TextViewStyle) -> Self {
         self.text_style = Some(style);
@@ -94,6 +106,26 @@ impl TextView {
     /// Sets whether the text can be selected with the mouse.
     pub fn selectable(mut self, value: bool) -> Self {
         self.inner = self.inner.selectable(value);
+        self
+    }
+    /// Refines inline code typography, background, border, radius, and padding
+    /// over the resolved theme or explicit style. Other layout properties are
+    /// ignored. Unspecified properties are inherited.
+    pub fn inline_code_style(mut self, style: StyleRefinement) -> Self {
+        self.inner = self.inner.inline_code_style(style);
+        self
+    }
+    /// Refines bullet and number list markers over the resolved theme or
+    /// explicit style. The text color also outlines unchecked task-list
+    /// checkboxes. Unspecified properties are inherited.
+    pub fn list_style(mut self, style: StyleRefinement) -> Self {
+        self.inner = self.inner.list_style(style);
+        self
+    }
+    /// Refines the blockquote container, including its left border, over the
+    /// resolved theme or explicit style. Unspecified properties are inherited.
+    pub fn blockquote_style(mut self, style: StyleRefinement) -> Self {
+        self.inner = self.inner.blockquote_style(style);
         self
     }
     /// Sets whether a copied selection carries Markdown source or plain text.
@@ -247,7 +279,7 @@ impl Element for TextView {
             // caller ever replaced the theme -- a pointer comparison against
             // the shared default -- rather than comparing two whole themes
             // field by field.
-            #[cfg(feature = "tree-sitter")]
+            #[cfg(any(feature = "tree-sitter", feature = "syntect"))]
             if !std::sync::Arc::ptr_eq(
                 &style.highlight_theme,
                 &crate::highlighter::HighlightTheme::default_light(),
@@ -338,9 +370,17 @@ pub(super) fn resolve_component_style(
 
     let heading_base_font_size = legacy.heading_base_font_size;
     let heading_font_size = legacy.heading_font_size;
+    // A style that never touched heading sizes keeps the Base default, which
+    // scales headings with the body text; only an explicit base size or
+    // resolver pins them to pixels.
+    let pins_heading_size = heading_font_size.is_some()
+        || heading_base_font_size != TextViewStyle::default().heading_base_font_size;
     let style = themed
         .with_paragraph_gap(legacy.paragraph_gap)
         .with_heading(move |level| {
+            if !pins_heading_size {
+                return StyleRefinement::default();
+            }
             let default_size = match level {
                 1 => gpui::rems(2.),
                 2 => gpui::rems(1.5),

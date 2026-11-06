@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 use crate::{
     ActiveTheme, Colorize as _, Disableable, Icon, Placement, RoleOverride, Selectable, Sizable,
@@ -10,9 +10,9 @@ use crate::{
     tooltip::{ManagedTooltipExt as _, Tooltip},
 };
 use gpui::{
-    AnyElement, App, Background, ClickEvent, Corners, Edges, ElementId, Hsla, InteractiveElement,
-    Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, Role, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
+    AnyElement, App, Background, ClickEvent, Corners, Edges, ElementId, FocusHandle, Hsla,
+    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce,
+    Role, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, relative, transparent_white,
 };
 
@@ -220,12 +220,14 @@ pub struct Button {
         Option<(Rc<Box<dyn gpui::Action>>, Option<SharedString>)>,
     )>,
     tooltip_placement: Option<Placement>,
+    tooltip_show_delay: Option<Duration>,
     tooltip_builder: Option<Rc<dyn Fn(&mut Window, &mut App) -> gpui::AnyView>>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     on_hover: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
     loading: bool,
     loading_icon: Option<Icon>,
     focus_ring_enabled: bool,
+    focus_handle: Option<FocusHandle>,
 
     tab_index: isize,
     tab_stop: bool,
@@ -267,9 +269,11 @@ impl Button {
             icon_size: None,
             tooltip: None,
             tooltip_placement: None,
+            tooltip_show_delay: None,
             tooltip_builder: None,
             on_click: None,
             focus_ring_enabled: true,
+            focus_handle: None,
             on_hover: None,
             loading: false,
             compact: false,
@@ -414,6 +418,14 @@ impl Button {
         self
     }
 
+    /// Overrides how long the pointer must rest before the tooltip shows.
+    ///
+    /// Defaults to [`gpui_base::TooltipDefaults::show_delay`].
+    pub fn tooltip_show_delay(mut self, delay: Duration) -> Self {
+        self.tooltip_show_delay = Some(delay);
+        self
+    }
+
     /// Set the tooltip of the button with action to show keybinding.
     pub fn tooltip_with_action(
         mut self,
@@ -463,6 +475,16 @@ impl Button {
     /// Default is a spinner icon.
     pub fn loading_icon(mut self, icon: impl Into<Icon>) -> Self {
         self.loading_icon = Some(icon.into());
+        self
+    }
+
+    /// Use a caller-owned focus handle instead of the one the button keeps for
+    /// itself, so the application can focus the button and restore focus to it.
+    ///
+    /// The handle drives the focus ring, Enter and Space activation and the
+    /// accessibility focus state alike.
+    pub fn track_focus(mut self, focus_handle: &FocusHandle) -> Self {
+        self.focus_handle = Some(focus_handle.clone());
         self
     }
 
@@ -604,6 +626,7 @@ impl RenderOnce for Button {
         let selected = self.shows_selected_style();
         let loading = self.loading;
         let tooltip_placement = self.tooltip_placement;
+        let tooltip_show_delay = self.tooltip_show_delay;
         let hover_group = self.hover_group;
         let hover_group_held = self.hover_group_held;
         let mut base = self.base;
@@ -626,10 +649,12 @@ impl RenderOnce for Button {
             FocusLine::Inside(normal_style.fg.opacity(FOCUS_LINE_OPACITY))
         };
 
-        let focus_handle = window
-            .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone();
+        let focus_handle = self.focus_handle.clone().unwrap_or_else(|| {
+            window
+                .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone()
+        });
         let is_focused = focus_handle.is_focused(window);
 
         let rounding = match self.rounded {
@@ -710,13 +735,7 @@ impl RenderOnce for Button {
                     // A loading button keeps its normal colors, but must not react
                     // to the pointer, it is not waiting for another click.
                     .when(interactive, |this| {
-                        this.hover(|this| {
-                            let hover_style = style.hovered(self.outline, cx);
-                            this.bg(hover_style.bg)
-                                .border_color(hover_style.border)
-                                .text_color(hover_style.fg)
-                        })
-                        .active(|this| {
+                        this.active(|this| {
                             let active_style = style.active(self.outline, cx);
                             this.bg(active_style.bg)
                                 .border_color(active_style.border)
@@ -729,6 +748,18 @@ impl RenderOnce for Button {
                         })
                     })
             })
+            .hover(|this| {
+                // Always register the hover style: GPUI only refreshes the cached
+                // hover state while one is present. If a selected button skipped it,
+                // the stale state would keep hover colors after unselecting.
+                if !interactive || selected {
+                    return this;
+                }
+                let hover_style = style.hovered(self.outline, cx);
+                this.bg(hover_style.bg)
+                    .border_color(hover_style.border)
+                    .text_color(hover_style.fg)
+            })
             .line_height(relative(1.25))
             .refine_style(&instance_style);
 
@@ -738,6 +769,8 @@ impl RenderOnce for Button {
             .accessibility_label
             .clone()
             .or_else(|| self.label.clone());
+        // Like an HTML `title`, the tooltip describes the button.
+        let description = self.tooltip.as_ref().map(|(tooltip, _)| tooltip.clone());
         let content = h_flex()
             .id("label")
             .size_full()
@@ -806,6 +839,9 @@ impl RenderOnce for Button {
         .when_some(accessibility_label, |this, label| {
             this.accessibility_label(label)
         })
+        .when_some(description, |this, description| {
+            this.aria_description(description)
+        })
         .when_some(self.toggled, |this, toggled| {
             this.aria_toggled(if toggled {
                 gpui::accesskit::Toggled::True
@@ -857,20 +893,26 @@ impl RenderOnce for Button {
         })
         .map(|this| {
             if let Some(builder) = self.tooltip_builder {
-                this.managed_tooltip_with_placement(tooltip_placement, move |window, cx| {
-                    builder(window, cx)
-                })
+                this.managed_tooltip_with(
+                    tooltip_placement,
+                    tooltip_show_delay,
+                    move |window, cx| builder(window, cx),
+                )
             } else if let Some((tooltip, action)) = self.tooltip {
-                this.managed_tooltip_with_placement(tooltip_placement, move |window, cx| {
-                    Tooltip::new(tooltip.clone())
-                        .when_some(action.clone(), |this, (action, context)| {
-                            this.action(
-                                action.boxed_clone().as_ref(),
-                                context.as_ref().map(|c| c.as_ref()),
-                            )
-                        })
-                        .build(window, cx)
-                })
+                this.managed_tooltip_with(
+                    tooltip_placement,
+                    tooltip_show_delay,
+                    move |window, cx| {
+                        Tooltip::new(tooltip.clone())
+                            .when_some(action.clone(), |this, (action, context)| {
+                                this.action(
+                                    action.boxed_clone().as_ref(),
+                                    context.as_ref().map(|c| c.as_ref()),
+                                )
+                            })
+                            .build(window, cx)
+                    },
+                )
             } else {
                 this
             }
@@ -1492,6 +1534,65 @@ mod tests {
         assert_eq!(keyboard_clicks.get(), 2);
     }
 
+    /// A button keeps the application's focus handle, so focus the application
+    /// gives it shows on the button and activates it from the keyboard.
+    #[cfg(feature = "test-support")]
+    #[gpui::test]
+    fn caller_owned_focus_handle_drives_focus_and_keyboard_activation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::{cell::Cell, rc::Rc};
+
+        use gpui::{Context, KeyDownEvent, KeyUpEvent, Keystroke, Render};
+
+        struct Harness {
+            focus_handle: FocusHandle,
+            clicks: Rc<Cell<usize>>,
+        }
+
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let clicks = self.clicks.clone();
+                div().size(px(100.)).child(
+                    Button::new("details")
+                        .label("Details")
+                        .track_focus(&self.focus_handle)
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let clicks = Rc::new(Cell::new(0));
+        let (view, cx) = cx.add_window_view({
+            let clicks = clicks.clone();
+            move |_, cx| Harness {
+                focus_handle: cx.focus_handle(),
+                clicks,
+            }
+        });
+        let focus_handle = cx.update(|_, cx| view.read(cx).focus_handle.clone());
+        cx.update(|window, cx| {
+            focus_handle.focus(window, cx);
+            window.draw(cx).clear(cx);
+        });
+
+        let button = cx.update(|window, _| {
+            gpui_base::test_support::find(window, &[], &ElementId::from("details"))
+                .expect("button is painted")
+        });
+        assert_eq!(button.focused(), Some(true));
+
+        let keystroke = Keystroke::parse("enter").unwrap();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        assert_eq!(clicks.get(), 1);
+    }
+
     #[gpui::test]
     fn loading_button_keeps_existing_pointer_blocking(cx: &mut gpui::TestAppContext) {
         use std::{cell::Cell, rc::Rc};
@@ -1633,6 +1734,7 @@ mod tests {
             .outline()
             .large()
             .tooltip("Click to save")
+            .tooltip_show_delay(Duration::from_millis(100))
             .compact()
             .loading(false)
             .disabled(false)
@@ -1648,11 +1750,13 @@ mod tests {
         assert!(button.outline);
         assert_eq!(button.size, Size::Large);
         assert!(button.tooltip.is_some());
+        assert_eq!(button.tooltip_show_delay, Some(Duration::from_millis(100)));
         assert!(button.compact);
         assert!(!button.loading);
         assert!(!button.disabled);
         assert!(!button.selected);
         assert_eq!(button.toggled, None);
+        assert!(button.focus_handle.is_none());
         assert_eq!(button.tab_index, 1);
         assert!(button.tab_stop);
         assert!(!button.dropdown_caret);

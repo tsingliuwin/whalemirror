@@ -8,7 +8,7 @@ use gpui::{
     px,
 };
 use gpui_base::{Switch as BaseSwitch, SwitchThumb, SwitchTrack, spring};
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 /// A Switch element that can be toggled on or off.
 #[derive(IntoElement)]
@@ -69,7 +69,8 @@ impl Switch {
     ///
     /// A switch's name comes from its [`label`](Self::label) by default.
     /// Setting this replaces the announced name without changing what is
-    /// displayed.
+    /// displayed. A switch without a label has no accessible name, so set this
+    /// whenever the switch is drawn without visible text.
     pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
         self.accessibility_label = Some(label.into());
         self
@@ -107,6 +108,14 @@ impl Switch {
     /// Set tooltip text for the switch.
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
         self.tooltip.text = Some((tooltip.into(), None));
+        self
+    }
+
+    /// Overrides how long the pointer must rest before the tooltip shows.
+    ///
+    /// Defaults to [`gpui_base::TooltipDefaults::show_delay`].
+    pub fn tooltip_show_delay(mut self, delay: Duration) -> Self {
+        self.tooltip.show_delay = Some(delay);
         self
     }
 
@@ -383,7 +392,8 @@ mod tests {
     }
 
     fn activate_key(cx: &mut VisualTestContext, key: &str) {
-        let keystroke = Keystroke::parse(key).unwrap();
+        let keystroke =
+            cx.update(|_, cx| Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
             is_held: false,

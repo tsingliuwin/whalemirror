@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-component"
-version = "0.7.1"
+version = "0.9.0"
 build = "build.rs"
 publish = true
 autolib = false
@@ -40,10 +40,16 @@ ignored = ["gpui_macros"]
 
 [features]
 decimal = ["gpui-base/decimal"]
+gpui-fast = [
+    "dep:gpui-fast",
+    "gpui-base/gpui-fast",
+    "gpui-kit-assets/gpui-fast",
+]
 inspector = [
     "gpui_macros/inspector",
     "gpui/inspector",
     "gpui-base/inspector",
+    "gpui-fast?/inspector",
 ]
 speech = [
     "dep:cpal",
@@ -59,9 +65,14 @@ speech = [
     "windows/Globalization",
     "windows/Media_SpeechRecognition",
 ]
+syntect = [
+    "dep:syntect",
+    "dep:two-face",
+]
 test-support = [
     "gpui/test-support",
     "gpui-base/test-support",
+    "gpui-fast?/test-support",
 ]
 tree-sitter = [
     "dep:tree-sitter",
@@ -252,32 +263,8 @@ path = "src/lib.rs"
 doctest = false
 
 [[test]]
-name = "base_compat"
-path = "tests/base_compat.rs"
-
-[[test]]
-name = "controlled_change_callbacks"
-path = "tests/controlled_change_callbacks.rs"
-
-[[test]]
-name = "legacy_button_compat"
-path = "tests/legacy_button_compat.rs"
-
-[[test]]
-name = "legacy_controls_compat"
-path = "tests/legacy_controls_compat.rs"
-
-[[test]]
-name = "legacy_language_config_compat"
-path = "tests/legacy_language_config_compat.rs"
-
-[[test]]
-name = "table_dump_range"
-path = "tests/table_dump_range.rs"
-
-[[test]]
-name = "theme_compat"
-path = "tests/theme_compat.rs"
+name = "integration"
+path = "tests/integration/main.rs"
 
 [dependencies.anyhow]
 version = "1"
@@ -289,20 +276,26 @@ version = "0.4.38"
 version = "2.1.0"
 
 [dependencies.gpui]
-version = "=0.3.8"
+version = "=0.3.11"
 package = "gpui-pre"
 
 [dependencies.gpui-base]
-version = "0.7.1"
+version = "0.9.0"
 
 [dependencies.gpui-component-macros]
-version = "0.7.1"
+version = "0.9.0"
+
+[dependencies.gpui-fast]
+version = "0.1.13"
+features = ["windows-manifest-provided-by-host"]
+optional = true
+package = "gpui-fast"
 
 [dependencies.gpui-kit-assets]
-version = "0.7.1"
+version = "0.9.0"
 
 [dependencies.gpui_macros]
-version = "=0.3.8"
+version = "=0.3.11"
 package = "gpui-pre-macros"
 
 [dependencies.instant]
@@ -362,23 +355,57 @@ version = "1"
 [dependencies.serde_repr]
 version = "0.1"
 
+[dependencies.similar]
+version = "2.7"
+features = ["unicode"]
+
 [dependencies.smallvec]
 version = "1"
 
 [dependencies.sum-tree]
-version = "=0.3.8"
+version = "=0.3.11"
 package = "gpui-pre-sum-tree"
+
+[dependencies.syntect]
+version = "5.3.0"
+features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+]
+optional = true
+default-features = false
 
 [dependencies.tracing]
 version = "0.1.41"
+
+[dependencies.two-face]
+version = "0.4.5"
+features = ["syntect-fancy"]
+optional = true
+default-features = false
+
+[dependencies.unicode-segmentation]
+version = "1"
+
+[dependencies.unicode-width]
+version = "0.2"
 
 [dependencies.uuid]
 version = "1.10"
 
 [dev-dependencies.gpui]
-version = "=0.3.8"
+version = "=0.3.11"
 features = ["test-support"]
 package = "gpui-pre"
+
+[dev-dependencies.gpui-fast]
+version = "0.1.13"
+features = [
+    "windows-manifest-provided-by-host",
+    "test-support",
+]
+package = "gpui-fast"
 
 [dev-dependencies.indoc]
 version = "2"

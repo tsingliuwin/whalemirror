@@ -331,7 +331,7 @@ where
         } else {
             1.0
         };
-        let duration = policy.duration.mul_f32(reversing_factor);
+        let duration = policy.duration.mul_f64(f64::from(reversing_factor));
         state.update(cx, |state, _| {
             state.from = sampled.clone();
             state.target = target.clone();
@@ -658,7 +658,7 @@ mod css_timing_tests {
         Easing, IterationCount, LinearStop, MotionPhase, PlaybackDirection, SignedDuration,
         StepPosition, Timing,
     };
-    use std::time::Duration;
+    use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
     #[test]
     fn css_keyword_easing_matches_published_reference_samples() {
@@ -675,6 +675,19 @@ mod css_timing_tests {
                     "{easing:?}({progress}) = {actual}, expected {expected}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn cubic_bezier_easing_keeps_anticipation_and_overshoot() {
+        let anticipate = Easing::cubic_bezier(1.0, -0.4, 0.35, 0.95).unwrap();
+        let overshoot = Easing::cubic_bezier(0.175, 0.885, 0.32, 1.275).unwrap();
+
+        assert!(anticipate.sample(0.2) < 0.0);
+        assert!(overshoot.sample(0.8) > 1.0);
+        for easing in [anticipate, overshoot] {
+            assert_eq!(easing.sample(-1.0), 0.0);
+            assert_eq!(easing.sample(2.0), 1.0);
         }
     }
 
@@ -716,6 +729,29 @@ mod css_timing_tests {
         assert!(
             Easing::linear_stops([LinearStop::at(0.0, 0.8), LinearStop::at(1.0, 0.2)]).is_err()
         );
+    }
+
+    #[test]
+    fn curves_built_without_stops_or_jumps_sample_linearly() {
+        // Both are rejected by the constructors, but the variants are public.
+        let no_stops = Easing::LinearStops(Arc::from([]));
+        let no_jumps = Easing::Steps {
+            count: NonZeroU32::MIN,
+            position: StepPosition::JumpNone,
+        };
+
+        for (progress, expected) in [(-1.0, 0.0), (0.25, 0.25), (2.0, 1.0)] {
+            assert_eq!(
+                no_stops.sample(progress),
+                expected,
+                "no stops at {progress}"
+            );
+            assert_eq!(
+                no_jumps.sample(progress),
+                expected,
+                "no jumps at {progress}"
+            );
+        }
     }
 
     #[test]

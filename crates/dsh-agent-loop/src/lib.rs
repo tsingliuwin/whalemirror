@@ -21,7 +21,7 @@ pub use dsh_agent::InboxTarget;
 use dsh_cordis::EventBus;
 use dsh_llm::{
     AbortSignal, BlockAssembler, CallId, ContentBlock, FinishReason, GenerateOptions, LlmCallConfig,
-    LlmRuntime, Message, MessageSource, Role, SessionId, StreamChunk,
+    LlmRuntime, Message, MessageId, MessageSource, Role, SessionId, StreamChunk,
 };
 use dsh_session::SessionEntry;
 use dsh_session::{EpochHeader, HeaderReason, Session, SessionEvent, TurnEndReason};
@@ -31,6 +31,7 @@ use dsh_tools::{ToolExecutionInput, ToolExecutionResult, ToolRegistry};
 use flume::{Receiver, Sender};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Notify;
@@ -236,6 +237,19 @@ pub struct ReactLoopAgent {
     plan_entered: Mutex<bool>,
     /// 待落盘的 plan 模式切换（轮终边界提交，上游 onBoundary 同语义）。
     plan_pending: Mutex<Option<bool>>,
+    /// prompt 重试收据（上游 `SessionCommandController.promptReceipts`）：
+    /// 同一输入的重复投递按首次接纳去重——消息被认领或移除后仍算接纳，
+    /// 日志是可重建该收据的恢复源。
+    prompt_receipts: Mutex<PromptReceipts>,
+}
+
+/// 一个会话的 prompt 接纳收据：已扫描到的日志长度 + 已接纳的消息 id。
+#[derive(Default)]
+struct PromptReceipts {
+    /// 已扫描的 `Session::entries().len()`（增量扫描游标）。
+    offset: usize,
+    /// 已接纳输入的消息 id（落盘用户行，或尚在收件箱中的首次入列）。
+    accepted: HashSet<MessageId>,
 }
 
 /// Side-channel observer for every appended session event.
@@ -273,6 +287,7 @@ impl ReactLoopAgent {
             plan_mode: Arc::new(AtomicBool::new(false)),
             plan_entered: Mutex::new(false),
             plan_pending: Mutex::new(None),
+            prompt_receipts: Mutex::new(PromptReceipts::default()),
         })
     }
 
@@ -321,6 +336,9 @@ impl ReactLoopAgent {
         self.plan_pending.lock().unwrap().take();
         *self.session.lock().unwrap() = session;
         self.inbox.lock().unwrap().clear();
+        // 收据按「确切的会话」缓存（上游 WeakMap<Session, …>）：换会话必须
+        // 丢弃旧收据并从新日志重建，否则旧会话的消息 id 会误挡新会话输入。
+        *self.prompt_receipts.lock().unwrap() = PromptReceipts::default();
     }
 
     /// Append one event to the session log and fan it out to the sink
@@ -466,11 +484,54 @@ impl ReactLoopAgent {
         }
     }
 
+    /// 把同一输入首次接纳之前的日志行补进收据（游标之后的 `user/message`）。
+    ///
+    /// 只锁 session 内部，调用方持有 `prompt_receipts` 锁——收据锁始终是
+    /// 最外层，避免与驱动侧「先收件箱后日志」的加锁序形成环。
+    fn scan_prompt_receipts(&self, receipts: &mut PromptReceipts) {
+        let session = self.session.lock().unwrap();
+        let entries = session.entries();
+        if receipts.offset > entries.len() {
+            // 防御：日志不该缩短；真发生了就整段重扫（换会话路径已显式重置）
+            receipts.offset = 0;
+            receipts.accepted.clear();
+        }
+        for entry in &entries[receipts.offset..] {
+            if let SessionEvent::UserMessage(message) = &entry.event {
+                receipts.accepted.insert(message.id.clone());
+            }
+        }
+        receipts.offset = entries.len();
+    }
+
     /// Queue a message and wake the driver.
-    pub fn send(&self, message: Message, target: InboxTarget) {
-        self.inbox.lock().unwrap().append(target, message.clone());
+    ///
+    /// 同一 `MessageId` 的重复投递只接纳一次（上游 8706daa679：prompt 重试
+    /// 在输入被接纳后按请求身份去重，含已被认领或已从队列移除的消息）。
+    /// 返回是否本次新接纳；去重时既不重复入列、不重复发 `agent/inbox/inserted`
+    /// 也不重复唤醒驱动。
+    pub fn send(&self, message: Message, target: InboxTarget) -> bool {
+        let mut receipts = self.prompt_receipts.lock().unwrap();
+        self.scan_prompt_receipts(&mut receipts);
+        if receipts.accepted.contains(&message.id) {
+            return false;
+        }
+        {
+            // 收据锁内完成「查重 + 入列」，并发重试只有一条能进来。
+            let mut inbox = self.inbox.lock().unwrap();
+            if inbox.contains(&message.id.0) {
+                receipts.accepted.insert(message.id.clone());
+                return false;
+            }
+            inbox.append(target, message.clone());
+            // 入列即接纳（rustdsh 的首次持久插入点；日志行在认领时落盘，
+            // 收据先记，认领/移除都不会撤销接纳）。
+            receipts.accepted.insert(message.id.clone());
+        }
+        drop(receipts);
         self.events.emit::<AgentInboxInserted>(message);
         self.wake.notify_one();
+        true
     }
 
     /// Queue a user prompt as the next turn.

@@ -150,4 +150,5 @@ UI 项给出入口路径与通过判据。回归时按层推进：A 全绿才进
 | I24 | markdown 表格几何（补缺 #86）：无竖线/无外框/无表头底色，单元格 10×16 且首末列贴边、13/22、表头 500、行底 0.5px 发丝、列最小宽 100 | `cargo test -p dsh-gpui --test table_geometry`；任意含表格的会话（如「熟悉一下」） | 5 测全绿；实机表格区竖线列 = 0、表头像素 = 白、行底发丝含表头下沿且表头行高 22px、短列不再竖排折字 |
 | I25 | 设置左轨纵向节奏（补缺 #88）：`.nav` 上内距 10/左右 12、标题行 24 高 + 8 下距（16px 字、文字左缘 24）、格子左缘 12、格间 4 | `cargo test -p dsh-gpui --lib ui_metrics`；侧栏 ⚙ 打开设置 | 单测全绿；实机选中格填充带相对面板顶 42（改前 64）、标题文字 y 170–183（改前 181–194）、格子左缘 x = 面板左 + 12 |
 | I26 | GPUI 生态基线（补缺 #89）：gpui-pre/-platform 0.3.11 + gpui-base/component/assets 0.9.0，vendor 23 处 [dsh] 补丁重放（表格几何/排版/粘贴/opener/代码块 R16） | `cargo test --workspace`；`cargo check -p gpui-base`；打开含表格会话 | 360/0 全绿 + regression-core GREEN；实机表格竖线=0、表头白底、设置 nav 几何不变（y 195–234） |
+| I27 | prompt 重试去重（补缺 #90）：同一 `MessageId` 只接纳一次——入列即记收据，认领/移除不撤销；日志 `user/message` 行是收据恢复源；收据按确切会话缓存 | `cargo test -p dsh-agent-loop --test prompt_dedup`；`cargo test -p dsh-agent contains` | 6 + 1 测全绿；重复 `send` 返回 false、收件箱与日志各只有一条同 id 输入 |
 | I6 | 实机像素取证：激活条几何 | 截屏后按 accent 色扫描标签条下缘 | 激活条仅 2 行像素高、左右内缩 10px（条宽 = 文字宽，本机实测文字 629–653 / 条 628–653） |

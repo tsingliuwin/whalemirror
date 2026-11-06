@@ -62,6 +62,15 @@ impl Inbox {
         !self.next_step.is_empty()
     }
 
+    /// 两条待投递列表里是否已有该消息 id（重复投递的接纳判据，上游
+    /// `inbox.nextTurn/nextStep` 命中即视为已接纳）。
+    pub fn contains(&self, message_id: &str) -> bool {
+        self.next_turn
+            .iter()
+            .chain(self.next_step.iter())
+            .any(|m| m.id.0 == message_id)
+    }
+
     /// Remove every pending message, next-step before next-turn.
     pub fn clear(&mut self) {
         self.next_step.clear();
@@ -187,6 +196,20 @@ mod promote_tests {
         assert!(inbox.next_turn.is_empty());
         // 次序：既有 next-step 在前，提升批按原序随后
         assert_eq!(inbox.next_step.iter().map(|m| m.id.0.as_str()).collect::<Vec<_>>(), ["s", "a", "b"]);
+    }
+
+    #[test]
+    fn contains_spans_both_pending_lists() {
+        let mut inbox = Inbox::new();
+        inbox.append(InboxTarget::NextTurn, msg("queued", "one"));
+        inbox.append(InboxTarget::NextStep, msg("steered", "two"));
+        assert!(inbox.contains("queued"));
+        assert!(inbox.contains("steered"));
+        assert!(!inbox.contains("absent"));
+        // 认领后不再命中（接纳收据由调用方另行保留）
+        let _ = inbox.claim(InboxTarget::NextTurn, 1);
+        assert!(!inbox.contains("queued"));
+        assert!(!inbox.contains("steered"));
     }
 }
 

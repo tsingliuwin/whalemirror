@@ -60,6 +60,12 @@ pub fn catalog_capacity(provider: &str, model: &str) -> Option<u64> {
     None
 }
 
+/// 归一化用户输入的容量：合法则返回格式化后的缩写（`200K` / `131072`），
+/// 非法返回 `None`（调用方按「清除声明」处理，不写脏字符串进磁盘）。
+pub fn normalize_capacity(raw: &str) -> Option<String> {
+    parse_capacity(raw).map(format_capacity)
+}
+
 /// 容量解析链：模型行声明 → 目录兜底。
 pub fn resolve_capacity(declared: &str, provider: &str, model: &str) -> Option<u64> {
     parse_capacity(declared).or_else(|| catalog_capacity(provider, model))
@@ -106,6 +112,15 @@ mod tests {
         );
         // 非 DeepSeek 系模型不猜
         assert_eq!(catalog_capacity("zai-coding-cn", "glm-5.3"), None);
+    }
+
+    #[test]
+    fn normalizes_user_typed_capacities() {
+        assert_eq!(normalize_capacity("200k"), Some("200K".into()));
+        assert_eq!(normalize_capacity("131072"), Some("131072".into()));
+        assert_eq!(normalize_capacity("1m"), Some("1M".into()));
+        assert_eq!(normalize_capacity("  "), None);
+        assert_eq!(normalize_capacity("abc"), None);
     }
 
     #[test]

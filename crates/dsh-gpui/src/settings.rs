@@ -842,13 +842,29 @@ fn provider_row(
             SharedString::from(format!("prov-edit-{id}")),
             "编辑",
             false,
-            move |_, _, cx| {
+            move |_, window, cx| {
                 let id = edit_id.clone();
                 t_edit.update(cx, |v, cx| {
                     let focus = dsh_gpui::provider_cards::focus_after_edit(&form_focus(v), &id);
+                    let opening = focus.editing.is_some();
                     v.editing_provider = focus.editing;
                     // 上游「一次只开一张卡」：行编辑展开时收添加卡
                     v.adding = AddingMode::None;
+                    // 展开时把「路由默认模型」的容量填进输入框（#96 的编辑
+                    // 入口在自定义设置里，与 API 地址同一套控件形态）
+                    if opening {
+                        let seed = v
+                            .settings
+                            .providers
+                            .iter()
+                            .find(|p| p.id == id)
+                            .and_then(|p| p.models.first())
+                            .map(|m| m.context_window.clone())
+                            .unwrap_or_default();
+                        v.model_capacity_input.update(cx, |state, cx| {
+                            state.set_value(seed, window, cx);
+                        });
+                    }
                     cx.notify();
                 });
             },
@@ -986,6 +1002,17 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                     .gap(px(12.0))
                     .pt_3()
                     .child(field("API 地址", Input::new(&app.edit_base).w_full()))
+                    // 上下文容量（#96）：走与 API 地址同一套 `field()`+`Input`
+                    // ——行内容量 chip 的 hitbox 与 paint 在这个滚动容器里
+                    // 错位，这条输入框是可点中的既有形态。作用于路由默认模型
+                    //（模型目录首行，与上游「首行作为路由默认模型」一致）。
+                    .child(field(
+                        "上下文窗口",
+                        Input::new(&app.model_capacity_input).w_full(),
+                    ))
+                    .child(hint(
+                        "作用于路由默认模型（模型目录首行）；接受 128K / 131072，留空则按目录兜底。",
+                    ))
                     .child(
                         div()
                             .v_flex()

@@ -4955,9 +4955,7 @@ impl AppView {
         let raw = self
             .model_capacity_input
             .read_with(cx, |s, _| s.value().trim().to_string());
-        let normalized = dsh_gpui::capacity::parse_capacity(&raw)
-            .map(dsh_gpui::capacity::format_capacity)
-            .unwrap_or_default();
+        let normalized = dsh_gpui::capacity::normalize_capacity(&raw).unwrap_or_default();
         if let Some(p) = self.settings.providers.iter_mut().find(|p| p.id == provider) {
             if let Some(row) = p.models.iter_mut().find(|m| m.id == model) {
                 row.context_window = normalized;
@@ -4988,6 +4986,21 @@ impl AppView {
             if !base.is_empty() {
                 p.base_url = base;
                 changed = true;
+            }
+            // 上下文容量（#96）：写回路由默认模型（模型目录首行）；空值 =
+            // 清除声明（回落到目录兜底），不可解析的值也按清除处理。
+            if let Some(first) = p.models.first_mut() {
+                let entered = self
+                    .model_capacity_input
+                    .read_with(cx, |s, _| s.value().trim().to_string());
+                let normalized =
+                    dsh_gpui::capacity::normalize_capacity(&entered).unwrap_or_default();
+                let current = dsh_gpui::capacity::normalize_capacity(&first.context_window)
+                    .unwrap_or_default();
+                if normalized != current {
+                    first.context_window = normalized;
+                    changed = true;
+                }
             }
             if changed {
                 let snapshot = p.clone();

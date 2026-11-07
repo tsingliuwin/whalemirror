@@ -2,7 +2,7 @@
 # 完整回归第 1 层：构建 + 单测 + 真实语料互通。零 UI、可随时跑。
 # 用法: scripts/regression-core.sh
 set -u
-cd "$(dirname "$0")/../../.." || exit 1
+cd "$(dirname "$0")/../../../.." || exit 1
 ROOT=$(pwd -W 2>/dev/null || pwd)
 FAIL=0
 
@@ -16,6 +16,15 @@ cargo run -q --example load_web -p dsh-persist 2>&1 | head -4 || FAIL=1
 echo
 echo "===== 3. 真实 ~/.dsh 语料：projcache 标题互通 ====="
 cargo run -q --example share_check -p dsh-persist 2>&1 | tail -4 || FAIL=1
+
+echo
+echo "===== 4. vendor 补丁基线（升 gpui 生态版本的前提）====="
+if [ -f scripts/vendor-verify.sh ]; then
+  bash scripts/vendor-verify.sh 2>&1 | tail -2
+  bash scripts/vendor-verify.sh >/dev/null 2>&1 || FAIL=1
+else
+  echo "SKIP: scripts/vendor-verify.sh missing"
+fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "REGRESSION-CORE: ALL GREEN"; else echo "REGRESSION-CORE: FAILED"; exit 1; fi

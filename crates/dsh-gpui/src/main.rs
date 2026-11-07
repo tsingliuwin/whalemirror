@@ -379,6 +379,10 @@ impl Default for AppSettings {
     }
 }
 
+/// 内置 DeepSeek 路由的上下文容量：官方 `/models` 目录声明 1_048_576
+/// （上游 llm-deepseek `OFFICIAL_CONTEXT_WINDOW`），用作未声明容量时的兜底。
+pub(crate) const OFFICIAL_DEEPSEEK_CONTEXT_WINDOW: u64 = 1_048_576;
+
 /// 一个自定义（OpenAI 兼容）提供方声明。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CustomProvider {
@@ -1266,6 +1270,157 @@ enum StatDialogKind {
 /// 统计对话框面板（web stat-dialog.module.css：r12 menu 面、描边重绑进
 /// elevation-prominent；标题行 + 0.5px 分隔线 + dt/dd 行，12/18 字号）。
 /// 定位在 pill 行上方水平居中（上游逐 pill 锚定 + viewport clamp 简化）。
+/// 上下文占用环（上游 ContextMeter `.trigger` 的 14px 环，2px 描边）：
+/// 14px 方框内画四段 90° 弧——满圈四段全画，不足按已用比例点亮前几段，
+/// 颜色 `label-tertiary`（上游 `.fill` 的 stroke）。GPUI 没有 svg circle
+/// 的 strokeDasharray，故用边框弧近似：每段是「左上/右上/右下/左下」
+/// 各缺一条边的方块，视觉上与 2px 圆环一致。
+fn ring_meter_svg(percent: u32) -> impl IntoElement {
+    const SIZE: f32 = 14.0;
+    const STROKE: f32 = 2.0;
+    let tk = theme::t();
+    // 四段各覆盖 25%；段内用「已点亮比例」决定边框色的取舍（以 25% 为粒度）
+    let lit = percent.min(100) as f32 / 25.0;
+    let edges = [
+        // (top, right, bottom, left) —— 依次为左上、右上、右下、左下弧
+        (true, false, false, true),
+        (true, true, false, false),
+        (false, true, true, false),
+        (false, false, true, true),
+    ];
+    let mut row = div().flex().gap(px(0.0));
+    for (i, (top, right, bottom, left)) in edges.iter().enumerate() {
+        // 段点亮程度：整段点亮=1；段内部分点亮按比例缩短该段（用小色块补齐底轨）
+        let coverage = (lit - i as f32).clamp(0.0, 1.0);
+        let color = if coverage > 0.5 { tk.text_3.into() } else { tk.border_l3 };
+        row = row.child(
+            div()
+                .size(px(SIZE / 2.0))
+                .rounded_full()
+                .when(*top, |d| d.border_t(px(STROKE)))
+                .when(*right, |d| d.border_r(px(STROKE)))
+                .when(*bottom, |d| d.border_b(px(STROKE)))
+                .when(*left, |d| d.border_l(px(STROKE)))
+                .border_color(color),
+        );
+    }
+    row
+}
+
+/// 占用构成面板（上游 ContextMeter `.panel`：264 宽、12 内距、R16、
+/// menu 底 + elevation-prominent；12/20）。头行「上下文已用 N% ~已用 / 容量」，
+/// 4px 三段色条（系统提示词 / 工具定义 / 对话消息），下方图例行。
+fn context_meter_panel(
+    occupancy: &dsh_gpui::context_meter::ContextOccupancy,
+    breakdown: &dsh_gpui::context_meter::ContextBreakdown,
+) -> Div {
+    use dsh_gpui::context_meter as meter;
+    let tk = theme::t();
+    // 色相照上游：系统 = neutral-bluish-400、工具 = violet-400 字面、
+    // 对话 = blue-450
+    let color_system = gpui::rgb(0x81858c);
+    let color_tools = gpui::rgb(0xa78bfa);
+    let color_messages = gpui::rgb(0x3b82f6);
+    let reading = format!("{}%", occupancy.percent);
+    let mut bar = div()
+        .flex()
+        .gap(px(1.0))
+        .mt(px(10.0))
+        .mb(px(12.0))
+        .h(px(4.0))
+        .w_full()
+        .rounded_full()
+        .bg(tk.hover)
+        .overflow_hidden();
+    let tints = [color_system, color_tools, color_messages];
+    // 段宽按构成占比切分整条色条（分母是构成总和，不是容量）
+    let widths = breakdown.segment_widths(occupancy.percent);
+    let nonzero: Vec<usize> = [breakdown.system_tokens, breakdown.tools_tokens, breakdown.message_tokens]
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| breakdown.total() > 0 && **v > 0)
+        .map(|(ix, _)| ix)
+        .collect();
+    for (slot, ix) in nonzero.iter().enumerate() {
+        let w = widths.get(slot).copied().unwrap_or(0.0);
+        bar = bar.child(
+            div()
+                .flex_none()
+                .min_w(px(2.0))
+                .h_full()
+                .rounded(px(1.0))
+                .bg(tints[*ix])
+                .w(gpui::relative(w / 100.0)),
+        );
+    }
+    let mut legend = div().v_flex();
+    for (label, tokens, tint) in [
+        ("系统提示词", breakdown.system_tokens, color_system),
+        ("工具定义", breakdown.tools_tokens, color_tools),
+        ("对话消息", breakdown.message_tokens, color_messages),
+    ] {
+        legend = legend.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .py(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .text_color(tk.text_2)
+                        .child(div().mr(px(6.0)).size(px(8.0)).rounded(px(2.0)).bg(tint))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_color(tk.text)
+                        .child(format!("~{}", meter::format_tokens_compact(tokens))),
+                ),
+        );
+    }
+    div()
+        .absolute()
+        .bottom(px(30.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .w(px(264.0))
+                .p(px(12.0))
+                .rounded(px(dsh_gpui::ui_metrics::RADIUS_LG_PX))
+                .bg(tk.menu)
+                .shadow(theme::elevation_prominent())
+                .text_size(px(12.0))
+                .line_height(px(20.0))
+                .text_color(tk.text_2)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(div().text_color(tk.text_3).child("上下文已用"))
+                        .child(div().text_color(tk.text).child(reading))
+                        .child(
+                            div()
+                                .ml_auto()
+                                .text_color(tk.text)
+                                .child(format!(
+                                    "~{} / {}",
+                                    meter::format_tokens_compact(occupancy.used_tokens),
+                                    meter::format_tokens_compact(occupancy.context_window)
+                                )),
+                        ),
+                )
+                .child(bar)
+                .child(legend),
+        )
+}
+
 fn stat_dialog_panel(kind: StatDialogKind, stats: &crate::chat::SessionStats) -> Div {
     let (title, icon) = match kind {
         StatDialogKind::Gauge => ("会话统计", IconName::LayoutDashboard),
@@ -1605,6 +1760,8 @@ pub(crate) struct AppView {
     /// 命令菜单动作反馈（导出结果等；行内条显示，发送/重开菜单时清）
     /// composer 统计 pill 的对话框互斥开合（web StatsPills exclusive slot）
     stat_dialog: Option<StatDialogKind>,
+    /// 上下文占用面板开合（上游 ContextMeter 的 trigger aria-expanded）
+    context_meter_open: bool,
     rename_input: Entity<InputState>,
     input: Entity<TextareaState>,
     /// composer 附件草稿（有序；上游 DraftFileUploads）
@@ -1937,6 +2094,7 @@ impl AppView {
             approval_policy: "ask".into(),
             command_menu: false,
             stat_dialog: None,
+            context_meter_open: false,
             rename_input,
             attachments: Vec::new(),
             attachment_store: Arc::new(dsh_persist::AttachmentStore::new(
@@ -6196,6 +6354,60 @@ impl AppView {
     }
 
 
+    /// 上下文占用读数（上游 ContextMeter）：已用估算 = 系统提示词 +
+    /// 工具声明 + 当前可见消息（同 web `estimate.ts` 固定密度启发式），
+    /// 容量取路由声明；任一半缺失则不渲染。
+    fn context_pressure(&self) -> Option<(dsh_gpui::context_meter::ContextOccupancy, dsh_gpui::context_meter::ContextBreakdown)> {
+        use dsh_gpui::context_meter as meter;
+        let capacity_raw = self
+            .settings
+            .providers
+            .iter()
+            .find(|p| p.id == self.active_provider)
+            .and_then(|p| p.models.iter().find(|m| m.id == self.desired_model))
+            .map(|m| m.context_window.clone())
+            .unwrap_or_default();
+        // 内置 DeepSeek 路由的模型目录不一定写容量（上游官方目录声明
+        // 1_048_576），缺省按官方值兜底；自定义路由必须自己声明。
+        let context_window = dsh_gpui::parse_capacity(&capacity_raw).or_else(|| {
+            if self.active_provider == "deepseek" && capacity_raw.trim().is_empty() {
+                Some(OFFICIAL_DEEPSEEK_CONTEXT_WINDOW)
+            } else {
+                None
+            }
+        })?;
+        let assembly = self.agent.prompt_assembly();
+        let system_tokens = meter::estimate_system_prompt(Some(assembly.system.as_str()));
+        let tools_json = serde_json::to_string(&assembly.tools).unwrap_or_default();
+        let tools_tokens = meter::estimate_tools_tokens(Some(tools_json.as_str()));
+        let messages_tokens: u64 = {
+            let session = self.agent.session();
+            let guard = session.lock().unwrap();
+            guard
+                .derive_messages()
+                .iter()
+                .map(|m| {
+                    let mut chars = 0usize;
+                    for block in &m.content {
+                        if let dsh_llm::ContentBlock::Text { text } = block {
+                            chars += text.chars().count();
+                        } else {
+                            chars += serde_json::to_string(block).map(|s| s.chars().count()).unwrap_or(0);
+                        }
+                    }
+                    meter::estimate_message_chars(chars, m.content.len())
+                })
+                .sum()
+        };
+        let breakdown = meter::ContextBreakdown {
+            system_tokens,
+            tools_tokens,
+            message_tokens: messages_tokens,
+        };
+        let used = breakdown.total();
+        meter::context_occupancy(used, context_window).map(|occupancy| (occupancy, breakdown))
+    }
+
     fn render_composer_area(&self, this: Entity<AppView>, has_text: bool, width: f32, snap: &ChatSnap) -> Div {
         let card_w = layout::composer_card_width(width);
         let locked = snap.empty && self.current_workspace.is_none();
@@ -6227,6 +6439,42 @@ impl AppView {
             .gap(px(12.0))
             .h(px(24.0))
             .pt(px(4.0));
+        // 上下文占用表（上游 ContextMeter）：与统计 pill 同一行，排在末尾；
+        // 路由没声明容量时整枚不渲染（上游 return null）。
+        if let Some((occupancy, breakdown)) = self.context_pressure() {
+            let meter_open = self.context_meter_open;
+            let t_meter = this.clone();
+            let reading = format!("{}%", occupancy.percent);
+            // trigger：gap 6、pad 1/8、R8、13/20 tertiary、数值等宽
+            let mut meter = div()
+                .id("context-meter")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(1.0))
+                .rounded(px(dsh_gpui::ui_metrics::RADIUS_SM_PX))
+                .text_size(px(theme::FONT_TAB))
+                .line_height(px(20.0))
+                .text_color(if meter_open { theme::t().text_2 } else { theme::t().text_3 })
+                .when(meter_open, |d| d.bg(theme::t().hover))
+                .hover(|s| s.bg(theme::t().hover).text_color(theme::t().text_2))
+                .cursor_pointer()
+                .tooltip(tip("上下文已用"))
+                .on_click(move |_, _, cx| {
+                    t_meter.update(cx, |v, cx| {
+                        v.context_meter_open = !v.context_meter_open;
+                        cx.notify();
+                    });
+                })
+                .child(ring_meter_svg(occupancy.percent))
+                .child(stat_reading(reading, theme::t().text_3));
+            if meter_open {
+                meter = meter.child(context_meter_panel(&occupancy, &breakdown));
+            }
+            strip = strip.child(meter);
+        }
         if stats.steps > 0 || has_tokens {
             let t_gauge = this.clone();
             let t_usage = this.clone();

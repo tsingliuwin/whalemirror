@@ -633,6 +633,12 @@ impl ReactLoopAgent {
         }
     }
 
+    /// 当前请求信封（系统提示词 + 准入工具声明）。占用表等只读界面用它
+    /// 给「下一次请求」定价，与驱动发请求时组装的同一函数。
+    pub fn prompt_assembly(&self) -> PromptAssembly {
+        self.assemble_prompt()
+    }
+
     fn assemble_prompt(&self) -> PromptAssembly {
         let mut parts: Vec<String> = Vec::new();
         let base = {

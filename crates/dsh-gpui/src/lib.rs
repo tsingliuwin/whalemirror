@@ -4,6 +4,7 @@
 
 pub mod code_program;
 pub mod columns;
+pub mod capacity;
 pub mod compaction_row;
 pub mod context_meter;
 pub mod credential_mask;
@@ -1874,25 +1875,6 @@ mod read_page_root_tests {
 /// 渲染侧 dock/details 打开时中栏可能被挤到不足 680（如 1316 宽窗口
 /// 280 侧栏 + 440 dock → 596）：下限仍须服从实际列宽（留 16×2 两侧
 /// clearance），否则内容与输入卡溢出中栏、被右侧面板裁切。
-/// 路由声明的上下文容量：`contextWindow` 字段既可能是裸数字（"128000"）
-/// 也可能已被格式化成 `128K` / `1M`（编辑卡展示与磁盘共用同一字符串）。
-pub fn parse_capacity(raw: &str) -> Option<u64> {
-    let text = raw.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let (digits, scale) = match text.chars().last()? {
-        'k' | 'K' => (&text[..text.len() - 1], 1_000u64),
-        'm' | 'M' => (&text[..text.len() - 1], 1_000_000u64),
-        _ => (text, 1),
-    };
-    let value: f64 = digits.trim().parse().ok()?;
-    if !value.is_finite() || value <= 0.0 {
-        return None;
-    }
-    Some((value * scale as f64).round() as u64)
-}
-
 pub fn chat_content_width(column_w: f32) -> f32 {
     let preferred = (column_w * 0.64).clamp(680.0, 920.0);
     preferred.min((column_w - 32.0).max(320.0))
@@ -1932,24 +1914,3 @@ mod column_width_tests {
     }
 }
 
-#[cfg(test)]
-mod capacity_parse_tests {
-    use super::parse_capacity;
-
-    #[test]
-    fn accepts_plain_and_scaled_capacities() {
-        assert_eq!(parse_capacity("128000"), Some(128_000));
-        assert_eq!(parse_capacity("128K"), Some(128_000));
-        assert_eq!(parse_capacity("1M"), Some(1_000_000));
-        assert_eq!(parse_capacity(" 64k "), Some(64_000));
-        assert_eq!(parse_capacity("1.5K"), Some(1_500));
-    }
-
-    #[test]
-    fn rejects_empty_and_unusable_capacities() {
-        assert_eq!(parse_capacity(""), None);
-        assert_eq!(parse_capacity("   "), None);
-        assert_eq!(parse_capacity("0"), None);
-        assert_eq!(parse_capacity("n/a"), None);
-    }
-}

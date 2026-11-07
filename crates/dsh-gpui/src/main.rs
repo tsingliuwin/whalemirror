@@ -379,10 +379,6 @@ impl Default for AppSettings {
     }
 }
 
-/// 内置 DeepSeek 路由的上下文容量：官方 `/models` 目录声明 1_048_576
-/// （上游 llm-deepseek `OFFICIAL_CONTEXT_WINDOW`），用作未声明容量时的兜底。
-pub(crate) const OFFICIAL_DEEPSEEK_CONTEXT_WINDOW: u64 = 1_048_576;
-
 /// 一个自定义（OpenAI 兼容）提供方声明。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CustomProvider {
@@ -890,15 +886,14 @@ fn persist_user_config(
                 } else {
                     row.insert("name".into(), m.id.clone().into());
                 }
-                if !m.context_window.is_empty() {
-                    if let Ok(n) = m.context_window.parse::<u64>() {
-                        row.insert("contextWindow".into(), n.into());
-                    }
+                // 磁盘上写裸数字（上游 schema 是整数）；界面里可能是 `128K`
+                // 这类缩写——先经 parse_capacity 归一，否则手填/探测来的
+                // 缩写格式会被静默丢掉，重启后容量又消失。
+                if let Some(n) = dsh_gpui::capacity::parse_capacity(&m.context_window) {
+                    row.insert("contextWindow".into(), n.into());
                 }
-                if !m.max_tokens.is_empty() {
-                    if let Ok(n) = m.max_tokens.parse::<u64>() {
-                        row.insert("maxTokens".into(), n.into());
-                    }
+                if let Some(n) = dsh_gpui::capacity::parse_capacity(&m.max_tokens) {
+                    row.insert("maxTokens".into(), n.into());
                 }
                 serde_yaml::Value::Mapping(row)
             })
@@ -1789,6 +1784,11 @@ pub(crate) struct AppView {
     adopt_customized_open: bool,
     edit_customized_open: bool,
     editing_provider: Option<String>,
+    /// 正在编辑容量的模型行 `(provider, model)`。上游把容量当 provider 声明
+    /// 的元数据；探测拿不到时由用户手填（#95 选项③）。
+    model_capacity_edit: Option<(String, String)>,
+    /// 容量编辑行共用的输入框（同一时刻只编辑一行）。
+    model_capacity_input: Entity<InputState>,
     /// 待删除确认（web deleteDialog：删除前弹确认）。
     confirm_delete: Option<String>,
     /// 「创建提供方」的失败原因（web 卡内 error 行）。
@@ -1958,6 +1958,7 @@ impl AppView {
         dc_key: Entity<InputState>,
         dc_new_model: Entity<InputState>,
         edit_key: Entity<InputState>,
+        model_capacity_input: Entity<InputState>,
         edit_base: Entity<InputState>,
         fetch_query: Entity<InputState>,
         web_search_key_input: Entity<InputState>,
@@ -2107,6 +2108,8 @@ impl AppView {
             adopt_customized_open: false,
             edit_customized_open: false,
             editing_provider: None,
+            model_capacity_edit: None,
+            model_capacity_input,
             confirm_delete: None,
             declare_error: None,
             adopt_key,
@@ -4898,13 +4901,30 @@ impl AppView {
             FetchTarget::Edit(id) => {
                 if let Some(p) = self.settings.providers.iter_mut().find(|p| p.id == id) {
                     for m in picked {
-                        if !p.models.iter().any(|row| row.id == m.id) {
-                            p.models.push(CustomModel {
+                        match p.models.iter_mut().find(|row| row.id == m.id) {
+                            // 已有行：只补空白字段——用户手调过的容量不被
+                            // 探测结果悄悄改写（web「勾选采纳不会改写已调过的
+                            // 容量」），但缺失的容量/上限要补上，否则占用表
+                            // 与模型页容量列永远是空的。
+                            Some(row) => {
+                                if row.display_name.is_empty() {
+                                    row.display_name = m.name.clone();
+                                }
+                                if row.context_window.trim().is_empty() {
+                                    row.context_window =
+                                        m.context_window.map(fmt_capacity).unwrap_or_default();
+                                }
+                                if row.max_tokens.trim().is_empty() {
+                                    row.max_tokens =
+                                        m.max_tokens.map(fmt_capacity).unwrap_or_default();
+                                }
+                            }
+                            None => p.models.push(CustomModel {
                                 id: m.id.clone(),
                                 display_name: m.name,
                                 context_window: m.context_window.map(fmt_capacity).unwrap_or_default(),
                                 max_tokens: m.max_tokens.map(fmt_capacity).unwrap_or_default(),
-                            });
+                            }),
                         }
                     }
                 }
@@ -4926,6 +4946,26 @@ impl AppView {
         }
     }
 
+
+    /// 提交容量编辑行：写回 `settings.providers` 对应模型行并落盘。
+    /// 空值 = 清除声明（回落到目录兜底）；不可解析的值也按清除处理，
+    /// 避免脏字符串进磁盘。
+    fn commit_model_capacity(&mut self, cx: &Context<Self>) {
+        let Some((provider, model)) = self.model_capacity_edit.clone() else { return };
+        let raw = self
+            .model_capacity_input
+            .read_with(cx, |s, _| s.value().trim().to_string());
+        let normalized = dsh_gpui::capacity::parse_capacity(&raw)
+            .map(dsh_gpui::capacity::format_capacity)
+            .unwrap_or_default();
+        if let Some(p) = self.settings.providers.iter_mut().find(|p| p.id == provider) {
+            if let Some(row) = p.models.iter_mut().find(|m| m.id == model) {
+                row.context_window = normalized;
+            }
+        }
+        self.model_capacity_edit = None;
+        self.persist_settings();
+    }
 
     /// 编辑卡保存（web ProviderEditor apply：换 key / 改 API 地址）。
     fn save_edit(&mut self, cx: &App) {
@@ -6367,15 +6407,15 @@ impl AppView {
             .and_then(|p| p.models.iter().find(|m| m.id == self.desired_model))
             .map(|m| m.context_window.clone())
             .unwrap_or_default();
-        // 内置 DeepSeek 路由的模型目录不一定写容量（上游官方目录声明
-        // 1_048_576），缺省按官方值兜底；自定义路由必须自己声明。
-        let context_window = dsh_gpui::parse_capacity(&capacity_raw).or_else(|| {
-            if self.active_provider == "deepseek" && capacity_raw.trim().is_empty() {
-                Some(OFFICIAL_DEEPSEEK_CONTEXT_WINDOW)
-            } else {
-                None
-            }
-        })?;
+        // 容量链：模型行声明 → 官方目录兜底（DeepSeek 系 1_048_576）。
+        // 自定义路由既没声明又不是 DeepSeek 系 → None，占用表不渲染
+        // （上游 contextOccupancy 缺任一半返回 null）。
+        let model_id = self.desired_model.clone();
+        let context_window = dsh_gpui::capacity::resolve_capacity(
+            &capacity_raw,
+            &self.active_provider,
+            &model_id,
+        )?;
         let assembly = self.agent.prompt_assembly();
         let system_tokens = meter::estimate_system_prompt(Some(assembly.system.as_str()));
         let tools_json = serde_json::to_string(&assembly.tools).unwrap_or_default();
@@ -8827,6 +8867,11 @@ fn main() {
                 let edit_key = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).masked(true).placeholder("已配置——输入新值可替换")
                 });
+                // 容量编辑行（#95 选项③）：探测拿不到 contextWindow 时手填，
+                // 接受 `128K` / `131072` 两种写法（落盘前归一成裸数字）。
+                let model_capacity_input = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx).placeholder("如 128K 或 131072")
+                });
                 let edit_base = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("提供方默认")
                 });
@@ -8873,6 +8918,7 @@ fn main() {
                         dc_key.clone(),
                         dc_new_model.clone(),
                         edit_key.clone(),
+                        model_capacity_input.clone(),
                         edit_base.clone(),
                         fetch_query.clone(),
                         web_search_key_input.clone(),
@@ -9058,16 +9104,10 @@ fn valid_route_id(route: &str) -> bool {
 }
 
 /// 容量拼法（web formatCapacity：K=1000、M=1000000，整除才缩写）。
+/// 容量展示/落盘统一走 `dsh_gpui::capacity::format_capacity`（能整除以 K/M
+/// 缩写，磁盘持久化时再解析回裸数字）。
 fn fmt_capacity(value: u64) -> String {
-    const K: u64 = 1000;
-    const M: u64 = 1000 * 1000;
-    if value % M == 0 {
-        format!("{}M", value / M)
-    } else if value % K == 0 {
-        format!("{}K", value / K)
-    } else {
-        value.to_string()
-    }
+    dsh_gpui::capacity::format_capacity(value)
 }
 
 

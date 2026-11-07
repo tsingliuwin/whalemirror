@@ -1,12 +1,16 @@
 //! dsh-web — HTTP fetch + web search tools.
 //!
-//! - [`WebTool`]（`web_fetch`）：GET 一个 URL 并返回文本正文（截断）。
+//! - [`WebTool`]（`web_fetch`）：取一个 URL 并按 content-type 解码为文本
+//!   （HTML 抽正文、超 5MB/10 万字符截断、跨源重定向拒绝），策略层在
+//!   [`fetch_policy`]。
 //! - [`WebSearchTool`]（`web_search`）：DeepSeek Anthropic 兼容 `/messages`
 //!   调用 + 原生 `web_search_20250305` 服务端工具（对齐
 //!   `packages/web/web-search-deepseek`——端点/头/请求体逐字一致；结果块
 //!   缺失按错误处理，不做散文抓取回退）。
 
 use std::collections::HashSet;
+
+pub mod fetch_policy;
 
 use async_trait::async_trait;
 use dsh_tools::{Tool, ToolDefinition, ToolExecutionInput, ToolExecutionResult};
@@ -44,17 +48,137 @@ impl Tool for WebTool {
     }
 
     async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
-        let url = input.arguments.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        match self.client.get(url).send().await {
-            Ok(resp) => match resp.text().await {
-                Ok(body) => {
-                    let truncated: String = body.chars().take(8000).collect();
-                    ToolExecutionResult::text(truncated)
-                }
-                Err(e) => ToolExecutionResult::error(format!("read body failed: {e}")),
-            },
-            Err(e) => ToolExecutionResult::error(format!("fetch failed: {e}")),
+        use crate::fetch_policy as policy;
+        let raw = input.arguments.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        if let Err(rejection) = policy::validate_url(raw) {
+            return ToolExecutionResult::error(rejection.message(raw));
         }
+        let mut current = raw.to_string();
+        // 手动跟同源重定向：跨源必须由模型各自重新发一次工具调用（上游
+        // `isSameOrigin` 拒绝跨源跳转，客户端不能替它决定去哪）。
+        for hop in 0..=policy::MAX_REDIRECTS {
+            let resp = match self
+                .client
+                .get(&current)
+                .header(reqwest::header::USER_AGENT, USER_AGENT)
+                .header(reqwest::header::ACCEPT, ACCEPT_HEADER)
+                .timeout(std::time::Duration::from_millis(policy::TIMEOUT_MS))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return ToolExecutionResult::error(format!("fetch failed: {e}")),
+            };
+            let status = resp.status();
+            if status.is_redirection() {
+                let Some(location) = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                else {
+                    return ToolExecutionResult::error(format!(
+                        "redirect status {status} carried no Location header"
+                    ));
+                };
+                let next = resolve_location(&current, location);
+                if !policy::same_origin(&current, &next) {
+                    return ToolExecutionResult::error(
+                        "cross-origin redirect refused; fetch the new URL in a separate call",
+                    );
+                }
+                if hop == policy::MAX_REDIRECTS {
+                    return ToolExecutionResult::error(format!(
+                        "too many redirects (limit {})",
+                        policy::MAX_REDIRECTS
+                    ));
+                }
+                current = next;
+                continue;
+            }
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let Some(kind) = policy::classify_content_type(content_type.as_deref()) else {
+                return ToolExecutionResult::error(format!(
+                    "unsupported content type \"{}\"",
+                    content_type.unwrap_or_else(|| "unknown".into())
+                ));
+            };
+            // 声明的 Content-Length 超上限直接拒绝；流式读到超限再截断
+            if let Some(len) = resp.content_length() {
+                if len as usize > policy::MAX_RESPONSE_BYTES {
+                    return ToolExecutionResult::error(format!(
+                        "response body exceeds the {} byte limit",
+                        policy::MAX_RESPONSE_BYTES
+                    ));
+                }
+            }
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => return ToolExecutionResult::error(format!("read body failed: {e}")),
+            };
+            let truncated_by_bytes = bytes.len() > policy::MAX_RESPONSE_BYTES;
+            let bounded = if truncated_by_bytes {
+                &bytes[..policy::MAX_RESPONSE_BYTES]
+            } else {
+                &bytes[..]
+            };
+            let body = match decode_body(bounded, content_type.as_deref()) {
+                Ok(text) => text,
+                Err(message) => return ToolExecutionResult::error(message),
+            };
+            let rendered = policy::render_fetch_output(
+                &current,
+                status.as_u16(),
+                kind,
+                &body,
+                truncated_by_bytes,
+            );
+            return ToolExecutionResult::text(format!(
+                "{EXTERNAL_WEB_CONTENT_NOTICE}
+
+{rendered}"
+            ));
+        }
+        ToolExecutionResult::error("too many redirects".to_string())
+    }
+}
+
+/// 显式产品 UA——上游 `DEFAULT_USER_AGENT`，绝不伪装浏览器。
+pub const USER_AGENT: &str = "deepseek-runtime/0.0.1 (+https://github.com/deepseek-ai)";
+/// 请求接受的内容类型（上游 `accept` 头逐字）。
+pub const ACCEPT_HEADER: &str =
+    "text/html,application/xhtml+xml,text/*;q=0.9,application/json;q=0.8";
+
+/// 按声明的 charset 解码；缺省 UTF-8，非法字节用有损替换而不是整单失败
+/// （上游对「畸形 charset 声明」才 fatal，本地按有损处理更宽容）。
+fn decode_body(bytes: &[u8], content_type: Option<&str>) -> Result<String, String> {
+    let charset = crate::fetch_policy::parse_charset(content_type);
+    match charset.as_deref() {
+        None | Some("utf-8") | Some("utf8") => Ok(String::from_utf8_lossy(bytes).into_owned()),
+        Some(_) => {
+            // 非 UTF-8 声明：reqwest 无通用转码，按 UTF-8 有损兜底并说明
+            Ok(String::from_utf8_lossy(bytes).into_owned())
+        }
+    }
+}
+
+/// 把 Location 解析成绝对地址（相对路径按当前 URL 拼接）。
+fn resolve_location(current: &str, location: &str) -> String {
+    if location.contains("://") {
+        return location.to_string();
+    }
+    let base_end = current
+        .find("://")
+        .and_then(|i| current[i + 3..].find('/').map(|j| i + 3 + j))
+        .unwrap_or(current.len());
+    let origin = &current[..base_end];
+    if let Some(rest) = location.strip_prefix('/') {
+        format!("{origin}/{rest}")
+    } else {
+        format!("{origin}/{location}")
     }
 }
 

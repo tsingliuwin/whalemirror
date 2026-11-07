@@ -1011,13 +1011,34 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                                         d.child(fetch_link(app, this, &target, cx))
                                     }),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(theme::FONT_CAPTION))
-                                    .line_height(px(theme::FONT_CAPTION_LEADING))
-                                    .text_color(tk.text_3)
-                                    .child(models.join(" · ")),
-                            ),
+                            // 模型行：名称 + 容量读数（点击就地改容量）。
+                            // 上游把 contextWindow 当 provider 元数据展示；
+                            // rustdsh 的探测可能拿不到，故给手填入口。
+                            .child({
+                                let mut rows = div().v_flex().gap(px(2.0));
+                                // 自定义路由读已存模型行；内置 DeepSeek 读目录
+                                // 列表（同样允许就地改容量）。
+                                let list: Vec<(String, String)> = app
+                                    .settings
+                                    .providers
+                                    .iter()
+                                    .find(|p| p.id == id)
+                                    .map(|p| {
+                                        p.models
+                                            .iter()
+                                            .map(|m| (m.id.clone(), m.context_window.clone()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_else(|| {
+                                        models.iter().map(|m| (m.clone(), String::new())).collect()
+                                    });
+                                for (model_id, capacity) in list {
+                                    rows = rows.child(model_capacity_row(
+                                        app, this, id, &model_id, &capacity, cx,
+                                    ));
+                                }
+                                rows
+                            }),
                     )
                     .when_some(
                         app.fetch_error.clone().filter(|(t, _)| {
@@ -1611,6 +1632,126 @@ fn action_button(
         .cursor_pointer()
         .on_click(on_click)
         .child(label)
+}
+
+/// 模型行的容量读数 + 就地编辑（#95 选项③）。
+///
+/// 上游把 `contextWindow` 当 provider 声明的元数据（模型页只读展示）；
+/// rustdsh 的目录探测可能拿不到该字段（如火山 ark 的 openai-compatible
+/// 列表），此时占用表整枚不渲染。这里给用户一个手填入口：点容量 chip 展开
+/// 输入框，接受 `128K` / `131072`；空值 = 清除声明。
+fn model_capacity_row(
+    app: &AppView,
+    this: &Entity<AppView>,
+    provider: &str,
+    model: &str,
+    declared: &str,
+    _cx: &App,
+) -> Div {
+    let tk = theme::t();
+    let editing = app
+        .model_capacity_edit
+        .as_ref()
+        .is_some_and(|(p, m)| p == provider && m == model);
+    let resolved = dsh_gpui::capacity::resolve_capacity(declared, provider, model);
+    let label = match (declared.trim().is_empty(), resolved) {
+        (false, Some(_)) => declared.to_string(),
+        // 没声明但目录能兜底：显示兜底值并标注来源，用户才知道真值从哪来
+        (true, Some(v)) => format!("{}(目录)", dsh_gpui::capacity::format_capacity(v)),
+        (true, None) => "未声明".to_string(),
+        (false, None) => declared.to_string(),
+    };
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(theme::FONT_CAPTION))
+                .line_height(px(theme::FONT_CAPTION_LEADING))
+                .text_color(tk.text_2)
+                .child(model.to_string()),
+        );
+    // chip id 固定（同一时刻只编辑一行，不再按 provider/model 分 id——
+    // 之前每次渲染 id 都变，点击态会丢）
+    let chip_id = SharedString::from("model-capacity-chip");
+    if editing {
+        let t_save = this.clone();
+        let t_cancel = this.clone();
+        row = row
+            .child(
+                // 输入框要够宽（占位「如 128K 或 131072」不截断）；展开时
+                // 由 chip 的点击处 focus，否则键盘输入落空。
+                div().w(px(200.0)).child(Input::new(&app.model_capacity_input)),
+            )
+            .child(compact_action_button(
+                SharedString::from(format!("cap-save-{provider}-{model}")),
+                "保存",
+                false,
+                move |_, _, cx| {
+                    t_save.update(cx, |v, cx| {
+                        v.commit_model_capacity(cx);
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(compact_action_button(
+                SharedString::from(format!("cap-cancel-{provider}-{model}")),
+                "取消",
+                false,
+                move |_, _, cx| {
+                    t_cancel.update(cx, |v, cx| {
+                        v.model_capacity_edit = None;
+                        cx.notify();
+                    });
+                },
+            ));
+    } else {
+        let t = this.clone();
+        let provider_owned = provider.to_string();
+        let model_owned = model.to_string();
+        let current = declared.to_string();
+        row = row.child(
+            div()
+                .id(chip_id.clone())
+                .flex_none()
+                .px(px(6.0))
+                .py(px(1.0))
+                .rounded(px(dsh_gpui::ui_metrics::RADIUS_XS_PX))
+                .border(px(0.5))
+                .border_color(tk.border_l3)
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .text_color(tk.text_3)
+                .cursor_pointer()
+                .hover(|s| s.bg(tk.hover))
+                .child(label)
+                .on_click({
+                    let t = t.clone();
+                    move |_, window, cx| {
+                        let (p, m, cur) =
+                            (provider_owned.clone(), model_owned.clone(), current.clone());
+                        t.update(cx, |v, cx| {
+                            v.model_capacity_edit = Some((p, m));
+                            cx.notify();
+                            // 与侧栏搜索展开同序：先 notify 让输入框挂载，
+                            // 再 focus（挂载前 focus 会被丢弃）。
+                            let input = v.model_capacity_input.clone();
+                            input.update(cx, |state, cx| {
+                                state.set_value(cur, window, cx);
+                                state.focus(window, cx);
+                            });
+                        });
+                    }
+                }),
+        );
+    }
+    row
 }
 
 /// 紧凑档行内按钮（web `Button.sm`：高 28、pad 0 10、R8、12/18）——

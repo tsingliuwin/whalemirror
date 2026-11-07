@@ -991,6 +991,18 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
         } else {
             hint("选择模型目录中的首行作为路由默认模型。")
         })
+        // 上下文容量（#96）：常显在折叠区之前——设置面板在本环境无法用
+        // 合成滚轮滚动，放到折叠区里会让页脚「保存」永远移出视口。形态
+        // 与 API 密钥同款 `field()`+`Input`（同卡内实测可点）。
+        .when(id != "deepseek" || !app.env_key_locked, |d| {
+            d.child(field(
+                "上下文窗口",
+                Input::new(&app.model_capacity_input).w_full(),
+            ))
+            .child(hint(
+                "作用于路由默认模型（模型目录首行）；接受 128K / 131072，留空按目录兜底。",
+            ))
+        })
         .child(
             // 自定义设置折叠（web details.customized：12/18 wt500 secondary + 旋转 chevron）
             disclosure(

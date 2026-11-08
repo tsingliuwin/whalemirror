@@ -638,23 +638,86 @@ const CARD_MAX_LINES: usize = 8;
 pub(crate) fn turn_process_control(
     uid: u64,
     label: &str,
+    activity: Option<dsh_gpui::ProcessActivity>,
     open: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    use dsh_gpui::ui_metrics as m;
+    let tk = theme::t();
+    let group: SharedString = format!("proc-row-{uid}").into();
+    // 上游 PROCESS_ICONS：活动类目 → 图标；rustdsh 用 gpui-component 的近似图标。
+    let icon = match activity {
+        Some(dsh_gpui::ProcessActivity::Search) => IconName::Search,
+        Some(dsh_gpui::ProcessActivity::Commands) | Some(dsh_gpui::ProcessActivity::Code) => {
+            IconName::SquareTerminal
+        }
+        Some(dsh_gpui::ProcessActivity::WebSearch) => IconName::Globe,
+        Some(dsh_gpui::ProcessActivity::Subagents) => IconName::Bot,
+        Some(dsh_gpui::ProcessActivity::Plan) => IconName::LayoutDashboard,
+        Some(dsh_gpui::ProcessActivity::Questions) => IconName::Inbox,
+        // read/readImage/write/edit（上游 Browse / Edit）→ 文件图标
+        _ => IconName::File,
+    };
     div()
         .id(("turn-process", uid))
+        .group(group.clone())
         .w_full()
-        .h(px(33.0))
-        .pb(px(8.0))
         .flex()
         .items_center()
-        // web TurnProcessNodeView（alpha.4）：底线 0.5px 发丝
-        .border_b(px(0.5))
-        .border_color(theme::t().border_l2)
-        .text_color(theme::t().text_2)
+        .gap(px(m::PROCESS_ROW_GAP_PX))
+        // 上游 `.title[aria-expanded=true] { padding-bottom: 8px }`：只有展开态
+        // 才有下内距；旧实现是 33px 定高 + 常驻底边发丝 + 未展开再加 8px 外距。
+        .when(open, |d| d.pb(px(m::PROCESS_ROW_OPEN_PAD_BOTTOM_PX)))
+        .text_size(px(m::PROCESS_ROW_FONT_PX))
+        .line_height(px(m::PROCESS_ROW_LEADING_PX))
+        .text_color(tk.text_3)
+        .hover(|s| s.text_color(tk.text_2))
         .cursor_pointer()
-        .when(!open, |d| d.mb(px(8.0)))
         .on_click(on_toggle)
+        // leading：16×16 盒，活动图标与 chevron 叠放——静止显图标，hover /
+        // 展开切 chevron（上游 `.activityIcon` / `.chevron` opacity 规则）
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .size(px(m::PROCESS_LEADING_BOX_PX))
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(icon)
+                                .size(px(m::PROCESS_LEADING_ICON_PX))
+                                .text_color(tk.text_3),
+                        )
+                        .when(open, |d| d.opacity(0.0))
+                        .group_hover(group.clone(), |s| s.opacity(0.0)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown })
+                                .size(px(m::PROCESS_LEADING_ICON_PX))
+                                .text_color(tk.text_3),
+                        )
+                        .opacity(if open { 1.0 } else { 0.0 })
+                        .group_hover(group, |s| s.opacity(1.0)),
+                ),
+        )
         .child(
             div()
                 .flex_1()
@@ -662,14 +725,7 @@ pub(crate) fn turn_process_control(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_size(px(14.0))
-                .line_height(px(24.0))
                 .child(label.to_string()),
-        )
-        .child(
-            Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                .size(px(16.0))
-                .text_color(theme::t().text_3),
         )
 }
 

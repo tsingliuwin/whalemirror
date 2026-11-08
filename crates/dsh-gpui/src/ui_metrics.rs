@@ -322,6 +322,20 @@ pub fn settings_panel_height(viewport_h: f32) -> f32 {
 // 不另加 margin）；`.field + .field` 一条 0.5px `border-l2` 发丝作分隔；
 // `.label` 13px/1.5、`.help` 12px/1.6。曾用 gap 16 + 上下 padding 16 + 行间
 // border-bottom：行高比上游多 8px、标签字号大一档（14 vs 13）。
+// ---- 轮次过程组表头（上游 ui-chat ChatGroupSeat.module.css `.title`/`.leading`）----
+//
+// `.title { display:flex; align-items:center; gap:6px; font-size:14px;
+// line-height:24px; color:label-tertiary }`（hover → secondary），**无固定高度、
+// 无底边发丝**；`.leading` 是 16×16 盒，活动图标与 chevron 叠放（静止显图标，
+// hover/展开切 chevron），图标 14px；展开态 `[aria-expanded=true]` 追加 8px
+// 下内距。rustdsh 旧实现是「33px 定高 + 常驻底边发丝 + 图标在右」。
+pub const PROCESS_ROW_GAP_PX: f32 = 6.0;
+pub const PROCESS_ROW_FONT_PX: f32 = 14.0;
+pub const PROCESS_ROW_LEADING_PX: f32 = 24.0;
+pub const PROCESS_ROW_OPEN_PAD_BOTTOM_PX: f32 = 8.0;
+pub const PROCESS_LEADING_BOX_PX: f32 = 16.0;
+pub const PROCESS_LEADING_ICON_PX: f32 = 14.0;
+
 pub const FIELD_PAD_Y_PX: f32 = 12.0;
 pub const FIELD_GAP_PX: f32 = 6.0;
 pub const FIELD_LABEL_FONT_PX: f32 = 13.0;
@@ -590,6 +604,20 @@ mod tests {
         assert_eq!(PREVIEW_PATH_MARGIN_R_PX + PREVIEW_HEADER_GAP_PX, 16.0);
         // 路径标签 12px 字（上游 .path font-size: 12px）
         assert_eq!(PREVIEW_PATH_FONT_PX, 12.0);
+    }
+
+    #[test]
+    fn process_group_header_matches_upstream() {
+        assert_eq!(PROCESS_ROW_GAP_PX, 6.0);
+        assert_eq!(PROCESS_ROW_FONT_PX, 14.0);
+        assert_eq!(PROCESS_ROW_LEADING_PX, 24.0);
+        assert_eq!(PROCESS_ROW_OPEN_PAD_BOTTOM_PX, 8.0);
+        assert_eq!(PROCESS_LEADING_BOX_PX, 16.0);
+        assert_eq!(PROCESS_LEADING_ICON_PX, 14.0);
+        // 图标在 16px 盒内居中，四周各留 1px
+        assert_eq!((PROCESS_LEADING_BOX_PX - PROCESS_LEADING_ICON_PX) / 2.0, 1.0);
+        // 行高随字号：14/24（上游 line-height 24px 对应 14px 正文）
+        assert_eq!(PROCESS_ROW_LEADING_PX - PROCESS_ROW_FONT_PX, 10.0);
     }
 
     #[test]

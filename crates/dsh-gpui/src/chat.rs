@@ -4585,9 +4585,11 @@ impl Render for ChatView {
                                         // 0.1.7-alpha.1 stepProcess：类目计数标题
                                         //（前 3 类 done 文案组合；空类目「已完成分析」）
                                         let label = dsh_gpui::process_title(&f.activities);
+                                        let primary = f.activities.first().map(|(k, _)| *k);
                                         let control = widgets::turn_process_control(
                                             ix as u64,
                                             &label,
+                                            primary,
                                             expanded,
                                             move |_, _, cx| {
                                                 t_ctl.update(cx, |v, cx| {

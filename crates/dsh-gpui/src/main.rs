@@ -411,6 +411,68 @@ pub(crate) struct CustomModel {
     pub(crate) context_window: String,
     #[serde(default)]
     pub(crate) max_tokens: String,
+    /// reasoning 档位声明（上游 `reasoningEfforts`）：空 = 未声明（沿用
+    /// 目录能力）；`Some(vec)` = 显式列出档位，`None` 值只在 `off` 上合法。
+    #[serde(default)]
+    pub(crate) reasoning_efforts: Option<Vec<dsh_gpui::reasoning_efforts::ReasoningEffort>>,
+}
+
+/// 从 settings.yaml 的 `reasoningEfforts` 读档位声明。
+///
+/// 三种形状（上游同义）：
+/// - 缺省 / `false` → `None`（未声明，沿用目录能力；注意 `false` 表示明确
+///   关闭推理，本地目前没有「显式关闭」的独立状态，统一归为未声明）；
+/// - 映射 `{level: wire|null}` → `Some(entries)`，按上游档位顺序排；
+/// - 其它形状（空映射、数组等）→ `None`（上游会拒绝的配置不进来）。
+fn parse_reasoning_efforts(
+    value: Option<&serde_yaml::Value>,
+) -> Option<Vec<dsh_gpui::reasoning_efforts::ReasoningEffort>> {
+    use dsh_gpui::reasoning_efforts::{ReasoningEffort, THINKING_LEVELS};
+    let map = value?.as_mapping()?;
+    if map.is_empty() {
+        return None;
+    }
+    let mut entries: Vec<ReasoningEffort> = Vec::new();
+    // 先按上游升序取已知档位（未知键保留在末尾，避免编辑时丢数据）
+    for level in THINKING_LEVELS {
+        let key = serde_yaml::Value::String(level.to_string());
+        if let Some(wire) = map.get(&key) {
+            entries.push(ReasoningEffort {
+                level: level.to_string(),
+                wire: wire.as_str().map(|s| s.to_string()),
+            });
+        }
+    }
+    for (key, wire) in map {
+        let Some(level) = key.as_str() else { continue };
+        if !THINKING_LEVELS.contains(&level) {
+            entries.push(ReasoningEffort {
+                level: level.to_string(),
+                wire: wire.as_str().map(|s| s.to_string()),
+            });
+        }
+    }
+    Some(entries)
+}
+
+/// 把档位声明写成 settings.yaml 的 `reasoningEfforts` 映射；
+/// 空声明不写（= 未声明，沿用目录能力）。
+fn reasoning_efforts_to_yaml(
+    entries: &[dsh_gpui::reasoning_efforts::ReasoningEffort],
+) -> Option<serde_yaml::Value> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut map = serde_yaml::Mapping::new();
+    for entry in entries {
+        let key = serde_yaml::Value::String(entry.level.clone());
+        let value = match &entry.wire {
+            Some(wire) => serde_yaml::Value::String(wire.clone()),
+            None => serde_yaml::Value::Null,
+        };
+        map.insert(key, value);
+    }
+    Some(serde_yaml::Value::Mapping(map))
 }
 
 /// 「添加提供方」的内置目录（OpenAI 兼容、可被 adopt 的提供方）。
@@ -807,6 +869,7 @@ fn load_user_config() -> (AppSettings, String, String, bool, String) {
                                 display_name: m.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
                                 context_window: m.get("contextWindow").and_then(|n| n.as_u64()).map(|n| n.to_string()).unwrap_or_default(),
                                 max_tokens: m.get("maxTokens").and_then(|n| n.as_u64()).map(|n| n.to_string()).unwrap_or_default(),
+                                reasoning_efforts: parse_reasoning_efforts(m.get("reasoningEfforts")),
                             })
                         })
                         .collect()
@@ -894,6 +957,13 @@ fn persist_user_config(
                 }
                 if let Some(n) = dsh_gpui::capacity::parse_capacity(&m.max_tokens) {
                     row.insert("maxTokens".into(), n.into());
+                }
+                if let Some(efforts) = m
+                    .reasoning_efforts
+                    .as_deref()
+                    .and_then(reasoning_efforts_to_yaml)
+                {
+                    row.insert("reasoningEfforts".into(), efforts);
                 }
                 serde_yaml::Value::Mapping(row)
             })
@@ -1033,6 +1103,7 @@ fn migrate_legacy() {
                                     display_name: m.get("display_name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
                                     context_window: m.get("context_window").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
                                     max_tokens: m.get("max_tokens").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+                                    reasoning_efforts: None,
                                 })
                             })
                             .collect()
@@ -1789,6 +1860,8 @@ pub(crate) struct AppView {
     model_capacity_edit: Option<(String, String)>,
     /// 容量编辑行共用的输入框（同一时刻只编辑一行）。
     model_capacity_input: Entity<InputState>,
+    /// reasoning 档位声明输入框（`off,low,medium,high`；空 = 未声明）。
+    reasoning_wire_input: Entity<InputState>,
     /// 待删除确认（web deleteDialog：删除前弹确认）。
     confirm_delete: Option<String>,
     /// 「创建提供方」的失败原因（web 卡内 error 行）。
@@ -1959,6 +2032,7 @@ impl AppView {
         dc_new_model: Entity<InputState>,
         edit_key: Entity<InputState>,
         model_capacity_input: Entity<InputState>,
+        reasoning_wire_input: Entity<InputState>,
         edit_base: Entity<InputState>,
         fetch_query: Entity<InputState>,
         web_search_key_input: Entity<InputState>,
@@ -2110,6 +2184,7 @@ impl AppView {
             editing_provider: None,
             model_capacity_edit: None,
             model_capacity_input,
+            reasoning_wire_input,
             confirm_delete: None,
             declare_error: None,
             adopt_key,
@@ -4668,6 +4743,7 @@ impl AppView {
                 display_name: String::new(),
                 context_window: String::new(),
                 max_tokens: String::new(),
+                reasoning_efforts: None,
             }],
         };
         self.register_custom(&provider);
@@ -4711,6 +4787,7 @@ impl AppView {
                     display_name: String::new(),
                     context_window: String::new(),
                     max_tokens: String::new(),
+                    reasoning_efforts: None,
                 })
                 .collect(),
         };
@@ -4924,6 +5001,7 @@ impl AppView {
                                 display_name: m.name,
                                 context_window: m.context_window.map(fmt_capacity).unwrap_or_default(),
                                 max_tokens: m.max_tokens.map(fmt_capacity).unwrap_or_default(),
+                                reasoning_efforts: None,
                             }),
                         }
                     }
@@ -4990,6 +5068,23 @@ impl AppView {
             // 上下文容量（#96）：写回路由默认模型（模型目录首行）；空值 =
             // 清除声明（回落到目录兜底），不可解析的值也按清除处理。
             if let Some(first) = p.models.first_mut() {
+                // reasoning 档位声明（空 = 撤销声明）；非法只是提示，不写盘
+                let declaration = self
+                    .reasoning_wire_input
+                    .read_with(cx, |s, _| s.value().trim().to_string());
+                let parsed = dsh_gpui::reasoning_efforts::parse_declaration(&declaration);
+                let next_efforts = if parsed.is_empty() {
+                    None
+                } else if dsh_gpui::reasoning_efforts::validate(&parsed).is_none() {
+                    Some(parsed)
+                } else {
+                    // 非法：保持原值，避免把上游会拒的声明写进磁盘
+                    first.reasoning_efforts.clone()
+                };
+                if next_efforts != first.reasoning_efforts {
+                    first.reasoning_efforts = next_efforts;
+                    changed = true;
+                }
                 let entered = self
                     .model_capacity_input
                     .read_with(cx, |s, _| s.value().trim().to_string());
@@ -8882,6 +8977,10 @@ fn main() {
                 });
                 // 容量编辑行（#95 选项③）：探测拿不到 contextWindow 时手填，
                 // 接受 `128K` / `131072` 两种写法（落盘前归一成裸数字）。
+                let reasoning_wire_input = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx)
+                        .placeholder("off,low,medium,high")
+                });
                 let model_capacity_input = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("如 128K 或 131072")
                 });
@@ -8932,6 +9031,7 @@ fn main() {
                         dc_new_model.clone(),
                         edit_key.clone(),
                         model_capacity_input.clone(),
+                        reasoning_wire_input.clone(),
                         edit_base.clone(),
                         fetch_query.clone(),
                         web_search_key_input.clone(),

@@ -864,6 +864,19 @@ fn provider_row(
                         v.model_capacity_input.update(cx, |state, cx| {
                             state.set_value(seed, window, cx);
                         });
+                        // reasoning 档位：预填当前声明（空 = 未声明）
+                        let declared = v
+                            .settings
+                            .providers
+                            .iter()
+                            .find(|p| p.id == id)
+                            .and_then(|p| p.models.first())
+                            .and_then(|m| m.reasoning_efforts.clone())
+                            .map(|e| dsh_gpui::reasoning_efforts::format_declaration(&e))
+                            .unwrap_or_default();
+                        v.reasoning_wire_input.update(cx, |state, cx| {
+                            state.set_value(declared, window, cx);
+                        });
                     }
                     cx.notify();
                 });
@@ -1003,6 +1016,34 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                 "作用于路由默认模型（模型目录首行）；接受 128K / 131072，留空按目录兜底。",
             ))
         })
+        // reasoning 档位（上游 ModelReasoningEfforts）：首屏可见。
+        //
+        // 卡内的开关/增删按钮在本环境点击不可达（与容量 chip 同类），故用
+        // **一行声明**代替点选区：`off,low,medium,high` 或
+        // `off=,low=low_v2` 这种显式值写法；打开编辑卡时预填当前声明。
+        .when(id != "deepseek", |d| {
+            let current = app
+                .settings
+                .providers
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.models.first())
+                .and_then(|m| m.reasoning_efforts.clone());
+            let invalid = current
+                .as_deref()
+                .is_some_and(|entries| dsh_gpui::reasoning_efforts::validate(entries).is_some());
+            let mut col = d.child(field(
+                "推理档位",
+                Input::new(&app.reasoning_wire_input).w_full(),
+            ))
+            .child(hint(
+                "逗号分隔档位：off,low,medium,high；自定义发送值写作 low=low_v2。留空 = 沿用目录能力。",
+            ));
+            if invalid {
+                col = col.child(err_hint("至少一个思考档，且非 off 档都要有发送值。"));
+            }
+            col
+        })
         .child(
             // 自定义设置折叠（web details.customized：12/18 wt500 secondary + 旋转 chevron）
             disclosure(
@@ -1014,17 +1055,6 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                     .gap(px(12.0))
                     .pt_3()
                     .child(field("API 地址", Input::new(&app.edit_base).w_full()))
-                    // 上下文容量（#96）：走与 API 地址同一套 `field()`+`Input`
-                    // ——行内容量 chip 的 hitbox 与 paint 在这个滚动容器里
-                    // 错位，这条输入框是可点中的既有形态。作用于路由默认模型
-                    //（模型目录首行，与上游「首行作为路由默认模型」一致）。
-                    .child(field(
-                        "上下文窗口",
-                        Input::new(&app.model_capacity_input).w_full(),
-                    ))
-                    .child(hint(
-                        "作用于路由默认模型（模型目录首行）；接受 128K / 131072，留空则按目录兜底。",
-                    ))
                     .child(
                         div()
                             .v_flex()
@@ -1577,6 +1607,15 @@ fn field(label: &str, control: impl IntoElement) -> Div {
 }
 
 /// 12/18 tertiary 提示行（web .advancedHint）。
+/// 表单行内错误提示（上游 `.error`：12/18、state-error）。
+fn err_hint(text: &str) -> Div {
+    div()
+        .text_size(px(theme::FONT_CAPTION))
+        .line_height(px(theme::FONT_CAPTION_LEADING))
+        .text_color(theme::t().error)
+        .child(text.to_string())
+}
+
 fn hint(text: &str) -> Div {
     let tk = theme::t();
     div()

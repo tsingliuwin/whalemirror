@@ -10,6 +10,7 @@ pub mod context_meter;
 pub mod credential_mask;
 pub mod path_label;
 pub mod provider_cards;
+pub mod reasoning_efforts;
 pub mod shell_exit;
 pub mod stat_popup;
 pub mod stat_reading;

@@ -6587,42 +6587,7 @@ impl AppView {
             .gap(px(12.0))
             .h(px(24.0))
             .pt(px(4.0));
-        // 上下文占用表（上游 ContextMeter）：与统计 pill 同一行，排在末尾；
-        // 路由没声明容量时整枚不渲染（上游 return null）。
-        if let Some((occupancy, breakdown)) = self.context_pressure() {
-            let meter_open = self.context_meter_open;
-            let t_meter = this.clone();
-            let reading = format!("{}%", occupancy.percent);
-            // trigger：gap 6、pad 1/8、R8、13/20 tertiary、数值等宽
-            let mut meter = div()
-                .id("context-meter")
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(8.0))
-                .py(px(1.0))
-                .rounded(px(dsh_gpui::ui_metrics::RADIUS_SM_PX))
-                .text_size(px(theme::FONT_TAB))
-                .line_height(px(20.0))
-                .text_color(if meter_open { theme::t().text_2 } else { theme::t().text_3 })
-                .when(meter_open, |d| d.bg(theme::t().hover))
-                .hover(|s| s.bg(theme::t().hover).text_color(theme::t().text_2))
-                .cursor_pointer()
-                .tooltip(tip("上下文已用"))
-                .on_click(move |_, _, cx| {
-                    t_meter.update(cx, |v, cx| {
-                        v.context_meter_open = !v.context_meter_open;
-                        cx.notify();
-                    });
-                })
-                .child(ring_meter_svg(occupancy.percent))
-                .child(stat_reading(reading, theme::t().text_3));
-            if meter_open {
-                meter = meter.child(context_meter_panel(&occupancy, &breakdown));
-            }
-            strip = strip.child(meter);
-        }
+        // 统计 pill 在前（上游 dock 槽里 StatsPills 先注册）、上下文占用表在尾。
         if stats.steps > 0 || has_tokens {
             let t_gauge = this.clone();
             let t_usage = this.clone();
@@ -6746,6 +6711,42 @@ impl AppView {
                             .child(stat_dialog_panel(StatDialogKind::Usage, &stats)),
                     )
                 });
+        }
+        // 上下文占用表（上游 ContextMeter）：与统计 pill 同一行，排在末尾；
+        // 路由没声明容量时整枚不渲染（上游 return null）。
+        if let Some((occupancy, breakdown)) = self.context_pressure() {
+            let meter_open = self.context_meter_open;
+            let t_meter = this.clone();
+            let reading = format!("{}%", occupancy.percent);
+            // trigger：gap 6、pad 1/8、R8、13/20 tertiary、数值等宽
+            let mut meter = div()
+                .id("context-meter")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(1.0))
+                .rounded(px(dsh_gpui::ui_metrics::RADIUS_SM_PX))
+                .text_size(px(theme::FONT_TAB))
+                .line_height(px(20.0))
+                .text_color(if meter_open { theme::t().text_2 } else { theme::t().text_3 })
+                .when(meter_open, |d| d.bg(theme::t().hover))
+                .hover(|s| s.bg(theme::t().hover).text_color(theme::t().text_2))
+                .cursor_pointer()
+                .tooltip(tip("上下文已用"))
+                .on_click(move |_, _, cx| {
+                    t_meter.update(cx, |v, cx| {
+                        v.context_meter_open = !v.context_meter_open;
+                        cx.notify();
+                    });
+                })
+                .child(ring_meter_svg(occupancy.percent))
+                .child(stat_reading(reading, theme::t().text_3));
+            if meter_open {
+                meter = meter.child(context_meter_panel(&occupancy, &breakdown));
+            }
+            strip = strip.child(meter);
         }
         area = area.child(strip);
         // 点外关闭（上游 useStatDialog：面板外 pointerdown 即收）。绑在

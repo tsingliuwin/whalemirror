@@ -780,6 +780,30 @@ pub fn read_text_page(
 }
 
 
+// ---- composer 底部统计行槽位顺序（上游 InputBar `.dock`）----
+//
+// 上游 `.dock` 里先渲染 `conversation.composer.dock` 槽（ui-chat StatsPills：
+// 轮/步 pill、token/缓存 pill），`ContextMeter` 在其后——所以占用表是整行最右
+// 的一枚。rustdsh 曾把占用表插在最前（与注释声明的「排在末尾」相反）。
+
+/// 统计行里的槽位种类，按上游渲染顺序排列。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposerDockSlot {
+    /// 轮/步 + 输出速度（ui-chat StatsPills 的 gauge pill）。
+    StatsGauge,
+    /// token 总量 + 缓存命中（usage pill）。
+    StatsUsage,
+    /// 上下文占用环形读数（ui-conversation ContextMeter）。
+    ContextMeter,
+}
+
+/// 上游 `.dock` 的槽位顺序：统计 pill 先、占用表在尾。
+pub const COMPOSER_DOCK_ORDER: [ComposerDockSlot; 3] = [
+    ComposerDockSlot::StatsGauge,
+    ComposerDockSlot::StatsUsage,
+    ComposerDockSlot::ContextMeter,
+];
+
 // ---- 过程组活动标题（上游 step-process.ts / process-activity.ts 同语义）----
 
 /// 过程活动类目（上游 ProcessActivity）。
@@ -1915,3 +1939,27 @@ mod column_width_tests {
     }
 }
 
+#[cfg(test)]
+mod composer_dock_order_tests {
+    use super::{ComposerDockSlot, COMPOSER_DOCK_ORDER};
+
+    #[test]
+    fn stats_pills_precede_the_context_meter() {
+        // 上游 `.dock`：先 `conversation.composer.dock` 槽（统计 pill），
+        // 再 `<ContextMeter/>`——占用表必须是整行最后一枚。
+        assert_eq!(
+            COMPOSER_DOCK_ORDER,
+            [
+                ComposerDockSlot::StatsGauge,
+                ComposerDockSlot::StatsUsage,
+                ComposerDockSlot::ContextMeter,
+            ]
+        );
+        // 占用表不在首位（旧实现插到了最前）
+        assert_ne!(COMPOSER_DOCK_ORDER[0], ComposerDockSlot::ContextMeter);
+        assert_eq!(
+            COMPOSER_DOCK_ORDER.last(),
+            Some(&ComposerDockSlot::ContextMeter)
+        );
+    }
+}

@@ -126,7 +126,7 @@ pub(crate) fn render_settings(app: &AppView, this: Entity<AppView>, window: &mut
         SettingsTab::General => general_page(app, &this, cx),
         SettingsTab::Models => models_page(app, &this, window, cx),
         SettingsTab::Plugins => plugins_page(app, &this),
-        SettingsTab::Presets => placeholder_page("Agent 预设", "预设（标准/计划/只读等模式）尚未在 Rust 版接入；接入后将在此选择。"),
+        SettingsTab::Presets => presets_page(app, &this),
     };
     let options = div()
         .id("set-options")
@@ -567,7 +567,7 @@ fn general_page(app: &AppView, this: &Entity<AppView>, cx: &mut App) -> Div {
         .child(settings_row(
             "Agent 预设",
             "对此后新建的会话生效。运行中的会话保持它开始时的预设。",
-            select_chip("set-preset", "标准模式"),
+            preset_chip(app, &this),
             false,
         ))
         .child(settings_row(
@@ -647,6 +647,20 @@ fn select_chip(id: &'static str, label: &'static str) -> Stateful<Div> {
         .hover(|s| s.bg(tk.hover))
         .child(label)
         .child(Icon::new(IconName::ChevronDown).size(px(12.0)).text_color(tk.caption))
+}
+
+/// 通用页的 Agent 预设 chip：显示当前默认预设名，点击跳预设页选择。
+fn preset_chip(app: &AppView, this: &Entity<AppView>) -> Stateful<Div> {
+    let label = dsh_gpui::agent_presets::preset_by_id(&app.settings.agent_preset)
+        .map(|p| p.name)
+        .unwrap_or("标准模式");
+    let t = this.clone();
+    select_chip("set-preset", label).on_click(move |_, _, cx| {
+        t.update(cx, |v, cx| {
+            v.settings_tab = crate::SettingsTab::Presets;
+            cx.notify();
+        });
+    })
 }
 
 /// 模型页（web ModelsSection）：标题/说明 + 已配置提供方 rowCard 列表 +
@@ -838,6 +852,102 @@ fn plugins_page(app: &AppView, this: &Entity<AppView>) -> Div {
             "内置插件随应用发行、默认关闭；开关对新提问即时生效，用户改名的会话标题不会被自动改写。外部插件安装与插件市场暂未支持。",
         ))
         .child(rows)
+}
+
+/// Agent 预设页：四张内置预设卡（上游 ui-agent-preset 设置页；卡片文案
+/// 与徽标逐字）。点击卡片 = 设为用户默认（新会话解析，运行中会话保持）。
+/// 卡片脚注「模式说明/如何使用」与「自定义 · 让 Agent 帮我创建预设模式」
+/// 依赖文档路由与创造模式（技能/插件运行时）——面外登记 backlog #104。
+fn presets_page(app: &AppView, this: &Entity<AppView>) -> Div {
+    let tk = theme::t();
+    let mut grid = div().flex().flex_wrap().gap(px(12.0)).mt(px(12.0));
+    for p in dsh_gpui::agent_presets::PRESETS {
+        let selected = app.settings.agent_preset == p.id;
+        let t = this.clone();
+        let pid = p.id;
+        // 头行：名称 + 徽标（左）· 右下角 monospace id（上游卡片角标在
+        // 描述对侧的右上角；这里按截图放右上）
+        let head = div()
+            .w_full()
+            .flex()
+            .items_start()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(16.0))
+                            .line_height(px(24.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(tk.text)
+                            .child(p.name),
+                    )
+                    .child(
+                        div()
+                            .h(px(20.0))
+                            .px(px(6.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.0))
+                            .bg(tk.layer1)
+                            .text_size(px(theme::FONT_CAPTION))
+                            .line_height(px(theme::FONT_CAPTION_LEADING))
+                            .text_color(tk.text_2)
+                            .child(p.badge),
+                    ),
+            )
+            .child(
+                div()
+                    .ml_auto()
+                    .text_size(px(theme::FONT_CAPTION))
+                    .line_height(px(theme::FONT_CAPTION_LEADING))
+                    .text_color(tk.text_3)
+                    .child(p.corner),
+            );
+        let card = div()
+            .id(SharedString::from(format!("preset-card-{}", p.id)))
+            .w(px(272.0))
+            .min_h(px(140.0))
+            .v_flex()
+            .gap(px(6.0))
+            .p(px(14.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(if selected { tk.border_l1 } else { tk.border_l2 })
+            .when(selected, |d| d.bg(tk.layer1))
+            .cursor_pointer()
+            .hover(|s| s.bg(tk.hover))
+            .on_click(move |_, _, cx| {
+                t.update(cx, |v, cx| v.set_default_agent_preset(pid, cx));
+            })
+            .child(head)
+            .child(
+                div()
+                    .text_size(px(theme::FONT_ROW))
+                    .line_height(px(22.0))
+                    .text_color(tk.text_2)
+                    .child(p.description),
+            );
+        grid = grid.child(card);
+    }
+    div()
+        .w_full()
+        .v_flex()
+        .child(page_title("Agent 预设"))
+        .child(page_intro(
+            "选择 Agent 的工具和工作方法。日常任务用「标准模式」，扩展 DSH 的能力用「创造模式」。",
+        ))
+        .child(grid)
+        .child(
+            div()
+                .mt(px(16.0))
+                .text_size(px(theme::FONT_CAPTION))
+                .line_height(px(theme::FONT_CAPTION_LEADING))
+                .text_color(tk.text_3)
+                .child("自定义预设（让 Agent 帮你创建预设模式）依赖创造模式，暂未支持。"),
+        )
 }
 
 /// 当前提供方表单焦点（行编辑 + 添加卡），喂给 `provider_cards` 的纯函数。

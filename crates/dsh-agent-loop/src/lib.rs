@@ -241,6 +241,9 @@ pub struct ReactLoopAgent {
     /// 同一输入的重复投递按首次接纳去重——消息被认领或移除后仍算接纳，
     /// 日志是可重建该收据的恢复源。
     prompt_receipts: Mutex<PromptReceipts>,
+    /// 会话绑定的 agent 预设 id（上游会话头 `agentPreset`；工具准入按它
+    /// 门控，运行中会话保持其预设不变）。
+    agent_preset: Mutex<String>,
 }
 
 /// 一个会话的 prompt 接纳收据：已扫描到的日志长度 + 已接纳的消息 id。
@@ -288,7 +291,18 @@ impl ReactLoopAgent {
             plan_entered: Mutex::new(false),
             plan_pending: Mutex::new(None),
             prompt_receipts: Mutex::new(PromptReceipts::default()),
+            agent_preset: Mutex::new(String::new()),
         })
+    }
+
+    /// 会话绑定的 agent 预设（上游会话头 `agentPreset`；空 = 部署默认
+    /// standard）。宿主在装载会话时设置，工具准入按它门控。
+    pub fn set_agent_preset(&self, preset: impl Into<String>) {
+        *self.agent_preset.lock().unwrap() = preset.into();
+    }
+
+    pub fn agent_preset(&self) -> String {
+        self.agent_preset.lock().unwrap().clone()
     }
 
     /// 运行期热更新模型路由（设置面板保存时调用）。
@@ -296,6 +310,12 @@ impl ReactLoopAgent {
         let mut o = self.options.write().unwrap();
         o.provider = provider.into();
         o.model = model.into();
+    }
+
+    /// 运行期热更新基础人设（会话切换换预设时调用——minimal 的 persona
+    /// 与 standard 不同；下一次请求组装即生效）。
+    pub fn set_system_prompt(&self, text: impl Into<String>) {
+        self.options.write().unwrap().system_prompt = Some(text.into());
     }
 
     pub fn session(&self) -> Arc<Mutex<Session>> {
@@ -425,6 +445,7 @@ impl ReactLoopAgent {
             plan_entered: *self.plan_entered.lock().unwrap(),
             provider,
             model,
+            preset: self.agent_preset(),
         }
     }
 

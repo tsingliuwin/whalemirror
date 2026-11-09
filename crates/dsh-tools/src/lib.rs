@@ -123,18 +123,40 @@ impl ToolDefinition {
 }
 
 /// 步骤级工具准入上下文（上游条件注册 `when: ({ agent, modelSelection })`
-/// 的 rustdsh 等价子集：plan 折叠态 + 本步模型选择）。
+/// 的 rustdsh 等价子集：plan 折叠态 + 本步模型选择 + agent 预设）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ToolAdmission {
     pub plan_active: bool,
     pub plan_entered: bool,
     pub provider: String,
     pub model: String,
+    /// 会话绑定的 agent 预设 id（上游 agentPreset；空 = 部署默认 standard）。
+    pub preset: String,
 }
 
 /// 工具激活条件：为 false 的步骤不声明、不派发该工具（上游 conditional
 /// tool 语义；调用按未知工具失败）。
 pub type ToolCondition = Arc<dyn Fn(&ToolAdmission) -> bool + Send + Sync>;
+
+/// 极简模式允许的工具名（上游 minimal 预设组合：持久终端 + read_image；
+/// persona 换工程师助手句、无检索/web/子代理/计划/技能/交付）。
+pub const MINIMAL_PRESET_TOOLS: &[&str] = &["bash", "read_image"];
+
+/// agent 预设 → 工具准入策略（`agent_presets` 目录的判据源；dsh-tools
+/// 不依赖上层，策略住在这里让条件注册与测试共用一份）。
+pub fn preset_admits(preset: &str, tool: &str) -> bool {
+    if preset == "minimal" {
+        return MINIMAL_PRESET_TOOLS.contains(&tool);
+    }
+    true
+}
+
+impl ToolAdmission {
+    /// 本步准入上下文的预设是否声明该工具（空/未知预设 = 部署默认，全放行）。
+    pub fn preset_admits(&self, tool: &str) -> bool {
+        preset_admits(&self.preset, tool)
+    }
+}
 
 struct Registered {
     tool: Arc<dyn Tool>,

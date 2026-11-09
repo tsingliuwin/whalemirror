@@ -173,6 +173,9 @@ pub struct SessionRecorder {
     /// 会话 id → 进行中 attempt 的 (time, turn, step, chunk) 缓冲（v2：
     /// chunk 不落行，结算时压缩为 AssistantStreamRecord 嵌入 settlement 行）。
     streams: std::sync::Mutex<std::collections::HashMap<String, Vec<(u64, u64, u64, dsh_llm::StreamChunk)>>>,
+    /// 懒物化新会话头写入的 agentPreset（宿主按用户默认预设设置；上游
+    /// registry 的 selectedDefault 在新会话解析时落头）。
+    default_agent_preset: std::sync::Mutex<String>,
 }
 
 impl SessionRecorder {
@@ -182,7 +185,13 @@ impl SessionRecorder {
             resolved: std::sync::Mutex::new(Default::default()),
             seqs: std::sync::Mutex::new(Default::default()),
             streams: std::sync::Mutex::new(Default::default()),
+            default_agent_preset: std::sync::Mutex::new("standard".to_string()),
         }
+    }
+
+    /// 懒物化写入会话头的 agentPreset（宿主在用户改默认预设时同步）。
+    pub fn set_default_agent_preset(&self, preset: impl Into<String>) {
+        *self.default_agent_preset.lock().unwrap() = preset.into();
     }
 
     /// 事件行以独立的 zstd 帧追加到文件尾（zstd 多帧连接是标准格式，
@@ -495,7 +504,8 @@ impl SessionRecorder {
         let mut file = match self.resolve_file(id, Some(cwd)) {
             Some(f) => f,
             None => {
-                self.create(id, cwd, "standard")?;
+                let preset = self.default_agent_preset.lock().unwrap().clone();
+                self.create(id, cwd, &preset)?;
                 self.session_file(id, cwd)
             }
         };
@@ -631,6 +641,12 @@ impl SessionRecorder {
             .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("session/title"))
             .filter_map(|o| o.get("data")?.get("title")?.as_str().map(|s| s.to_string()))
             .next_back()
+    }
+
+    /// 会话头声明的 agentPreset（解析出日志文件后读头；缺省 None）。
+    pub fn agent_preset_of(&self, id: &SessionId, cwd_hint: Option<&str>) -> Option<String> {
+        let file = self.resolve_file(id, cwd_hint)?;
+        read_header_agent_preset(&file)
     }
 
     /// 加载会话：优先 web 布局；返回 (Session, 真实 cwd)。
@@ -848,6 +864,16 @@ fn read_header_cwd(file: &Path) -> Option<String> {
     let first = bytes.split(|&b| b == b'\n').next()?;
     let v: serde_json::Value = serde_json::from_slice(first).ok()?;
     v.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string())
+}
+
+/// 会话头的 `agentPreset`（v2+ 起随头落盘；缺省 = 上游部署默认 standard）。
+pub fn read_header_agent_preset(file: &Path) -> Option<String> {
+    let bytes = read_decompressed(file).ok()?;
+    let first = bytes.split(|&b| b == b'\n').next()?;
+    let v: serde_json::Value = serde_json::from_slice(first).ok()?;
+    v.get("agentPreset")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
 }
 
 // ---- web 行 ↔ SessionEvent ----
@@ -2140,6 +2166,35 @@ mod tests {
         let source = &row["data"]["message"]["source"];
         assert_eq!(source["kind"], "system-prompt", "role-sensitive mapping");
         assert!(source.get("plugin").is_none());
+    }
+
+    #[test]
+    fn lazy_materialization_writes_the_default_agent_preset() {
+        // 懒物化会话头写宿主设置的用户默认预设（agent 预设数据面：新会话
+        // 按 selectedDefault 解析并落头；上游 registry 同语义）
+        let dir = std::env::temp_dir().join(format!("dsh-preset-hdr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rec = SessionRecorder::new(dir.join("sessions"));
+        rec.set_default_agent_preset("minimal");
+        let id = SessionId::new("session-preset-hdr");
+        rec.append(&id, "/tmp/ws", &SessionEvent::PermissionPreset { preset: "workspace-write".into() })
+            .expect("first append materializes with the default preset");
+        let file = rec.session_file(&id, "/tmp/ws");
+        assert_eq!(
+            read_header_agent_preset(&file).as_deref(),
+            Some("minimal"),
+            "懒物化头应写用户默认预设"
+        );
+        // 未设置时（新 recorder）缺省 standard
+        let rec2 = SessionRecorder::new(dir.join("sessions"));
+        let id2 = SessionId::new("session-preset-hdr-default");
+        rec2.append(&id2, "/tmp/ws", &SessionEvent::PermissionPreset { preset: "workspace-write".into() })
+            .unwrap();
+        assert_eq!(
+            read_header_agent_preset(&rec2.session_file(&id2, "/tmp/ws")).as_deref(),
+            Some("standard")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

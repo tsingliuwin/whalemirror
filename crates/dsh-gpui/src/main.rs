@@ -345,6 +345,10 @@ pub(crate) struct AppSettings {
     /// 语义：开启 = 追加、关闭 = 移除）。
     #[serde(default)]
     pub(crate) plugins_enabled: Vec<String>,
+    /// 用户默认 agent 预设（settings.yaml `agent-preset-registry.selectedDefault`；
+    /// 新会话解析它，运行中会话保持其开始时的预设）。
+    #[serde(default)]
+    pub(crate) agent_preset: String,
 }
 
 /// web_search 设置卡（上游 web-search-deepseek：开关/API key/base URL/count）。
@@ -384,6 +388,7 @@ impl Default for AppSettings {
             providers: Vec::new(),
             web_search: WebSearchSettings::default(),
             plugins_enabled: Vec::new(),
+            agent_preset: dsh_gpui::agent_presets::DEFAULT_PRESET.to_string(),
         }
     }
 }
@@ -919,6 +924,12 @@ fn load_user_config() -> (AppSettings, String, String, bool, String) {
     // 插件启用集（plugins.enabled）
     settings.plugins_enabled = dsh_plugin::enabled_from_doc(&doc);
 
+    // 用户默认 agent 预设（agent-preset-registry.selectedDefault）
+    let selected_default = get(&["agent-preset-registry", "selectedDefault"])
+        .and_then(|v| v.as_str().map(str::to_string));
+    settings.agent_preset = dsh_gpui::agent_presets::normalize_preset(selected_default.as_deref())
+        .to_string();
+
     let stored_deepseek_key = credentials.get("DEEPSEEK_API_KEY").cloned().unwrap_or_default();
     let deepseek_env_locked = DeepSeekAdapter::from_env().is_some();
     (settings, active, desired, deepseek_env_locked, stored_deepseek_key)
@@ -1044,6 +1055,14 @@ fn persist_user_config(
     let mut plugins_block = serde_yaml::Mapping::new();
     plugins_block.insert("enabled".into(), serde_yaml::Value::Sequence(enabled));
     mapping.insert("plugins".into(), serde_yaml::Value::Mapping(plugins_block));
+
+    // 用户默认 agent 预设（agent-preset-registry.selectedDefault）
+    let mut apr = serde_yaml::Mapping::new();
+    apr.insert(
+        "selectedDefault".into(),
+        serde_yaml::Value::String(settings.agent_preset.clone()),
+    );
+    mapping.insert("agent-preset-registry".into(), serde_yaml::Value::Mapping(apr));
 
     save_settings_doc(&serde_yaml::Value::Mapping(mapping));
 
@@ -2702,7 +2721,10 @@ impl AppView {
             return;
         };
         let child_id = self.alloc_session_id();
-        let _ = self.recorder.create(&child_id, &cwd, "standard");
+        let fork_preset = dsh_gpui::agent_presets::normalize_preset(
+            self.recorder.agent_preset_of(id, Some(cwd.as_str())).as_deref(),
+        );
+        let _ = self.recorder.create(&child_id, &cwd, &fork_preset);
         for entry in source.entries() {
             let _ = self.recorder.append(&child_id, &cwd, &entry.event);
         }
@@ -3568,7 +3590,7 @@ impl AppView {
         let (session, cwd) = self
             .recorder
             .load(&id, cwd_hint.as_deref())
-            .unwrap_or_else(|_| (Session::new(id.clone()), cwd_hint));
+            .unwrap_or_else(|_| (Session::new(id.clone()), cwd_hint.clone()));
         if let Some(c) = cwd {
             self.current_cwd = c.clone();
             // display_path 相对化基准同步进 ChatView
@@ -3607,7 +3629,15 @@ impl AppView {
         }
         if let Some(meta) = self.sessions.iter_mut().find(|m| &m.id == &id) {
             meta.title_source = title_source;
-        }        self.agent.set_session(session);
+        }
+        // agent 预设（会话头 agentPreset）：会话换绑——工具门控与 persona
+        // 随下一次请求生效（上游 registry：运行中会话保持其开始时的预设）
+        let agent_preset = dsh_gpui::agent_presets::normalize_preset(
+            self.recorder.agent_preset_of(&id, cwd_hint.as_deref()).as_deref(),
+        );
+        self.agent.set_agent_preset(agent_preset);
+        self.agent.set_system_prompt(agent_persona(&agent_preset));
+        self.agent.set_session(session);
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
@@ -3674,6 +3704,10 @@ impl AppView {
         self.drop_current_draft();
         self.current_cwd = cwd.clone();
         self.sync_fs_sandbox();
+        // 新草稿绑定用户默认预设（懒物化落头同值——见 recorder 默认）
+        let user_preset = self.settings.agent_preset.clone();
+        self.agent.set_agent_preset(user_preset.as_str());
+        self.agent.set_system_prompt(agent_persona(&user_preset));
         self.agent.set_session(Session::new(id.clone()));
         self.draft_session = Some(id.clone());
         // 权限三旋钮内存态（物化时随 pin 三事件落盘）
@@ -3755,6 +3789,10 @@ impl AppView {
         self.swap_composer_draft(&new_id, cx);
         self.drop_current_draft();
         self.current_workspace = None;
+        // 新草稿绑定用户默认预设（懒物化落头同值——见 recorder 默认）
+        let user_preset = self.settings.agent_preset.clone();
+        self.agent.set_agent_preset(user_preset.as_str());
+        self.agent.set_system_prompt(agent_persona(&user_preset));
         self.agent.set_session(Session::new(new_id));
         self.selected_tool = None;
         self.selected_message = None;
@@ -3870,7 +3908,7 @@ impl AppView {
         let old_id = self.current_session_id();
         let old_cwd = self.current_cwd.clone();
         let new_id = self.alloc_session_id();
-        let _ = self.recorder.create(&new_id, &ws_path, "standard");
+        let _ = self.recorder.create(&new_id, &ws_path, &self.settings.agent_preset);
         // 旧空白会话挂在别的目录（通常是无工作区的启动空白）且无内容：
         // 留着会成为列表里的孤儿空行，删除（有内容则绝不动）
         if old_cwd != ws_path
@@ -4638,13 +4676,17 @@ impl AppView {
         });
         let (tools, prompt) = (toolkit.tools, toolkit.prompt);
         let (provider, model) = (self.active_provider.clone(), self.desired_model.clone());
+        // 会话头 agentPreset → 该 runtime 的工具门控 + persona
+        let agent_preset = dsh_gpui::agent_presets::normalize_preset(
+            self.recorder.agent_preset_of(&viewed, cwd_hint.as_deref()).as_deref(),
+        );
         let runtime = ReactLoopAgent::new(
             viewed.clone(),
             AgentOptions {
                 provider,
                 model,
                 max_tokens: None,
-                system_prompt: Some("You are WhaleMirror (Rust), a helpful coding agent.".into()),
+                system_prompt: Some(agent_persona(&agent_preset)),
                 compaction: dsh_compaction::CompactionConfig::default(),
                 workdir,
                 attachments_root: Some(dsh_persist::attachments_root_from_sessions_root(
@@ -4657,6 +4699,7 @@ impl AppView {
             Arc::new(dsh_session_projection::SessionProjections::default()),
             EventBus::new(),
         );
+        runtime.set_agent_preset(agent_preset);
         runtime.set_session(session);
         // present 交付缝 → 本 runtime（算轮号落 deliverables/presented）
         {
@@ -4878,6 +4921,18 @@ impl AppView {
         } else {
             self.settings.plugins_enabled.retain(|e| e != id);
         }
+        self.persist_settings();
+        cx.notify();
+    }
+
+    /// 预设卡点击：设为用户默认 agent 预设（新会话解析；懒物化会话头
+    /// 写同一值；运行中会话保持其开始时的预设——上游 registry 语义）。
+    fn set_default_agent_preset(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        if self.settings.agent_preset == id {
+            return;
+        }
+        self.settings.agent_preset = id.to_string();
+        self.recorder.set_default_agent_preset(id);
         self.persist_settings();
         cx.notify();
     }
@@ -8735,17 +8790,21 @@ fn main() {
         Vec::new(),
     ));
     let fs_tool = FsTool::new(fs_sandbox.clone()).with_workdir(workdir.clone());
-    let _fs = tools.register(Arc::new(fs_tool.clone())).unwrap();
+    // agent 预设工具门（minimal 只留终端与图片读取；条件按步骤准入求值）
+    let _fs = tools.register_when(Arc::new(fs_tool.clone()), preset_gate("fs")).unwrap();
     // 上游工具名形别名（tool-fs read/write.ts）：提示词 section 以「read
     // 工具」名引用，缺注册时模型直呼名会吃 no tool "read"（miaocr 会话
     // 实测回归）；共享同一 FsTool（沙箱/workdir 同路）
-    let _read = tools.register(Arc::new(dsh_fs::ReadTool::new(fs_tool.clone()))).unwrap();
-    let _write = tools.register(Arc::new(dsh_fs::WriteTool::new(fs_tool.clone()))).unwrap();
+    let _read = tools.register_when(Arc::new(dsh_fs::ReadTool::new(fs_tool.clone())), preset_gate("read")).unwrap();
+    let _write = tools.register_when(Arc::new(dsh_fs::WriteTool::new(fs_tool.clone())), preset_gate("write")).unwrap();
     // edit（上游 tool-fs/edit.ts 同名工具）：字面替换原语，沙箱/工作目录
     // 与 fs 原面同路；diff presentation 供改动审阅卡
-    let _edit = tools.register(Arc::new(dsh_fs::EditTool::new(fs_sandbox.clone(), workdir.clone()))).unwrap();
+    let _edit = tools.register_when(
+        Arc::new(dsh_fs::EditTool::new(fs_sandbox.clone(), workdir.clone())),
+        preset_gate("edit"),
+    ).unwrap();
     // read_image（上游 tool-fs/read-image.ts 同名）：模型看图（vision）；
-    // 附件存储与 composer 同根（内容寻址共享）
+    // 附件存储与 composer 同根（内容寻址共享）——minimal 也保留
     let _read_image = tools.register(Arc::new(dsh_fs::ReadImageTool::new(
         fs_sandbox.clone(),
         workdir.clone(),
@@ -8756,23 +8815,25 @@ fn main() {
     // present（上游 tool-present 同名工具）：模型声明交付文件——成功
     // 结果经交付缝落 deliverables/presented 耐久事件（agent 构造后接线）
     let present_tool = dsh_fs::PresentTool::new(fs_sandbox.clone(), workdir.clone());
-    let _present = tools.register(Arc::new(present_tool.clone())).unwrap();
+    let _present = tools.register_when(Arc::new(present_tool.clone()), preset_gate("present")).unwrap();
     let _shell = tools.register(Arc::new(ShellTool::default().with_workdir(workdir.clone()))).unwrap();
-    let _web = tools.register(Arc::new(WebTool::new())).unwrap();
-    let _grep = tools.register(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone()))).unwrap();
-    let _glob = tools.register(Arc::new(dsh_search::GlobTool::default().with_workdir(workdir.clone()))).unwrap();
+    let _web = tools.register_when(Arc::new(WebTool::new()), preset_gate("web_fetch")).unwrap();
+    let _grep = tools.register_when(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone())), preset_gate("grep")).unwrap();
+    let _glob = tools.register_when(Arc::new(dsh_search::GlobTool::default().with_workdir(workdir.clone())), preset_gate("glob")).unwrap();
     // exit_plan_mode（上游 plan-mode 包同名工具最小等价）：模型提交计划，
     // 审阅流与 plan-mode 状态机留待后续（偏差固化 backlog #2）
     // exit_plan_mode 审阅流（#2）：模型提交计划后经宿主审阅面板等用户
     // 决定（同意/要求修改/自行回复——上游 userQuestions.ask 单进程等价）
     let exit_plan_tool = Arc::new(dsh_tools::ExitPlanModeTool::new());
     // exit_plan_mode 条件注册（上游渐进披露：首次进入 plan 模式前不在
-    // 工具面；进入后保持声明，离开只改行为——addition-only 路由前缀缓存友好）
+    // 工具面；进入后保持声明，离开只改行为——addition-only 路由前缀缓存友好；
+    // minimal 预设无 plan-mode 插件，叠加预设门控）
     let _exit_plan = tools
         .register_when(
             exit_plan_tool.clone(),
-            std::sync::Arc::new(|ctx: &dsh_tools::ToolAdmission| {
-                ctx.plan_active || ctx.plan_entered
+            Arc::new(|ctx: &dsh_tools::ToolAdmission| {
+                (ctx.plan_active || ctx.plan_entered)
+                    && dsh_gpui::agent_presets::admits_tool(&ctx.preset, "exit_plan_mode")
             }),
         )
         .unwrap();
@@ -8818,7 +8879,7 @@ fn main() {
         None
     };
     if let Some(search) = search_tool {
-        let _search = tools.register(Arc::new(search)).unwrap();
+        let _search = tools.register_when(Arc::new(search), preset_gate("web_search")).unwrap();
         let _search_section = prompt.add_section(dsh_system_prompt::PromptSection {
             name: "tool:web_search".into(),
             order: prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolWebSearch),
@@ -8836,7 +8897,7 @@ fn main() {
     .with_system_prompt(Some("You are a focused subagent. Complete the delegated task and report the result concisely.".into()))
     .with_workdir(workdir.clone())
     .with_projections(Arc::clone(&projections));
-    let _subagent = tools.register(subagent_tool.clone()).unwrap();
+    let _subagent = tools.register_when(subagent_tool.clone(), preset_gate("subagent")).unwrap();
     // web tool:grep section：引导模型用 grep 工具而非 shell grep
     let _grep_section = prompt.add_section(dsh_system_prompt::PromptSection {
         name: "tool:grep".into(),
@@ -8916,7 +8977,7 @@ fn main() {
         // 绝不落在进程目录
         let id = new_web_session_id();
         let cwd = ws.path.clone();
-        let _ = recorder.create(&id, &cwd, "standard");
+        let _ = recorder.create(&id, &cwd, &user_settings.agent_preset);
         sessions_meta.push(SessionMeta {
             id: id.clone(),
             title: "新会话".into(),
@@ -8952,6 +9013,14 @@ fn main() {
         Arc::clone(&projections),
         events,
     );
+    // 会话头 agentPreset → 启动会话的工具门控 + persona；懒物化新会话
+    // 头写用户默认预设（设置页改默认时同步）
+    let startup_preset = dsh_gpui::agent_presets::normalize_preset(
+        recorder.agent_preset_of(&initial_session.id, Some(initial_cwd.as_str())).as_deref(),
+    );
+    agent.set_agent_preset(startup_preset);
+    agent.set_system_prompt(agent_persona(&startup_preset));
+    recorder.set_default_agent_preset(&user_settings.agent_preset);
     agent.set_session(initial_session);
     let _ = retry_agent_slot.set(Arc::clone(&agent));
 
@@ -9456,6 +9525,24 @@ async fn generate_session_title(
         return Err("title model produced no text".into());
     }
     Ok(title)
+}
+
+/// agent 预设 → 基础人设（minimal 换上游工程师助手句；其余保持本地
+/// WhaleMirror 行——上游 standard persona 的本地品牌变体，偏差登记 #104）。
+fn agent_persona(preset: &str) -> String {
+    if preset == "minimal" {
+        dsh_gpui::agent_presets::persona_prefix("minimal").to_string()
+    } else {
+        "You are WhaleMirror (Rust), a helpful coding agent.".to_string()
+    }
+}
+
+/// agent 预设工具门：按步骤准入上下文的 `preset` 求值（minimal 只声明
+/// 终端与图片读取；其余预设全放行——`agent_presets::admits_tool` 策略）。
+fn preset_gate(tool: &'static str) -> dsh_tools::ToolCondition {
+    Arc::new(move |ctx: &dsh_tools::ToolAdmission| {
+        dsh_gpui::agent_presets::admits_tool(&ctx.preset, tool)
+    })
 }
 
 fn message_text(m: &Message) -> String {

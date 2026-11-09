@@ -5740,8 +5740,14 @@ impl Render for AppView {
             && !dsh_gpui::is_pdf_preview(&f.path)
         {
             let editor = cx.new(|cx| {
-                let st = EditorState::new(window, cx);
-                let mut st = st.soft_wrap(f.wrap);
+                let mut st = EditorState::new(window, cx);
+                // wrap 必须走 set_soft_wrap：builder `soft_wrap()` 只置标志、
+                // 不把 wrap_width 交给 display_map（实测长行既不折行也不出
+                // 横向滚动，backlog #101）；set_ 路径在携带宽度时调用
+                // on_layout_changed(Some(width))，display_map 才重算折行。
+                // 构造期 last_layout 尚无值，回落 input_bounds 宽度，首帧
+                // 布局后由 Editor 的 layout 钩子再次校正。
+                st.set_soft_wrap(f.wrap, window, cx);
                 st.set_readonly(true, cx);
                 st.set_value(f.full_text.clone(), window, cx);
                 st

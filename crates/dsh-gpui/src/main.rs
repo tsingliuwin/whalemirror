@@ -762,6 +762,20 @@ fn credentials_path() -> std::path::PathBuf {
 }
 
 /// 会话目录（默认 `{home}/sessions`；DSH_SESSIONS_DIR 显式设置时覆盖）。
+/// 共享 agent 配置根（DSH_AGENTS_HOME 或 ~/.agents）。
+pub(crate) fn dsh_agents_home() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("DSH_AGENTS_HOME") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".agents")
+}
+
 pub(crate) fn sessions_dir() -> std::path::PathBuf {
     std::env::var("DSH_SESSIONS_DIR")
         .map(std::path::PathBuf::from)
@@ -9208,6 +9222,10 @@ fn main() {
     let _glob = tools.register_when(Arc::new(dsh_search::GlobTool::default().with_workdir(workdir.clone())), preset_gate("glob")).unwrap();
     // todo_write（上游 todo/tool-todo）：整表替换 → 会话 `todo/write` 事件；
     // 部署策略 allowParallelInProgress=false（标准预设的单活跃纪律）
+    // 技能目录（上游 skill/skill-filesystem）：按秩扫描工程与用户根
+    let skill_catalog: dsh_skill::SkillCatalog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let skill_tool = Arc::new(dsh_skill::SkillTool::new(std::sync::Arc::clone(&skill_catalog)));
+    let _skill = tools.register_when(skill_tool.clone(), preset_gate("skill")).unwrap();
     let todo_tool = Arc::new(dsh_tools::TodoTool::new(false));
     let _todo = tools.register_when(todo_tool.clone(), preset_gate("todo_write")).unwrap();
     // 清单 UI 推送（工具线程 → UI 泵；单一来源仍是会话日志）
@@ -9391,6 +9409,22 @@ fn main() {
         (Session::new(new_web_session_id()), std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(), true)
     };
 
+    // 技能发现（项目根：最近的 .git 祖先；用户根 ~/.dsh/skills 与 ~/.agents/skills）
+    {
+        let project = dsh_skill::project_root_of(std::path::Path::new(&initial_cwd));
+        let dsh_home = dsh_home();
+        let agents_home = std::env::var("DSH_AGENTS_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("USERPROFILE")
+                    .or_else(|_| std::env::var("HOME"))
+                    .unwrap_or_else(|_| ".".into());
+                std::path::PathBuf::from(home).join(".agents")
+            });
+        let roots = dsh_skill::default_roots(&project, &dsh_home, &agents_home);
+        let (entries, _incomplete) = dsh_skill::discover(&roots);
+        *skill_catalog.lock().unwrap() = entries.clone();
+    }
     let agent = ReactLoopAgent::new(
         initial_session.id.clone(),
         AgentOptions {
@@ -9524,6 +9558,32 @@ fn main() {
     }
     recorder.set_default_agent_preset(&user_settings.agent_preset);
     agent.set_session(initial_session);
+    // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有
+    // 目录就不重复落）
+    {
+        let has_catalog = {
+            let s = agent.session();
+            let s = s.lock().unwrap();
+            s.entries().iter().any(|e| {
+                matches!(&e.event, SessionEvent::UserMessage(m)
+                    if matches!(&m.source, dsh_llm::MessageSource::Plugin { plugin, .. } if plugin == "skill-catalog"))
+            })
+        };
+        if !has_catalog {
+            let roots = dsh_skill::default_roots(
+                &dsh_skill::project_root_of(std::path::Path::new(&initial_cwd)),
+                &dsh_home(),
+                &dsh_agents_home(),
+            );
+            let (entries, incomplete) = dsh_skill::discover(&roots);
+            *skill_catalog.lock().unwrap() = entries.clone();
+            let text = dsh_skill::render_catalog(&entries, incomplete, 500);
+            agent.append_session_event(SessionEvent::UserMessage(dsh_skill::catalog_message(
+                text,
+                entries.len(),
+            )));
+        }
+    }
     let _ = retry_agent_slot.set(Arc::clone(&agent));
     // 工具结果外置（上游 web-app 组合里的 spill-policy：maxInlineTokens 12500）
     if let Ok(policy) = dsh_spill::SpillPolicy::new(12_500) {

@@ -1353,6 +1353,7 @@ dependencies = [
  "dsh-session",
  "dsh-session-projection",
  "dsh-shell",
+ "dsh-skill",
  "dsh-spill",
  "dsh-subagent",
  "dsh-system-prompt",
@@ -1484,6 +1485,17 @@ dependencies = [
  "dsh-llm",
  "dsh-tools",
  "encoding_rs",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dsh-skill"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dsh-llm",
+ "dsh-tools",
  "serde_json",
  "tokio",
 ]

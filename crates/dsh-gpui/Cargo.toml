@@ -29,6 +29,7 @@ dsh-session = { path = "../dsh-session" }
 dsh-plugin = { path = "../dsh-plugin" }
 dsh-jobs = { path = "../dsh-jobs" }
 dsh-spill = { path = "../dsh-spill" }
+dsh-skill = { path = "../dsh-skill" }
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

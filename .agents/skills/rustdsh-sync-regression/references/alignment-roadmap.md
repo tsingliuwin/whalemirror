@@ -1,4 +1,4 @@
-# 与官方 deepseek-harness 的差距盘点 × 对齐路线（2026-11-09）
+﻿# 与官方 deepseek-harness 的差距盘点 × 对齐路线（2026-11-09）
 
 > 用途：`feature-backlog.md` 是「逐项补缺」的账本，本文是「先看清全局再决定补什么」的地图。
 > 上游基准：E:\aiproject\deepseek-harness HEAD `fcc0ad4621`（2026-11-04，0.2.2-rc.1 合并进 master）。
@@ -277,7 +277,7 @@ A4 ──→ A6 的 skill/team UI
 | A1.4 | `schedule`：任务存储 + 到期投递 + 侧栏自动化页 + 工具 | A1.3 的 follow-up 缝 | 5-7 天 | 每分钟任务到点在自己的会话收到 follow-up |
 | A1.5 | `team`：任务板 + `tool-agent-team` + `ui-agent-team` | B1 / A1.2 | 1-2 周 | 两个子代理共享任务板、不重复劳动 |
 | A2.1 | `spill` + `tool-result-pruner` | 无 | 2-3 天 | ✅ **已落 11-09**（backlog #108）：`dsh-spill` crate（本机后端/保留策略/剪枝）+ 宿主 `maxInlineTokens=12500` + 压缩触发后先剪枝；剩 shadow 价事件与 spill 清理 |
-| A2.2 | `checkpoint` + `time-context` + `token-meter` | 无 | 3-4 天 | 请求前检查点可回退；时间注入；计量口径对齐 |
+| A2.2 | `checkpoint` + `time-context` + `token-meter` | 无 | 3-4 天 | ✅ **前两件已落 11-09**（backlog #109）：时间注入 + `sync_all` 检查点；剩 token-meter 口径（沿用 chars/4，见 #110 待登记） |
 | A3.1 | `fs-observation-policy` + `fs-patch`(apply_patch) | 无 | 3-4 天 | 未读直接 edit 被拒；整补丁预检与守卫 |
 | A3.2 | `approval` 全链 + `sandbox` 策略/升级 + reminder/timeout | A0-a | 1-2 周 | ask 档真正拦截；一次批准可升级执行 |
 | A4.1 | `skill`：发现 + `tool-skill` + `/name` + `ui-skill` | 无 | 3-5 天 | 放一个 SKILL.md 即被按需加载并执行 |

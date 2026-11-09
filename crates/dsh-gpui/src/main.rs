@@ -1,4 +1,4 @@
-﻿//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
+//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
 //!
 //! 布局契约（`packages/client/ui-layout`）：左 sidebar（280px，可折叠成 56px
 //! 图标栏）· 中会话区（≥640px，内容列 748px）· 右 details

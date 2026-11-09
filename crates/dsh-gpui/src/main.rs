@@ -7994,6 +7994,11 @@ impl AppView {
                     .child(
                         div()
                             .flex_none()
+                            // 上游 `PathLabel .text { flex:none; margin-right:auto }`：
+                            // 短路径 auto 外边距吸收余量，文本贴左；超长时 auto 归零、
+                            // 外层 flex-end 生效，从左侧裁掉、文件名留在右端。
+                            // 此前缺这条 auto 外边距，超长路径被整体左对齐裁切。
+                            .mr_auto()
                             .flex()
                             .when(!dir_part.is_empty(), |d| {
                                 d.child(div().text_color(theme::t().text_3).child(dir_part))

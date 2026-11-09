@@ -1,4 +1,4 @@
-//! dsh-session — the append-only session event log.
+﻿//! dsh-session — the append-only session event log.
 //!
 //! Mirrors [`packages/core/session`](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/core/session):
 //! the durable `SessionEvent` stream, the in-memory store, `derive_messages()`
@@ -16,6 +16,7 @@ pub use catalog_names::{
 
 pub use session::{
     CancelCause, EpochHeader, HeaderReason, ImageOffloadTarget, PresentedFile, RequestContext,
-    Session, SessionEntry, SessionEvent, SessionStatsTotals, TitleSource, TodoEntry, TurnEndReason,
+    JobRecord, JobSettlement, Session, SessionEntry, SessionEvent, SessionStatsTotals, TitleSource,
+    TodoEntry, TurnEndReason,
     session_stats_fold,
 };

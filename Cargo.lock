@@ -1343,6 +1343,7 @@ dependencies = [
  "dsh-compaction",
  "dsh-cordis",
  "dsh-fs",
+ "dsh-jobs",
  "dsh-llm",
  "dsh-llm-deepseek",
  "dsh-persist",
@@ -1370,6 +1371,19 @@ dependencies = [
  "usvg 0.45.1",
  "uuid",
  "winres",
+]
+
+[[package]]
+name = "dsh-jobs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dsh-llm",
+ "dsh-tools",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1464,6 +1478,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "codepage",
+ "dsh-jobs",
  "dsh-llm",
  "dsh-tools",
  "encoding_rs",

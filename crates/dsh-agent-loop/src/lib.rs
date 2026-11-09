@@ -1,4 +1,4 @@
-//! dsh-agent-loop — the default agent driver.
+﻿//! dsh-agent-loop — the default agent driver.
 //!
 //! Mirrors [`packages/core/agent-loop`](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/core/agent-loop):
 //! the `ReactLoopAgent` state machine that drives one session through turn and
@@ -14,10 +14,10 @@
 use dsh_agent::{
     AgentErrorOccurred, AgentErrorPayload, AgentInboxClaimed, AgentInboxDiscarded,
     AgentInboxInserted, AgentPreStep, AgentRequest, AgentRequestError, AgentRequestPayload,
-    AgentStatus, AgentStatusChanged, AgentTurnStopping, Inbox, InboxClaimedPayload,
+    AgentStatusChanged, AgentTurnStopping, Inbox, InboxClaimedPayload,
     PreStepDecision, PreStepInput, RequestErrorAction, RequestErrorPayload, TurnStoppingPayload,
 };
-pub use dsh_agent::InboxTarget;
+pub use dsh_agent::{AgentStatus, InboxTarget};
 use dsh_cordis::EventBus;
 use dsh_llm::{
     AbortSignal, BlockAssembler, CallId, ContentBlock, FinishReason, GenerateOptions, LlmCallConfig,

@@ -84,6 +84,42 @@ pub struct TodoEntry {
     pub status: String,
 }
 
+/// 后台作业的注册事实（上游 `JobRegisteredData`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRecord {
+    /// 作业 id（`<kind>-<short-uuid>`）。
+    pub job_id: String,
+    /// 属主会话。
+    pub owner: String,
+    /// 生产侧种类（`bash` …）。
+    pub kind: String,
+    /// 生产侧一行标签（命令行/委派描述）。
+    pub label: String,
+    /// 注册时刻（epoch ms）。
+    pub started_at: u64,
+    /// 创建它的工具调用（callId + rootCallId）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<(String, String)>,
+}
+
+/// 后台作业的结算记录（上游 `JobSettledData` = 注册事实 + 终态）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobSettlement {
+    #[serde(flatten)]
+    pub record: JobRecord,
+    /// 结算时刻（epoch ms）。
+    pub finished_at: u64,
+    /// 终态（`completed` / `killed` / `failed`）。
+    pub status: String,
+    /// 成因（`producer` / `kill` / `teardown`）。
+    pub cause: String,
+    /// 生产侧是否报告了终态（不保证资源已释放）。
+    pub producer_reported: bool,
+    /// 终态原因（如 `exit code: 3`，杀因会被并入）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// 一次图片卸载决定命中的一个消息：其内被选中省略的图片下标集。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageOffloadTarget {
@@ -255,6 +291,11 @@ pub enum SessionEvent {
     /// 每次调用整表替换，回放 last-write-wins；下一个 turn/start 清空
     /// （上游 todos 投影语义——轮末保留已完成清单可见）。
     TodoWrite { todos: Vec<TodoEntry> },
+    /// 后台作业注册（log-only：web `job/registered`，
+    /// data = {jobId, owner, kind, label, startedAt, toolCall?}）。
+    JobRegistered(JobRecord),
+    /// 后台作业结算（log-only：web `job/settled`，注册事实 + 终态）。
+    JobSettled(JobSettlement),
     /// 直接子 agent 发现事实（log-only；web `subagent/catalog`，父所有）。
     /// data = {version, childId, childCreatedAt, mode, name, label?}——
     /// version 由写侧固定 3（上游 SUBAGENT_CATALOG_VERSION）；`name` 为模型面向的

@@ -1351,6 +1351,18 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 })
                 .unwrap_or_default(),
         }),
+        "job/registered" => Some(SessionEvent::JobRegistered(job_record(data?))),
+        "job/settled" => Some(SessionEvent::JobSettled(dsh_session::JobSettlement {
+            record: job_record(data?),
+            finished_at: num(data, "finishedAt"),
+            status: data?.get("status").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            cause: data?.get("cause").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            producer_reported: data?
+                .get("producerReported")
+                .and_then(|v| v.as_bool())
+                .unwrap_or_default(),
+            detail: data?.get("detail").and_then(|v| v.as_str()).map(str::to_string),
+        })),
         "subagent/catalog" => Some(SessionEvent::SubagentCatalog {
             child_id: data?
                 .get("childId")
@@ -1606,6 +1618,8 @@ pub const KNOWN_SESSION_EVENT_TYPES: &[&str] = &[
     "goal/change",
     "hook/invoked",
     "hook/result",
+    "job/registered",
+    "job/settled",
     "llm/retry",
     "llm/retry-started",
     "model/selection",
@@ -1685,6 +1699,45 @@ fn num(data: Option<&serde_json::Value>, key: &str) -> u64 {
     data.and_then(|d| d.get(key))
         .and_then(|v| v.as_u64())
         .unwrap_or_default()
+}
+
+/// `job/registered` 行 data → 注册事实（上游 JobRegisteredData 的 camelCase 形）。
+fn job_record(data: &serde_json::Value) -> dsh_session::JobRecord {
+    dsh_session::JobRecord {
+        job_id: data.get("jobId").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        owner: data.get("owner").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        kind: data.get("kind").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        label: data.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        started_at: data.get("startedAt").and_then(|v| v.as_u64()).unwrap_or_default(),
+        tool_call: data.get("toolCall").and_then(|tc| {
+            let call = tc.get("callId")?.as_str()?.to_string();
+            let root = tc.get("rootCallId")?.as_str()?.to_string();
+            Some((call, root))
+        }),
+    }
+}
+
+/// 注册事实 + 可选终态 → 行 data（camelCase；缺省字段落 null）。
+fn job_record_wire(record: &dsh_session::JobRecord, settled: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "jobId": record.job_id,
+        "owner": record.owner,
+        "kind": record.kind,
+        "label": record.label,
+        "startedAt": record.started_at,
+        "toolCall": record.tool_call.as_ref().map(|(call, root)| serde_json::json!({
+            "callId": call,
+            "rootCallId": root,
+        })),
+    });
+    if let (Some(settled), Some(map)) = (settled, data.as_object_mut()) {
+        if let Some(fields) = settled.as_object() {
+            for (key, value) in fields {
+                map.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    data
 }
 
 /// 我们的事件 → web v2 信封行（None = 不落盘的辅助事件；chunk 由
@@ -1908,6 +1961,20 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
                     .map(|t| serde_json::json!({"content": t.content, "status": t.status}))
                     .collect::<Vec<_>>(),
             }),
+        )),
+        SessionEvent::JobRegistered(record) => Some(row("job/registered", job_record_wire(record, None))),
+        SessionEvent::JobSettled(settlement) => Some(row(
+            "job/settled",
+            job_record_wire(
+                &settlement.record,
+                Some(&serde_json::json!({
+                    "finishedAt": settlement.finished_at,
+                    "status": settlement.status,
+                    "cause": settlement.cause,
+                    "producerReported": settlement.producer_reported,
+                    "detail": settlement.detail,
+                })),
+            ),
         )),
         // 重试链（web llm/retry：normal 模式带 maxRetries，always 模式不带）
         SessionEvent::LlmRetry {
@@ -2356,8 +2423,56 @@ mod tests {
     }
 
     #[test]
+    fn job_lifecycle_round_trips_through_web_rows() {
+        let record = dsh_session::JobRecord {
+            job_id: "bash-7f3a1c02".into(),
+            owner: "session-a".into(),
+            kind: "bash".into(),
+            label: "cargo test".into(),
+            started_at: 1_762_700_000_000,
+            tool_call: Some(("call-1".into(), "call-1".into())),
+        };
+        let row = event_to_web_line(&SessionEvent::JobRegistered(record.clone()), 20, 100).unwrap();
+        assert_eq!(row["type"], "job/registered");
+        assert_eq!(row["data"]["jobId"], "bash-7f3a1c02");
+        assert_eq!(row["data"]["kind"], "bash");
+        assert_eq!(row["data"]["startedAt"], 1_762_700_000_000u64);
+        assert_eq!(row["data"]["toolCall"]["rootCallId"], "call-1");
+        match web_line_to_event(&row).expect("parses back") {
+            SessionEvent::JobRegistered(parsed) => {
+                assert_eq!(parsed.job_id, "bash-7f3a1c02");
+                assert_eq!(parsed.tool_call.as_ref().unwrap().0, "call-1");
+            }
+            other => panic!("expected JobRegistered, got {other:?}"),
+        }
+
+        let settled = dsh_session::JobSettlement {
+            record,
+            finished_at: 1_762_700_012_000,
+            status: "killed".into(),
+            cause: "kill".into(),
+            producer_reported: true,
+            detail: Some("signal: TERM; no longer needed".into()),
+        };
+        let row = event_to_web_line(&SessionEvent::JobSettled(settled), 21, 100).unwrap();
+        assert_eq!(row["type"], "job/settled");
+        assert_eq!(row["data"]["finishedAt"], 1_762_700_012_000u64);
+        assert_eq!(row["data"]["cause"], "kill");
+        assert_eq!(row["data"]["producerReported"], true);
+        assert_eq!(row["data"]["detail"], "signal: TERM; no longer needed");
+        match web_line_to_event(&row).expect("parses back") {
+            SessionEvent::JobSettled(parsed) => {
+                assert_eq!(parsed.status, "killed");
+                assert_eq!(parsed.cause, "kill");
+                assert!(parsed.producer_reported);
+                assert_eq!(parsed.detail.as_deref(), Some("signal: TERM; no longer needed"));
+            }
+            other => panic!("expected JobSettled, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn todo_write_and_approval_round_trip_through_web_rows() {
-        // todo/write（上游整表快照）：camelCase 无，直接 {todos:[{content,status}]}
         let ev = SessionEvent::TodoWrite {
             todos: vec![
                 dsh_session::TodoEntry { content: "读代码".into(), status: "completed".into() },

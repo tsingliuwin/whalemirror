@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "dsh-gpui"
 version.workspace = true
 edition.workspace = true
@@ -27,6 +27,7 @@ dsh-subagent = { path = "../dsh-subagent" }
 dsh-persist = { path = "../dsh-persist" }
 dsh-session = { path = "../dsh-session" }
 dsh-plugin = { path = "../dsh-plugin" }
+dsh-jobs = { path = "../dsh-jobs" }
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

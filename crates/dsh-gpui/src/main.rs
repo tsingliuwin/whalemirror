@@ -1862,6 +1862,8 @@ pub(crate) struct AppView {
     approval_answer_tx: Option<std::sync::mpsc::Sender<dsh_tools::ApprovalOutcome>>,
     /// 审批策略闸（`ask` 才弹卡；`never` 确定性拒绝——上游 user-approval 语义）
     approval_ask: Arc<std::sync::atomic::AtomicBool>,
+    /// 后台作业属主槽（切会话即更新；job 工具与 bash 后台在调用时读取）
+    job_owner: dsh_jobs::OwnerCell,
     /// 任务清单（上游 `todos` 投影：整表 last-write-wins，下一个 turn/start 清空）
     todos: Vec<dsh_session::TodoEntry>,
     /// 清单面板折叠态（上游 TodoPanel 默认折叠=true，只露标题行）
@@ -2106,6 +2108,7 @@ impl AppView {
         web_search_base_url_input: Entity<InputState>,
         web_search_count_input: Entity<InputState>,
         queue_edit_input: Entity<InputState>,
+        job_owner: dsh_jobs::OwnerCell,
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
@@ -2226,6 +2229,7 @@ impl AppView {
         pending_approval: None,
         approval_answer_tx: None,
         approval_ask: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        job_owner: job_owner.clone(),
         todos: Vec::new(),
         todos_collapsed: true,
             plan_review_tx: None,
@@ -3679,6 +3683,7 @@ impl AppView {
         self.agent.set_agent_preset(agent_preset);
         self.agent.set_system_prompt(agent_persona(&agent_preset));
         self.agent.set_session(session);
+        self.sync_job_owner();
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
@@ -3750,6 +3755,7 @@ impl AppView {
         self.agent.set_agent_preset(user_preset.as_str());
         self.agent.set_system_prompt(agent_persona(&user_preset));
         self.agent.set_session(Session::new(id.clone()));
+        self.sync_job_owner();
         self.draft_session = Some(id.clone());
         // 权限三旋钮内存态（物化时随 pin 三事件落盘）
         {
@@ -3836,6 +3842,7 @@ impl AppView {
         self.agent.set_agent_preset(user_preset.as_str());
         self.agent.set_system_prompt(agent_persona(&user_preset));
         self.agent.set_session(Session::new(new_id));
+        self.sync_job_owner();
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
@@ -3968,6 +3975,7 @@ impl AppView {
             self.chat.update(cx, |ch, _| ch.cwd = cwd);
         }
         self.agent.set_session(Session::new(new_id.clone()));
+        self.sync_job_owner();
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
@@ -4649,6 +4657,12 @@ impl AppView {
     fn sync_approval_gate(&self) {
         self.approval_ask
             .store(self.approval_policy == "ask", std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 后台作业属主槽同步（切会话后调用：job 工具与 bash 后台按它判访问）。
+    fn sync_job_owner(&self) {
+        let id = self.agent.session().lock().unwrap().id.clone();
+        *self.job_owner.lock().unwrap() = Some(id);
     }
 
     /// 「要求修改」带自定义反馈（上游 QuestionComposer 的 custom 路径：
@@ -9150,7 +9164,33 @@ fn main() {
     // 结果经交付缝落 deliverables/presented 耐久事件（agent 构造后接线）
     let present_tool = dsh_fs::PresentTool::new(fs_sandbox.clone(), workdir.clone());
     let _present = tools.register_when(Arc::new(present_tool.clone()), preset_gate("present")).unwrap();
-    let _shell = tools.register(Arc::new(ShellTool::default().with_workdir(workdir.clone()))).unwrap();
+    // 后台作业面（上游 jobs/jobs-local + tool-jobs）：注册表 + 属主槽；
+    // 属主由 AppView 在切会话时写入（工具调用时读取）
+    let job_owner: dsh_jobs::OwnerCell = Arc::new(std::sync::Mutex::new(None));
+    let jobs = dsh_jobs::Jobs::new(tokio::runtime::Handle::current());
+    let job_caller = dsh_jobs::JobCaller::new(jobs.clone(), Arc::clone(&job_owner));
+    let _shell = tools
+        .register(Arc::new(
+            ShellTool::default()
+                .with_workdir(workdir.clone())
+                .with_jobs(job_caller.clone()),
+        ))
+        .unwrap();
+    let _job_output = tools
+        .register_when(
+            Arc::new(dsh_jobs::JobOutputTool::new(
+                job_caller.clone(),
+                dsh_jobs::JobToolConfig::default(),
+            )),
+            preset_gate("job_output"),
+        )
+        .unwrap();
+    let _job_list = tools
+        .register_when(Arc::new(dsh_jobs::JobListTool::new(job_caller.clone())), preset_gate("job_list"))
+        .unwrap();
+    let _job_kill = tools
+        .register_when(Arc::new(dsh_jobs::JobKillTool::new(job_caller.clone())), preset_gate("job_kill"))
+        .unwrap();
     let _web = tools.register_when(Arc::new(WebTool::new()), preset_gate("web_fetch")).unwrap();
     let _grep = tools.register_when(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone())), preset_gate("grep")).unwrap();
     let _glob = tools.register_when(Arc::new(dsh_search::GlobTool::default().with_workdir(workdir.clone())), preset_gate("glob")).unwrap();
@@ -9249,6 +9289,13 @@ fn main() {
         name: "tool:glob".into(),
         order: prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolGlob),
         text: "Use the glob tool — not shell find — to discover files by path pattern. A pattern with no \"/\" matches basenames at any depth, so \"*\" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, while a larger one keeps the modification-time-ordered head.".into(),
+    });
+    // tool:jobs section（上游 tool-jobs 的 prompt 文案逐字）：后台作业的
+    // 收集纪律——不要 busy-poll，收尾前把还相关的作业都收掉
+    let _jobs_section = prompt.add_section(dsh_system_prompt::PromptSection {
+        name: "tool:jobs".into(),
+        order: prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolJobs),
+        text: "Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job's work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering.".into(),
     });
     // tool:bash section：cwd 已是工作区根（免 cd、Windows 路径风格）+ 长命令
     // 先落盘再检视的纪律；随工作区切换经 AppView::sync_fs_sandbox 重建
@@ -9375,6 +9422,93 @@ fn main() {
             agent_todo.append_session_event(SessionEvent::TodoWrite { todos: entries.clone() });
             let _ = todo_tx.send(entries);
         }));
+    }
+    // 后台作业生命周期落盘缝（web job/registered / job/settled，log-only 审计）
+    {
+        let agent_jobs = Arc::clone(&agent);
+        jobs.set_session_sink(Arc::new(move |row: &dsh_jobs::SessionEventRow| {
+            // 只落当前 agent 会话自己的作业（其它会话的作业由其宿主落盘）
+            if agent_jobs.session().lock().unwrap().id.as_str() != row.owner.as_str() {
+                return;
+            }
+            let record = dsh_session::JobRecord {
+                job_id: row.job.id.0.clone(),
+                owner: row.owner.as_str().to_string(),
+                kind: row.job.kind.clone(),
+                label: row.job.label.clone(),
+                started_at: row.job.started_at,
+                tool_call: row.tool_call_id.as_ref().map(|c| (c.clone(), c.clone())),
+            };
+            let event = match row.kind {
+                dsh_jobs::SessionEventKind::Registered => SessionEvent::JobRegistered(record),
+                dsh_jobs::SessionEventKind::Settled => SessionEvent::JobSettled(dsh_session::JobSettlement {
+                    record,
+                    finished_at: row.job.finished_at.unwrap_or_default(),
+                    status: row.job.status.as_wire().to_string(),
+                    cause: row
+                        .cause
+                        .map(|c| c.as_wire().to_string())
+                        .unwrap_or_else(|| "producer".into()),
+                    producer_reported: row.producer_reported,
+                    detail: row.job.detail.clone(),
+                }),
+            };
+            agent_jobs.append_session_event(event);
+        }));
+    }
+    // 完成通知（上游 tool-jobs 的投递语义）：结算且未被等待者收走、且不是
+    // 销毁型结算时，把「作业完成 + 未读输出/结果」推给属主 agent——忙则注入
+    // 下一步（不打断），闲则开新轮唤醒（否则完成永远不被察觉）。
+    {
+        let notice_agent = Arc::clone(&agent);
+        let notice_jobs = jobs.clone();
+        let _notice = jobs.subscribe(
+            dsh_jobs::JobFilter::All,
+            Arc::new(move |event: &dsh_jobs::JobEvent| {
+                let dsh_jobs::JobEvent::Settled { job, cause, awaited } = event else {
+                    return;
+                };
+                if *awaited || matches!(cause, dsh_jobs::JobSettleCause::Teardown) {
+                    return;
+                }
+                let owner = job.owner.clone();
+                if owner.as_ref().map(|o| o.as_str().to_string())
+                    != Some(notice_agent.session().lock().unwrap().id.as_str().to_string())
+                {
+                    return;
+                }
+                // 通知取走这次读（上游：notice 持有该读，job_output 收走时撤回首访）
+                let Ok(read) = notice_jobs.read(&job.id, owner.as_ref()) else {
+                    return;
+                };
+                let delta = dsh_jobs::render::render_model_delta(
+                    &read.chunks,
+                    read.lossy,
+                    &job.spill_paths,
+                );
+                let text = dsh_jobs::tools::completion_notice(
+                    job,
+                    &delta,
+                    read.result.as_deref(),
+                    2048,
+                );
+                let message = dsh_llm::Message::new(
+                    dsh_llm::Role::User,
+                    vec![dsh_llm::ContentBlock::text(text.clone())],
+                    dsh_llm::MessageSource::Plugin {
+                        plugin: "tool-jobs".into(),
+                        form: Some("notice".into()),
+                        summary: Some(text.lines().next().unwrap_or("").to_string()),
+                        sections: None,
+                    },
+                );
+                if notice_agent.status() == dsh_agent_loop::AgentStatus::Running {
+                    notice_agent.inject(message);
+                } else {
+                    notice_agent.send(message, dsh_agent_loop::InboxTarget::NextTurn);
+                }
+            }),
+        );
     }
     recorder.set_default_agent_preset(&user_settings.agent_preset);
     agent.set_session(initial_session);
@@ -9652,6 +9786,7 @@ fn main() {
                         web_search_base_url_input.clone(),
                         web_search_count_input.clone(),
                         queue_edit_input.clone(),
+                        job_owner.clone(),
                         cx,
                     )
                 });

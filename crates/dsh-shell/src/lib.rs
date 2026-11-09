@@ -1,4 +1,4 @@
-//! dsh-shell — a shell-command tool.
+﻿//! dsh-shell — a shell-command tool.
 //!
 //! One `shell` tool that runs a command line (through `cmd /C` on Windows,
 //! `sh -c` elsewhere) and returns combined stdout/stderr, with a foreground
@@ -25,6 +25,8 @@ pub struct ShellTool {
     max_timeout_ms: u64,
     /// 会话工作目录（web session.header.cwd；None = 进程 cwd）
     workdir: dsh_tools::Workdir,
+    /// 后台作业面（上游 tool-bash 的 `run_in_background`）：有注册表才声明该参数
+    jobs: Option<dsh_jobs::JobCaller>,
 }
 
 impl Default for ShellTool {
@@ -33,6 +35,7 @@ impl Default for ShellTool {
             default_timeout_ms: DEFAULT_TIMEOUT_MS,
             max_timeout_ms: MAX_TIMEOUT_MS,
             workdir: dsh_tools::Workdir::new(),
+            jobs: None,
         }
     }
 }
@@ -43,12 +46,19 @@ impl ShellTool {
             default_timeout_ms: default_timeout_ms.max(1),
             max_timeout_ms: max_timeout_ms.max(default_timeout_ms.max(1)),
             workdir: dsh_tools::Workdir::new(),
+            jobs: None,
         }
     }
 
     /// 注入会话工作目录（命令在此目录下执行）。
     pub fn with_workdir(mut self, workdir: dsh_tools::Workdir) -> Self {
         self.workdir = workdir;
+        self
+    }
+
+    /// 注入后台作业面（`run_in_background` 与 `job_*` 工具共用同一注册表）。
+    pub fn with_jobs(mut self, caller: dsh_jobs::JobCaller) -> Self {
+        self.jobs = Some(caller);
         self
     }
 }
@@ -72,14 +82,26 @@ impl Tool for ShellTool {
             // 名形对齐）；旧会话日志 name="shell" 的调用回放归类双名兼容
             name: "bash".into(),
             description: format!("Execute a bash command and return its combined stdout and stderr. {shell_line}"),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The command line to run." },
-                    "timeout_ms": { "type": "integer", "description": format!("Foreground timeout in milliseconds (default {}, max {}).", self.default_timeout_ms, self.max_timeout_ms) }
-                },
-                "required": ["command"]
-            }),
+            parameters: if self.jobs.is_some() {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The command line to run." },
+                        "timeout_ms": { "type": "integer", "description": format!("Foreground timeout in milliseconds (default {}, max {}).", self.default_timeout_ms, self.max_timeout_ms) },
+                        "run_in_background": { "type": "boolean", "description": "Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies." }
+                    },
+                    "required": ["command"]
+                })
+            } else {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The command line to run." },
+                        "timeout_ms": { "type": "integer", "description": format!("Foreground timeout in milliseconds (default {}, max {}).", self.default_timeout_ms, self.max_timeout_ms) }
+                    },
+                    "required": ["command"]
+                })
+            },
         }
     }
 
@@ -87,6 +109,39 @@ impl Tool for ShellTool {
         let command = input.arguments.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if command.trim().is_empty() {
             return ToolExecutionResult::error("command must be a non-empty string");
+        }
+        // 后台分支（上游 tool-bash run_in_background）：注册成作业、立刻回 id
+        if input.arguments.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
+            let Some(caller) = self.jobs.clone() else {
+                return ToolExecutionResult::error(
+                    "background jobs unavailable: load dsh-jobs and its job tools",
+                );
+            };
+            return match start_background_job(&caller, &command, &self.workdir) {
+                Ok(id) => {
+                    let cwd = self
+                        .workdir
+                        .get()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    ToolExecutionResult {
+                        content: vec![dsh_llm::ContentBlock::Text {
+                            // 上游渲染：`started background job <id>`
+                            text: format!("started background job {id}"),
+                        }],
+                        is_error: false,
+                        concludes_turn: false,
+                        presentation: Some(json!({
+                            "card": "generic",
+                            "title": command,
+                            "kind": "execute",
+                            "cwd": cwd,
+                            "jobId": id.0,
+                        })),
+                    }
+                }
+                Err(error) => ToolExecutionResult::error(format!("spawn failed: {error}")),
+            };
         }
         let timeout_ms = input
             .arguments
@@ -96,6 +151,165 @@ impl Tool for ShellTool {
             .clamp(1, self.max_timeout_ms);
         run(&command, timeout_ms, &self.workdir).await
     }
+}
+
+/// 后台命令的注册表接线：拉起子进程、把 stdout/stderr 逐块泵进输出环、
+/// 退出时按上游 `processOutcome` 落终态（`exit code: N` / `signal: X`）。
+fn start_background_job(
+    caller: &dsh_jobs::JobCaller,
+    command: &str,
+    workdir: &dsh_tools::Workdir,
+) -> Result<dsh_jobs::JobId, String> {
+    use std::sync::{Arc, Mutex};
+
+    let cwd = workdir.get().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let label = command.to_string();
+    let owner = caller.owner();
+    let command = command.to_string();
+    let spawned: Arc<Mutex<Option<dsh_jobs::JobId>>> = Arc::new(Mutex::new(None));
+    let spawned_out = Arc::clone(&spawned);
+    let jobs = caller.jobs().clone();
+
+    let id = jobs
+        .start(dsh_jobs::JobSpec {
+            kind: "bash".into(),
+            label,
+            owner,
+            tool_call_id: None,
+            output_limit_bytes: None,
+            run: Box::new(move |writer: dsh_jobs::JobWriter| {
+                let mut cmd = shell_command(&command);
+                cmd.kill_on_drop(true)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .current_dir(&cwd);
+                #[cfg(windows)]
+                {
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+                let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let child = Arc::new(Mutex::new(Some(child)));
+                let cancel_child = Arc::clone(&child);
+                let cancel: dsh_jobs::CancelHook = Arc::new(move |_reason: Option<String>| {
+                    if let Some(mut proc) = cancel_child.lock().unwrap().take() {
+                        let _ = proc.start_kill();
+                    }
+                });
+                // 泵 + 等退出都在后台任务里跑（registry 已先提交记录）
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let run_out = async {
+                        let mut buf = Vec::new();
+                        if let Some(mut s) = stdout {
+                            let mut piece = vec![0u8; 4096];
+                            loop {
+                                match s.read(&mut piece).await {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => {
+                                        let text = decode_output(&piece[..n]);
+                                        writer.append(&text, Some(dsh_jobs::JobChannel::Stdout));
+                                        buf.extend_from_slice(&piece[..n]);
+                                    }
+                                }
+                            }
+                        }
+                        buf
+                    };
+                    let run_err = async {
+                        let mut buf = Vec::new();
+                        if let Some(mut s) = stderr {
+                            let mut piece = vec![0u8; 4096];
+                            loop {
+                                match s.read(&mut piece).await {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => {
+                                        let text = decode_output(&piece[..n]);
+                                        writer.append(&text, Some(dsh_jobs::JobChannel::Stderr));
+                                        buf.extend_from_slice(&piece[..n]);
+                                    }
+                                }
+                            }
+                        }
+                        buf
+                    };
+                    let (_out, _err) = tokio::join!(run_out, run_err);
+                    // 先把子进程从共享槽里取出来（不在 await 点持锁）
+                    let taken = { child.lock().unwrap().take() };
+                    let status = match taken {
+                        Some(mut proc) => proc.wait().await.ok(),
+                        None => None,
+                    };
+                    let outcome = match status {
+                        Some(status) => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::process::ExitStatusExt;
+                                if let Some(sig) = status.signal() {
+                                    dsh_jobs::JobOutcome {
+                                        status: dsh_jobs::JobStatus::Killed,
+                                        detail: Some(format!("signal: {sig}")),
+                                        result: None,
+                                    }
+                                } else {
+                                    dsh_jobs::JobOutcome::completed_with(format!(
+                                        "exit code: {}",
+                                        status.code().unwrap_or(0)
+                                    ))
+                                }
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                dsh_jobs::JobOutcome::completed_with(format!(
+                                    "exit code: {}",
+                                    status.code().unwrap_or(0)
+                                ))
+                            }
+                        }
+                        // 被 kill 的进程在这里拿不到退出状态：按上游 killed 语义
+                        None => dsh_jobs::JobOutcome {
+                            status: dsh_jobs::JobStatus::Killed,
+                            detail: Some("killed before exit".into()),
+                            result: None,
+                        },
+                    };
+                    writer.settle(outcome);
+                });
+                let _ = &spawned_out;
+                Ok(cancel)
+            }),
+        })
+        .map_err(|e| e)?;
+    *spawned.lock().unwrap() = Some(id.clone());
+    Ok(id)
+}
+
+/// 构造一条命令（与前台 `run` 同款 shell 选择与 Windows 无窗口标志）。
+fn shell_command(command: &str) -> tokio::process::Command {
+    #[cfg(target_os = "windows")]
+    let cmd = match shell_program() {
+        Some(bash) => {
+            {
+                let mut c = tokio::process::Command::new(bash);
+                c.args(["-c", command]);
+                c
+            }
+        }
+        None => {
+            let mut c = tokio::process::Command::new("cmd");
+            c.args(["/C", command]);
+            c
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
+    cmd
 }
 
 /// Windows 上优先 Git Bash：模型惯用 bash 语法（`;`、`$()`、引号、
@@ -161,9 +375,11 @@ async fn run(command: &str, timeout_ms: u64, workdir: &dsh_tools::Workdir) -> To
     #[cfg(target_os = "windows")]
     let mut cmd = match shell_program() {
         Some(bash) => {
-            let mut c = tokio::process::Command::new(bash);
-            c.args(["-c", command]);
-            c
+            {
+                let mut c = tokio::process::Command::new(bash);
+                c.args(["-c", command]);
+                c
+            }
         }
         None => {
             let mut c = tokio::process::Command::new("cmd");

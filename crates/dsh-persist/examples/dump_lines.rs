@@ -38,6 +38,8 @@ fn main() {
                         dsh_session::SessionEvent::ApprovalAsked { .. } => "approval/asked",
                         dsh_session::SessionEvent::ApprovalDecided { .. } => "approval/decided",
                         dsh_session::SessionEvent::TodoWrite { .. } => "todo/write",
+                        dsh_session::SessionEvent::JobRegistered { .. } => "job/registered",
+                        dsh_session::SessionEvent::JobSettled { .. } => "job/settled",
                         dsh_session::SessionEvent::PlanMode { .. } => "plan/mode",
                         dsh_session::SessionEvent::SubagentCatalog { .. } => "subagent/catalog",
                         dsh_session::SessionEvent::PresentedFiles { .. } => "deliverables/presented",

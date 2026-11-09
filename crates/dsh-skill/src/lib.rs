@@ -1,4 +1,4 @@
-﻿//! dsh-skill — 技能发现、目录注入与按需加载（上游 `packages/skill/*` 的等价面）。
+//! dsh-skill — 技能发现、目录注入与按需加载（上游 `packages/skill/*` 的等价面）。
 //!
 //! 三个包合成一个 crate：
 //! - `skill`：注册表词汇（kebab-case 名字规则、`renderSkillContent`）；
@@ -295,11 +295,14 @@ pub fn catalog_message(text: String, entries: usize) -> dsh_llm::Message {
     dsh_llm::Message::new(
         dsh_llm::Role::User,
         vec![ContentBlock::text(text.clone())],
-        dsh_llm::MessageSource::Plugin {
-            plugin: "skill-catalog".into(),
+        dsh_llm::MessageSource::Context {
+            context_kind: "skill-catalog".into(),
+            plugin: None,
             form: Some("catalog".into()),
             summary: Some(format!("{entries} skills available")),
-            sections: None,
+            changes_paths: Vec::new(),
+            reference_labels: Vec::new(),
+            name: None,
         },
     )
 }

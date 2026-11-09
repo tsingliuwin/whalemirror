@@ -1,4 +1,4 @@
-//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
+﻿//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
 //!
 //! 布局契约（`packages/client/ui-layout`）：左 sidebar（280px，可折叠成 56px
 //! 图标栏）· 中会话区（≥640px，内容列 748px）· 右 details
@@ -9556,34 +9556,6 @@ fn main() {
             }),
         );
     }
-    recorder.set_default_agent_preset(&user_settings.agent_preset);
-    agent.set_session(initial_session);
-    // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有
-    // 目录就不重复落）
-    {
-        let has_catalog = {
-            let s = agent.session();
-            let s = s.lock().unwrap();
-            s.entries().iter().any(|e| {
-                matches!(&e.event, SessionEvent::UserMessage(m)
-                    if matches!(&m.source, dsh_llm::MessageSource::Plugin { plugin, .. } if plugin == "skill-catalog"))
-            })
-        };
-        if !has_catalog {
-            let roots = dsh_skill::default_roots(
-                &dsh_skill::project_root_of(std::path::Path::new(&initial_cwd)),
-                &dsh_home(),
-                &dsh_agents_home(),
-            );
-            let (entries, incomplete) = dsh_skill::discover(&roots);
-            *skill_catalog.lock().unwrap() = entries.clone();
-            let text = dsh_skill::render_catalog(&entries, incomplete, 500);
-            agent.append_session_event(SessionEvent::UserMessage(dsh_skill::catalog_message(
-                text,
-                entries.len(),
-            )));
-        }
-    }
     let _ = retry_agent_slot.set(Arc::clone(&agent));
     // 工具结果外置（上游 web-app 组合里的 spill-policy：maxInlineTokens 12500）
     if let Ok(policy) = dsh_spill::SpillPolicy::new(12_500) {
@@ -9603,6 +9575,35 @@ fn main() {
         let cwd = cwd_slot_sink.lock().unwrap().clone();
         let _ = recorder_sink.append(&id, &cwd, &event);
     });
+
+    // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有
+    // 目录就不重复落）。必须放在事件 sink 之后——否则这条 durable 事件只进
+    // 内存、不进日志。
+    {
+        let has_catalog = {
+            let s = agent.session();
+            let s = s.lock().unwrap();
+            s.entries().iter().any(|e| {
+                matches!(&e.event, SessionEvent::UserMessage(m)
+                    if matches!(&m.source, dsh_llm::MessageSource::Context { context_kind, .. } if context_kind == "skill-catalog")
+                        || matches!(&m.source, dsh_llm::MessageSource::Plugin { plugin, .. } if plugin == "skill-catalog"))
+            })
+        };
+        if !has_catalog {
+            let roots = dsh_skill::default_roots(
+                &dsh_skill::project_root_of(std::path::Path::new(&initial_cwd)),
+                &dsh_home(),
+                &dsh_agents_home(),
+            );
+            let (entries, incomplete) = dsh_skill::discover(&roots);
+            *skill_catalog.lock().unwrap() = entries.clone();
+            let text = dsh_skill::render_catalog(&entries, incomplete, 500);
+            agent.append_session_event(SessionEvent::UserMessage(dsh_skill::catalog_message(
+                text,
+                entries.len(),
+            )));
+        }
+    }
     // 检查点缝（上游 session-checkpoint-policy）：请求派生与顶层工具派发前
     // 把已提交的事件刷到稳定存储
     {

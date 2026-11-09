@@ -502,6 +502,38 @@ pub(crate) fn dot_sep() -> Div {
     div().size(px(2.0)).rounded(px(1.0)).bg(theme::t().caption).mx_2()
 }
 
+/// 上游 `ui-primitives` StateDot 的 dot 形（solid states）：布局槽 10px，
+/// 实心核 6px（css `.dot::after` inset 20%）。颜色由调用方的状态语义给：
+/// done = `state-success-primary`（theme.green）、idle = `state-idle-primary`
+/// （neutral-300/600，与 theme.scrollbar_thumb 同值）。
+pub(crate) fn state_dot_solid(color: gpui::Rgba) -> Div {
+    div()
+        .size(px(10.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().size(px(6.0)).rounded_full().bg(color))
+}
+
+/// 上游 StateDot 的 ongoing 形（14px 转环）。GPUI 侧取静态近似：外环轨道
+/// 0.25 + 恒定弧段——旋转/呼吸动画未复刻（见 backlog 偏差）。
+pub(crate) fn state_dot_ring(color: gpui::Rgba) -> Div {
+    div()
+        .size(px(14.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .size(px(14.0))
+                .rounded_full()
+                .border(px(2.0))
+                .border_color(gpui::Rgba { r: color.r, g: color.g, b: color.b, a: 0.25 }),
+        )
+}
+
 /// 工具行状态点（web StateDot：外层 10% 光晕 + 60% 实心内核，
 /// 颜色由状态语义决定）。
 pub(crate) fn state_dot(color: gpui::Rgba) -> Div {

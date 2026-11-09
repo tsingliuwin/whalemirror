@@ -7855,6 +7855,8 @@ impl AppView {
             .mx_auto()
             .py(px(6.0))
             .px(px(12.0))
+            // 上游 composerStack gap 6px（dock 项与输入卡之间）
+            .mb(px(6.0))
             .rounded(px(16.0))
             .bg(t.menu)
             .border(px(0.5))
@@ -7869,11 +7871,12 @@ impl AppView {
                 .max_h(px(180.0))
                 .overflow_y_scroll();
             for item in todos {
-                // 状态点色（上游 StateDot done/ongoing/idle 的近似映射）
-                let dot = match item.status.as_str() {
-                    "completed" => t.success_tertiary,
-                    "in_progress" => t.warn_label,
-                    _ => t.text_3,
+                // 状态点：上游 StateDot 的三态映射（已完成 = done 实心点、
+                // 进行中 = ongoing 转环、待处理 = idle 实心点）
+                let glyph: AnyElement = match item.status.as_str() {
+                    "completed" => widgets::state_dot_solid(t.green).into_any_element(),
+                    "in_progress" => widgets::state_dot_ring(t.text_3).into_any_element(),
+                    _ => widgets::state_dot_solid(t.scrollbar_thumb).into_any_element(),
                 };
                 list = list.child(
                     div()
@@ -7891,7 +7894,7 @@ impl AppView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(widgets::state_dot(dot)),
+                                .child(glyph),
                         )
                         .child(
                             div()

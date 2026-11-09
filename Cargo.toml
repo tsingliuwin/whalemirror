@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/cordis",
+  "crates/dsh-plugin",
   "crates/dsh-llm",
   "crates/dsh-llm-deepseek",
   "crates/dsh-session",

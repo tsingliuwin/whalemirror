@@ -125,7 +125,7 @@ pub(crate) fn render_settings(app: &AppView, this: Entity<AppView>, window: &mut
     let content = match app.settings_tab {
         SettingsTab::General => general_page(app, &this, cx),
         SettingsTab::Models => models_page(app, &this, window, cx),
-        SettingsTab::Plugins => placeholder_page("插件", "插件系统尚未在 Rust 版接入；接入后将在此管理。"),
+        SettingsTab::Plugins => plugins_page(app, &this),
         SettingsTab::Presets => placeholder_page("Agent 预设", "预设（标准/计划/只读等模式）尚未在 Rust 版接入；接入后将在此选择。"),
     };
     let options = div()
@@ -753,6 +753,91 @@ fn page_intro(text: &str) -> Div {
         .line_height(px(22.0))
         .text_color(tk.text_3)
         .child(text.to_string())
+}
+
+/// 插件页：内置插件清单 + 开关（上游 OPTIONAL_BUNDLES 的管理面；
+/// 外部 npm/pnpm 包安装与 Discover 市场依赖 JS 运行时，面外——backlog）。
+fn plugins_page(app: &AppView, this: &Entity<AppView>) -> Div {
+    use dsh_gpui::ui_metrics::*;
+    let tk = theme::t();
+    let plugins = dsh_plugin::OFFICIAL_PLUGINS;
+    let mut rows = div().v_flex().mt(px(12.0));
+    for (i, p) in plugins.iter().enumerate() {
+        let on = app.settings.plugins_enabled.iter().any(|e| e == p.id);
+        let t = this.clone();
+        let pid: &'static str = p.id;
+        let switch = gpui_component::switch::Switch::new(SharedString::from(format!(
+            "plugin-switch-{}",
+            p.id
+        )))
+        .checked(on)
+        .on_change(move |checked: &bool, _w, cx| {
+            t.update(cx, |v, cx| v.set_plugin_enabled(pid, *checked, cx));
+        });
+        // 名称行 + Experimental 徽标（上游实验包标记）
+        let mut name_row = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .text_size(px(FIELD_LABEL_FONT_PX))
+                    .line_height(px(FIELD_LABEL_LEADING_PX))
+                    .text_color(tk.text)
+                    .child(p.name),
+            );
+        if p.experimental {
+            name_row = name_row.child(
+                div()
+                    .h(px(18.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.0))
+                    .bg(tk.layer1)
+                    .text_size(px(theme::FONT_CAPTION))
+                    .line_height(px(theme::FONT_CAPTION_LEADING))
+                    .text_color(tk.text_3)
+                    .child("实验性"),
+            );
+        }
+        let last = i + 1 == plugins.len();
+        let mut row = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(16.0))
+            .py(px(FIELD_PAD_Y_PX))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .gap(px(FIELD_GAP_PX))
+                    .child(name_row)
+                    .child(
+                        div()
+                            .text_size(px(FIELD_HELP_FONT_PX))
+                            .line_height(px(FIELD_HELP_LEADING_PX))
+                            .text_color(tk.text_3)
+                            .child(p.description),
+                    ),
+            )
+            .child(switch);
+        if !last {
+            // `.field + .field { border-top: 0.5px }`——画在上边缘
+            row = row.border_t(px(FIELD_RULE_PX)).border_color(tk.border_l2);
+        }
+        rows = rows.child(row);
+    }
+    div()
+        .w_full()
+        .v_flex()
+        .child(page_title("插件"))
+        .child(page_intro(
+            "内置插件随应用发行、默认关闭；开关对新提问即时生效，用户改名的会话标题不会被自动改写。外部插件安装与插件市场暂未支持。",
+        ))
+        .child(rows)
 }
 
 /// 当前提供方表单焦点（行编辑 + 添加卡），喂给 `provider_cards` 的纯函数。

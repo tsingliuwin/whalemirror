@@ -1346,6 +1346,7 @@ dependencies = [
  "dsh-llm",
  "dsh-llm-deepseek",
  "dsh-persist",
+ "dsh-plugin",
  "dsh-search",
  "dsh-session",
  "dsh-session-projection",
@@ -1410,6 +1411,15 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "zstd",
+]
+
+[[package]]
+name = "dsh-plugin"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

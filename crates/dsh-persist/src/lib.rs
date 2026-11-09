@@ -558,7 +558,7 @@ impl SessionRecorder {
             self.mark_seq(id, seq);
         }
         let seq = self.next_seq(id, &file);
-        if let SessionEvent::SessionTitle { title } = event {
+        if let SessionEvent::SessionTitle { title, .. } = event {
             self.touch_projcache(id, cwd, seq, Some(title));
         }
         let mut row = match event_to_web_line(event, seq, now_ms()) {
@@ -1247,13 +1247,19 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
             turn: num(data, "turn"),
             step: num(data, "step"),
         }),
-        // 会话标题（web SessionTitleEventData；只取 title，latest-wins）
+        // 会话标题（web SessionTitleEventData：title + source，latest-wins；
+        // 旧行缺 source 回 fallback）
         "session/title" => Some(SessionEvent::SessionTitle {
             title: data?
                 .get("title")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            source: dsh_session::TitleSource::from_kind(
+                data.and_then(|d| d.get("source"))
+                    .and_then(|s| s.get("kind"))
+                    .and_then(|k| k.as_str()),
+            ),
         }),
         "permission/preset" => Some(SessionEvent::PermissionPreset {
             preset: data?
@@ -1795,9 +1801,9 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
                 "model": model,
             }),
         )),
-        SessionEvent::SessionTitle { title } => Some(row(
+        SessionEvent::SessionTitle { title, source } => Some(row(
             "session/title",
-            serde_json::json!({"title": title, "messageSeqs": [], "source": {"kind": "fallback"}}),
+            serde_json::json!({"title": title, "messageSeqs": [], "source": {"kind": source.kind()}}),
         )),
         // 权限三旋钮（web 行形：data.{preset|mode|policy}）
         SessionEvent::PermissionPreset { preset } => Some(row(
@@ -2002,6 +2008,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn title_source_round_trips_and_pins() {
+        // web SessionTitleSource 三 kind 都走线形；user 源 = 置顶
+        for (source, kind) in [
+            (dsh_session::TitleSource::Fallback, "fallback"),
+            (dsh_session::TitleSource::Provider, "provider"),
+            (dsh_session::TitleSource::User, "user"),
+        ] {
+            let ev = SessionEvent::SessionTitle { title: "随动".into(), source };
+            let row = event_to_web_line(&ev, 7, 100).unwrap();
+            assert_eq!(row["type"], "session/title");
+            assert_eq!(row["data"]["title"], "随动");
+            assert_eq!(row["data"]["source"]["kind"], kind);
+            let parsed = web_line_to_event(&row).unwrap();
+            match parsed {
+                SessionEvent::SessionTitle { title, source } => {
+                    assert_eq!(title, "随动");
+                    assert_eq!(source.kind(), kind);
+                }
+                other => panic!("wrong event {other:?}"),
+            }
+        }
+        // 旧行 / web 缺 source：回 fallback（旧文件双向兼容）
+        let legacy = serde_json::json!({
+            "type": "session/title", "seq": 3, "time": 1,
+            "data": {"title": "旧标题"},
+        });
+        let parsed = web_line_to_event(&legacy).unwrap();
+        match parsed {
+            SessionEvent::SessionTitle { source, .. } => {
+                assert_eq!(source, dsh_session::TitleSource::Fallback);
+                assert!(!source.is_pinned());
+            }
+            other => panic!("wrong event {other:?}"),
+        }
+    }
+
+    #[test]
     fn title_round_trips_to_web_artifacts() {
         let dir = std::env::temp_dir().join(format!("dsh-persist-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2020,6 +2063,7 @@ mod tests {
             "/tmp/ws",
             &SessionEvent::SessionTitle {
                 title: "你好".into(),
+                source: dsh_session::TitleSource::Fallback,
             },
         )
         .unwrap();
@@ -2109,7 +2153,7 @@ mod tests {
         // 无 create：直接追加首事件（pin 形）
         rec.append(&id, "/tmp/ws", &SessionEvent::PermissionPreset { preset: "workspace-write".into() })
             .expect("first append materializes");
-        rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into() })
+        rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback })
             .expect("second append");
         let (loaded, _) = rec.load(&id, Some("/tmp/ws")).expect("materialized session loads");
         let types: Vec<&str> = loaded
@@ -2320,7 +2364,7 @@ mod tests {
         rec.append(
             &id,
             "/tmp/ws",
-            &SessionEvent::SessionTitle { title: "t".into() },
+            &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback },
         )
         .unwrap();
         assert!(
@@ -2355,6 +2399,7 @@ mod tests {
             "/tmp/ws",
             &SessionEvent::SessionTitle {
                 title: "旧面".into(),
+                source: dsh_session::TitleSource::Fallback,
             },
         )
         .unwrap();
@@ -2383,6 +2428,7 @@ mod tests {
             "/tmp/ws",
             &SessionEvent::SessionTitle {
                 title: "新面".into(),
+                source: dsh_session::TitleSource::Fallback,
             },
         )
         .unwrap();
@@ -2687,7 +2733,7 @@ mod tests {
         rec.append(
             &id,
             "/tmp/ws-b",
-            &SessionEvent::SessionTitle { title: "t".into() },
+            &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback },
         )
         .unwrap();
         rec.append(

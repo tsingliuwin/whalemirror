@@ -30,8 +30,9 @@ use dsh_agent_loop::{AgentOptions, ReactLoopAgent};
 use dsh_cordis::EventBus;
 use dsh_fs::FsTool;
 use dsh_llm::{
-    BoxStream, ContentBlock, ContentBlockType, FinishReason, GenerateOptions, LlmAdapter, LlmError,
-    LlmProviderInfo, LlmRuntime, Message, MessageSource, SessionId, StreamChunk,
+    AuxiliaryPurpose, BoxStream, ContentBlock, ContentBlockType, FinishReason, GenerateOptions,
+    LlmAdapter, LlmError, LlmProviderInfo, LlmRuntime, Message, MessageSource, SessionId,
+    StreamChunk,
 };
 use dsh_llm_deepseek::DeepSeekAdapter;
 use dsh_persist::SessionRecorder;
@@ -220,6 +221,9 @@ struct SessionMeta {
     /// 空白会话（未开始过一轮）：web 隐藏行尾时间与 … 菜单
     /// （对不存在的内容行重命名/分叉/归档无意义）。
     blank: bool,
+    /// 标题来源（web SessionTitleSource；user=置顶——自动生成停摆）。
+    /// 列表重建时未知（fallback 兜底），会话加载时按日志 latest-wins 修正。
+    title_source: dsh_session::TitleSource,
 }
 
 /// 详情面板当前选中的工具调用。
@@ -337,6 +341,10 @@ pub(crate) struct AppSettings {
     /// DeepSeek 官方搜索设置（alpha.3+ web-search 设置卡；serde 缺省 = 关）。
     #[serde(default)]
     pub(crate) web_search: WebSearchSettings,
+    /// 启用的内置插件（settings.yaml `plugins.enabled`；上游 bundle 选择
+    /// 语义：开启 = 追加、关闭 = 移除）。
+    #[serde(default)]
+    pub(crate) plugins_enabled: Vec<String>,
 }
 
 /// web_search 设置卡（上游 web-search-deepseek：开关/API key/base URL/count）。
@@ -375,6 +383,7 @@ impl Default for AppSettings {
             model: "deepseek-flash".into(),
             providers: Vec::new(),
             web_search: WebSearchSettings::default(),
+            plugins_enabled: Vec::new(),
         }
     }
 }
@@ -907,6 +916,9 @@ fn load_user_config() -> (AppSettings, String, String, bool, String) {
     }
     settings.model = desired.clone();
 
+    // 插件启用集（plugins.enabled）
+    settings.plugins_enabled = dsh_plugin::enabled_from_doc(&doc);
+
     let stored_deepseek_key = credentials.get("DEEPSEEK_API_KEY").cloned().unwrap_or_default();
     let deepseek_env_locked = DeepSeekAdapter::from_env().is_some();
     (settings, active, desired, deepseek_env_locked, stored_deepseek_key)
@@ -1019,6 +1031,19 @@ fn persist_user_config(
         .into(),
     );
     mapping.insert("ui-theme".into(), serde_yaml::Value::Mapping(theme));
+
+    // 插件启用集（plugins.enabled；以内存态为准整段替换，去重稳定序）
+    let enabled: Vec<serde_yaml::Value> = settings
+        .plugins_enabled
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(serde_yaml::Value::String)
+        .collect();
+    let mut plugins_block = serde_yaml::Mapping::new();
+    plugins_block.insert("enabled".into(), serde_yaml::Value::Sequence(enabled));
+    mapping.insert("plugins".into(), serde_yaml::Value::Mapping(plugins_block));
 
     save_settings_doc(&serde_yaml::Value::Mapping(mapping));
 
@@ -2473,6 +2498,7 @@ impl AppView {
                 time_label: row.time_label.clone(),
                 cwd: row.cwd.clone(),
                 blank: row.blank,
+                title_source: dsh_session::TitleSource::Fallback,
             });
         }
         self.refresh_sidebar(cx);
@@ -2531,6 +2557,7 @@ impl AppView {
 
     /// 会话重命名（web Rows 菜单 rename → session.rename）：
     /// 更新列表元数据并落 SessionTitle 事件（读侧 latest-wins）。
+    /// user 源 = 置顶（上游语义：自动生成对此会话停摆）。
     fn rename_session(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -2542,6 +2569,7 @@ impl AppView {
             .find(|m| m.id.as_str() == id)
             .map(|m| {
                 m.title = title.clone();
+                m.title_source = dsh_session::TitleSource::User;
                 m.cwd.clone()
             })
             .unwrap_or(None);
@@ -2549,7 +2577,109 @@ impl AppView {
             let _ = self.recorder.append(
                 &SessionId::new(id.to_string()),
                 &cwd,
-                &SessionEvent::SessionTitle { title },
+                &SessionEvent::SessionTitle {
+                    title,
+                    source: dsh_session::TitleSource::User,
+                },
+            );
+        }
+        self.refresh_sidebar(cx);
+        cx.notify();
+    }
+
+    /// 随动标题请求（session-titles 插件启用时的 all-prompts 提供者）：
+    /// 合格 human prompt（User 源、非空文本）全体作输入，provider 源标题
+    /// 作锚点；输入超预算静默跳过（上游拒绝语义），失败保留旧标题。
+    fn request_session_title(
+        &self,
+        session_id: &SessionId,
+        new_prompt: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(meta) = self.sessions.iter().find(|m| &m.id == session_id) else {
+            return;
+        };
+        if meta.title_source.is_pinned() {
+            return;
+        }
+        let current_title = (meta.title != "新会话").then(|| meta.title.clone());
+        let is_provider = meta.title_source == dsh_session::TitleSource::Provider;
+        // 合格提问：现日志里的 User 源 UserMessage + 本条将发送的文本
+        let mut prompts: Vec<dsh_plugin::TitleUserMessage> = Vec::new();
+        let mut next_seq = 0u64;
+        {
+            let session = self.agent.session();
+            let session = session.lock().unwrap();
+            for entry in session.entries() {
+                if let SessionEvent::UserMessage(m) = &entry.event
+                    && m.source == MessageSource::User
+                {
+                    let text = m
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    if !text.is_empty() {
+                        prompts.push(dsh_plugin::TitleUserMessage {
+                            seq: entry.seq,
+                            text,
+                        });
+                    }
+                }
+                next_seq = next_seq.max(entry.seq + 1);
+            }
+        }
+        prompts.push(dsh_plugin::TitleUserMessage {
+            seq: next_seq,
+            text: new_prompt.to_string(),
+        });
+        let Some(plan) =
+            dsh_plugin::plan_all_prompts_request(&prompts, current_title.as_deref(), is_provider)
+        else {
+            return; // 超预算：拒绝请求（不截断历史，上游语义）
+        };
+        let llm = Arc::clone(&self.llm);
+        let provider = self.active_provider.clone();
+        let model = self.desired_model.clone();
+        let sid = session_id.clone();
+        cx.spawn(async move |this, cx| {
+            // 前台 executor 直接 await：adapter 流需要 tokio reactor 上下文，
+            // 只有主线程带 rt.enter() guard（后台线程会 panic）。
+            let outcome = generate_session_title(&llm, &provider, &model, &plan).await;
+            if let Ok(raw) = outcome {
+                let _ = this.update(cx, |v, cx| v.apply_generated_title(&sid, &raw, cx));
+            }
+            // 失败保留旧标题（上游语义：自动标题失败不改现有标题）
+        })
+        .detach();
+    }
+
+    /// 落一个生成的标题（provider 源）：请求在途期间用户可能已改名，
+    /// 落盘前重查置顶态。
+    fn apply_generated_title(&mut self, session_id: &SessionId, raw: &str, cx: &mut Context<Self>) {
+        let title = dsh_plugin::normalize_title(raw, dsh_plugin::MAX_TITLE_BYTES);
+        if title.is_empty() {
+            return;
+        }
+        let Some(meta) = self.sessions.iter_mut().find(|m| &m.id == session_id) else {
+            return;
+        };
+        if meta.title_source.is_pinned() {
+            return;
+        }
+        meta.title = title.clone();
+        meta.title_source = dsh_session::TitleSource::Provider;
+        if let Some(cwd) = meta.cwd.clone() {
+            let _ = self.recorder.append(
+                session_id,
+                &cwd,
+                &SessionEvent::SessionTitle {
+                    title,
+                    source: dsh_session::TitleSource::Provider,
+                },
             );
         }
         self.refresh_sidebar(cx);
@@ -2587,7 +2717,10 @@ impl AppView {
         let _ = self.recorder.append(
             &child_id,
             &cwd,
-            &SessionEvent::SessionTitle { title: child_title.clone() },
+            &SessionEvent::SessionTitle {
+                title: child_title.clone(),
+                source: dsh_session::TitleSource::Fallback,
+            },
         );
         self.sessions.push(SessionMeta {
             id: child_id.clone(),
@@ -2595,6 +2728,7 @@ impl AppView {
             time_label: "刚刚".into(),
             cwd: Some(cwd),
             blank: session_is_blank(&source),
+            title_source: dsh_session::TitleSource::Fallback,
         });
         self.switch_session(child_id, cx);
     }
@@ -3463,7 +3597,17 @@ impl AppView {
                 self.fs_sandbox.set_mode(m);
             }
         }
-        self.agent.set_session(session);
+        // 标题来源（web SessionTitleSource，latest-wins）：user 源 = 置顶，
+        // 该会话的自动标题停摆；provider 源可作后续生成的锚点。
+        let mut title_source = dsh_session::TitleSource::Fallback;
+        for e in session.entries() {
+            if let SessionEvent::SessionTitle { source, .. } = &e.event {
+                title_source = source.clone();
+            }
+        }
+        if let Some(meta) = self.sessions.iter_mut().find(|m| &m.id == &id) {
+            meta.title_source = title_source;
+        }        self.agent.set_session(session);
         self.selected_tool = None;
         self.selected_message = None;
         self.command_menu = false;
@@ -3549,7 +3693,7 @@ impl AppView {
             c.reset_empty();
             cx.notify();
         });
-        self.sessions.insert(0, SessionMeta { id, title: "新会话".into(), time_label: "刚刚".into(), cwd: Some(cwd), blank: true });
+        self.sessions.insert(0, SessionMeta { id, title: "新会话".into(), time_label: "刚刚".into(), cwd: Some(cwd), blank: true, title_source: dsh_session::TitleSource::Fallback });
         self.refresh_sidebar(cx);
         cx.notify();
     }
@@ -3753,7 +3897,7 @@ impl AppView {
         });
         self.sessions.insert(
             0,
-            SessionMeta { id: new_id.clone(), title: "新会话".into(), time_label: "刚刚".into(), cwd: Some(ws_path), blank: true },
+            SessionMeta { id: new_id.clone(), title: "新会话".into(), time_label: "刚刚".into(), cwd: Some(ws_path), blank: true, title_source: dsh_session::TitleSource::Fallback },
         );
         let ws = self.current_workspace.clone();
         self.assign_session_to_workspace(&new_id, ws.as_deref());
@@ -4213,20 +4357,43 @@ impl AppView {
                 cx.notify();
             });
         }
-        // 会话标题：首条用户消息后自动生成（截断到 30 字符）
+        // 会话标题（web session/title 域）：合格 human prompt 触发。
+        // 默认 = 确定性回退（首条提问前 5 词 / 40 字节，上游 base bundle
+        // `fallbackMaxWords/Bytes`；仅首次）；session-titles 插件启用后由
+        // all-prompts 提供者接管（异步 LLM，失败保留旧标题，user 源置顶停摆）。
         let current = self.current_session_id();
-        if let Some(meta) = self.sessions.iter_mut().find(|s| s.id == current)
-            && meta.title == "新会话"
-            && !text.is_empty()
+        if !text.is_empty()
+            && let Some(meta) = self.sessions.iter_mut().find(|s| s.id == current)
         {
-            meta.title = text.chars().take(30).collect();
             meta.blank = false;
-            // 标题落盘（web session/title 事件 + session_projcache 投影行），
-            // 否则 web 端看到的本会话永远无标题
-            let title = meta.title.clone();
-            let cwd = self.current_cwd.clone();
-            let _ = self.recorder.append(&current, &cwd, &SessionEvent::SessionTitle { title });
-            self.refresh_sidebar(cx);
+            if meta.title == "新会话" && !meta.title_source.is_pinned() {
+                meta.title =
+                    dsh_plugin::fallback_title(text, dsh_plugin::FALLBACK_MAX_WORDS, dsh_plugin::FALLBACK_MAX_BYTES);
+                meta.title_source = dsh_session::TitleSource::Fallback;
+                // 标题落盘（web session/title 事件 + session_projcache 投影行），
+                // 否则 web 端看到的本会话永远无标题
+                let title = meta.title.clone();
+                let cwd = self.current_cwd.clone();
+                let _ = self.recorder.append(
+                    &current,
+                    &cwd,
+                    &SessionEvent::SessionTitle {
+                        title,
+                        source: dsh_session::TitleSource::Fallback,
+                    },
+                );
+                self.refresh_sidebar(cx);
+            }
+        }
+        // 随动标题请求（session-titles 插件）：整会话合格提问作输入
+        if !text.is_empty()
+            && self
+                .settings
+                .plugins_enabled
+                .iter()
+                .any(|p| p == dsh_plugin::SESSION_TITLES_ID)
+        {
+            self.request_session_title(&current, text, cx);
         }
         self.send_user_turn(text, queued_placement, cx);
     }
@@ -4697,6 +4864,20 @@ impl AppView {
 
     fn set_enter_behavior(&mut self, behavior: EnterBehavior, cx: &mut Context<Self>) {
         self.settings.enter = behavior;
+        self.persist_settings();
+        cx.notify();
+    }
+
+    /// 插件开关（上游 plugin-manager setEnabled 语义：开启 = 追加选择、
+    /// 关闭 = 移除；rustdsh 逐次读取——改动对新 prompt 即时生效）。
+    fn set_plugin_enabled(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        if on {
+            if !self.settings.plugins_enabled.iter().any(|e| e == id) {
+                self.settings.plugins_enabled.push(id.to_string());
+            }
+        } else {
+            self.settings.plugins_enabled.retain(|e| e != id);
+        }
         self.persist_settings();
         cx.notify();
     }
@@ -8713,6 +8894,7 @@ fn main() {
                 time_label: rel(e.modified),
                 cwd: e.cwd.clone(),
                 blank,
+                title_source: dsh_session::TitleSource::Fallback,
             }
         })
         .collect();
@@ -8741,6 +8923,7 @@ fn main() {
             time_label: String::new(),
             cwd: Some(cwd.clone()),
             blank: true,
+            title_source: dsh_session::TitleSource::Fallback,
         });
         (Session::new(id), cwd, true)
     } else {
@@ -9229,6 +9412,51 @@ fn fmt_capacity(value: u64) -> String {
     dsh_gpui::capacity::format_capacity(value)
 }
 
+
+/// 一次随动标题 LLM 调用（session-titles 插件的 all-prompts 提供者）：
+/// 只收文本；stop 才算成功，tool-calls / max-tokens 一律拒绝（上游
+/// `titleFromResponse` 语义）。块间执行 60s 预算（上游 timeoutMs）。
+async fn generate_session_title(
+    llm: &LlmRuntime,
+    provider: &str,
+    model: &str,
+    plan: &dsh_plugin::TitleRequestPlan,
+) -> Result<String, String> {
+    let adapter = llm.get_adapter(provider).ok_or_else(|| "no adapter".to_string())?;
+    let mut opts = GenerateOptions::new(provider, model, vec![Message::user_text(&plan.input)]);
+    opts.system = Some(plan.system.clone());
+    opts.max_tokens = Some(dsh_plugin::MAX_OUTPUT_TOKENS);
+    opts.purpose = Some(AuxiliaryPurpose::SessionTitle);
+    let started = std::time::Instant::now();
+    let mut stream = adapter.stream(opts).await.map_err(|e| e.to_string())?;
+    use futures::StreamExt;
+    let mut text = String::new();
+    let mut stopped = false;
+    while let Some(chunk) = stream.next().await {
+        if started.elapsed() > std::time::Duration::from_millis(dsh_plugin::TIMEOUT_MS) {
+            return Err("title request timed out".into());
+        }
+        match chunk {
+            StreamChunk::TextDelta { text: t, .. } => text.push_str(&t),
+            StreamChunk::Finish { reason, .. } => match reason {
+                FinishReason::Stop => stopped = true,
+                _ => return Err(format!("title finish is {reason:?}")),
+            },
+            StreamChunk::BlockEnd { block: ContentBlock::ToolCall { .. }, .. } => {
+                return Err("title output must contain text only".into());
+            }
+            _ => {}
+        }
+    }
+    if !stopped {
+        return Err("title stream ended without stop".into());
+    }
+    let title = dsh_plugin::normalize_title(&dsh_plugin::title_from_output(&text), usize::MAX);
+    if title.is_empty() {
+        return Err("title model produced no text".into());
+    }
+    Ok(title)
+}
 
 fn message_text(m: &Message) -> String {
     m.content.iter().filter_map(|b| match b {

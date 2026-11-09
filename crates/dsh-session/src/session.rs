@@ -82,6 +82,48 @@ pub struct ImageOffloadTarget {
     pub image_indexes: Vec<usize>,
 }
 
+/// 标题来源（web `SessionTitleSource`）：`user` = 用户改名 = 置顶——
+/// 自动生成停摆；`provider` = 注册的标题提供者（可作后续生成的锚点）；
+/// `fallback` = 确定性兜底（首条提问词截断）。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleSource {
+    Fallback,
+    Provider,
+    User,
+}
+
+impl Default for TitleSource {
+    fn default() -> Self {
+        Self::Fallback
+    }
+}
+
+impl TitleSource {
+    /// web 线形里的 `source.kind` 字符串。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Fallback => "fallback",
+            Self::Provider => "provider",
+            Self::User => "user",
+        }
+    }
+
+    /// 按 web 线形的 `source.kind` 解析（未知/缺省回 fallback）。
+    pub fn from_kind(kind: Option<&str>) -> Self {
+        match kind {
+            Some("provider") => Self::Provider,
+            Some("user") => Self::User,
+            _ => Self::Fallback,
+        }
+    }
+
+    /// 用户置顶（自动生成停摆）。
+    pub fn is_pinned(&self) -> bool {
+        *self == Self::User
+    }
+}
+
 /// One durable session event.
 ///
 /// Serialized as tagged JSON (one line per event) so a session can be
@@ -168,8 +210,14 @@ pub enum SessionEvent {
         model: String,
     },
     /// 会话标题（log-only，latest-wins；不进模型可见面）。
-    /// web SessionTitleEventData 的 title 部分（messageSeqs/source 不落盘）。
-    SessionTitle { title: String },
+    /// web SessionTitleEventData 形（title + source；messageSeqs 由写侧
+    /// 固定 `[]`——rustdsh 不按 seq 增量折叠，见 backlog）。
+    SessionTitle {
+        title: String,
+        /// 标题来源（web SessionTitleSource；旧日志缺省 = fallback）。
+        #[serde(default)]
+        source: TitleSource,
+    },
     /// 权限预设切换意图（log-only：web `permission/preset`，data.preset；
     /// 旋钮事件随后，不入模型面）。
     PermissionPreset { preset: String },

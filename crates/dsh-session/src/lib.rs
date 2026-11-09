@@ -15,6 +15,7 @@ pub use catalog_names::{
 };
 
 pub use session::{
-    CancelCause, EpochHeader, HeaderReason, ImageOffloadTarget, PresentedFile, RequestContext, Session,
-    SessionEntry, SessionEvent, SessionStatsTotals, TurnEndReason, session_stats_fold,
+    CancelCause, EpochHeader, HeaderReason, ImageOffloadTarget, PresentedFile, RequestContext,
+    Session, SessionEntry, SessionEvent, SessionStatsTotals, TitleSource, TurnEndReason,
+    session_stats_fold,
 };

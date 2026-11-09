@@ -318,7 +318,7 @@ fn migration_upgrades_legacy_rustdsh_log() {
     // 写打开触发迁移；追加落 v2
     let rec = SessionRecorder::new(dir.join("sessions"));
     let sid = SessionId::new(id);
-    rec.append(&sid, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into() })
+    rec.append(&sid, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback })
         .unwrap();
 
     let v2_file = log.parent().unwrap().join("session.v2.jsonl.zstd");
@@ -389,7 +389,7 @@ fn migration_claims_packed_rows_via_source_event_seqs() {
     );
     let rec = SessionRecorder::new(dir.join("sessions"));
     let sid = SessionId::new(id);
-    rec.append(&sid, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into() })
+    rec.append(&sid, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback })
         .unwrap();
 
     let v2_file = log.parent().unwrap().join("session.v2.jsonl.zstd");
@@ -430,7 +430,7 @@ fn migration_refuses_unknown_required_type() {
     let rec = SessionRecorder::new(dir.join("sessions"));
     let sid = SessionId::new(id);
     let err = rec
-        .append(&sid, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into() })
+        .append(&sid, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback })
         .unwrap_err();
     assert!(err.to_string().contains("plugin/required-thing"), "{err}");
     // fail-closed：无 v2 产物、源文件原样
@@ -517,7 +517,7 @@ fn projcache_stamps_v7_with_format_version() {
     let rec = SessionRecorder::new(dir.join("sessions"));
     let id = SessionId::new("session-v7");
     rec.create(&id, "/tmp/ws", "standard").unwrap();
-    rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "题".into() })
+    rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "题".into(), source: dsh_session::TitleSource::Fallback })
         .unwrap();
     let doc: Value = serde_json::from_str(
         &std::fs::read_to_string(
@@ -801,7 +801,7 @@ fn projcache_array_tables_never_overwrite() {
     let rec = SessionRecorder::new(dir.join("sessions"));
     let id = SessionId::new("session-array");
     rec.create(&id, "/tmp/ws", "standard").unwrap();
-    rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "题".into() }).unwrap();
+    rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "题".into(), source: dsh_session::TitleSource::Fallback }).unwrap();
 
     // 单元文件保持原样（未被空视图覆写）
     let after: serde_json::Value =

@@ -309,7 +309,13 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
             let sink_for_child = Arc::clone(sink);
             let sink_id = child_id.clone();
             child.set_event_sink(move |event| sink_for_child(&sink_id, &event));
-            sink(&child_id, &SessionEvent::SessionTitle { title: description.clone() });
+            sink(
+                &child_id,
+                &SessionEvent::SessionTitle {
+                    title: description.clone(),
+                    source: dsh_session::TitleSource::Fallback,
+                },
+            );
             if let Some(parent) = self.parent.lock().unwrap().upgrade() {
                 let created_at = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

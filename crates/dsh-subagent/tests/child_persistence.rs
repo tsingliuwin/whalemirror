@@ -204,7 +204,7 @@ async fn child_session_persists_and_parent_logs_catalog() {
     assert!(
         matches!(
             child_loaded.entries().first().map(|e| &e.event),
-            Some(SessionEvent::SessionTitle { title }) if title == "demo task"
+            Some(SessionEvent::SessionTitle { title, .. }) if title == "demo task"
         ),
         "first durable row is the description title"
     );

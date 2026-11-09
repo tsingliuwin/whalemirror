@@ -1308,6 +1308,32 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .unwrap_or_default()
                 .to_string(),
         }),
+        "approval/asked" => Some(SessionEvent::ApprovalAsked {
+            id: data?
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            tool_name: data?
+                .get("toolName")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            call_id: data?.get("callId").and_then(|v| v.as_str()).map(str::to_string),
+            reason: data?.get("reason").and_then(|v| v.as_str()).map(str::to_string),
+        }),
+        "approval/decided" => Some(SessionEvent::ApprovalDecided {
+            id: data?
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            outcome: data?
+                .get("outcome")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        }),
         "subagent/catalog" => Some(SessionEvent::SubagentCatalog {
             child_id: data?
                 .get("childId")
@@ -1843,6 +1869,19 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
         SessionEvent::ApprovalPolicy { policy } => Some(row(
             "approval/policy",
             serde_json::json!({"policy": policy}),
+        )),
+        SessionEvent::ApprovalAsked { id, tool_name, call_id, reason } => Some(row(
+            "approval/asked",
+            serde_json::json!({
+                "id": id,
+                "toolName": tool_name,
+                "callId": call_id,
+                "reason": reason,
+            }),
+        )),
+        SessionEvent::ApprovalDecided { id, outcome } => Some(row(
+            "approval/decided",
+            serde_json::json!({"id": id, "outcome": outcome}),
         )),
         // 重试链（web llm/retry：normal 模式带 maxRetries，always 模式不带）
         SessionEvent::LlmRetry {

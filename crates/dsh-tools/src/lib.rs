@@ -104,6 +104,87 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult;
 }
 
+/// 审批结果闭集（上游 `interaction/user-approval` 的 `ApprovalOutcome`）。
+///
+/// 一次批准只作用于这一次调用（`allowed-once`），不改变会话常驻策略；
+/// 无答案通道时必须 fail-closed 到 `unavailable`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalOutcome {
+    /// 允许这一次。
+    AllowedOnce,
+    /// 用户明确拒绝。
+    Rejected,
+    /// 请求被撤回（轮次中止 / 等待超时）。
+    Cancelled,
+    /// 没有可用的答案通道（fail-closed）。
+    Unavailable,
+}
+
+impl ApprovalOutcome {
+    /// 审计行形（上游 `approval/decided.outcome` 闭集原文）。
+    pub fn as_wire(&self) -> &'static str {
+        match self {
+            Self::AllowedOnce => "allowed-once",
+            Self::Rejected => "rejected",
+            Self::Cancelled => "cancelled",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// 一次审批请求（上游 `ApprovalRequestEvent` 的 rustdsh 子集）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalRequest {
+    /// 请求审批的工具名（审计 `approval/asked.toolName`）。
+    pub tool_name: String,
+    /// 该次工具调用的 id（与 `approval/decided` 配对）。
+    pub call_id: String,
+    /// 审计 reason（上游 `approval/asked.reason`，如
+    /// `escalate sandbox to workspace-write: <justification>`）。
+    pub reason: String,
+    /// 卡片正文：模型给的 justification 原文（面向用户）。
+    pub display: String,
+}
+
+/// 审批回调：宿主注入（弹卡片、等用户决定），阻塞到有答案为止。
+/// 工具执行线程内调用——宿主用 `spawn_blocking` 承载，避免堵住异步工作线程。
+pub type ApprovalHook = Arc<dyn Fn(&ApprovalRequest) -> ApprovalOutcome + Send + Sync>;
+
+/// 可后置注入的审批槽：工具构造时先持槽，宿主在 UI 就绪后 `set`。
+/// 未接线时 `request` 返回 `Unavailable`（上游 fail-closed 同语义）。
+#[derive(Clone, Default)]
+pub struct ApprovalSlot(Arc<RwLock<Option<ApprovalHook>>>);
+
+impl ApprovalSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 宿主接线（UI 就绪后调用；重复调用以后者为准）。
+    pub fn set(&self, hook: ApprovalHook) {
+        *self.0.write().unwrap() = Some(hook);
+    }
+
+    /// 断开接线（宿主退出 / 会话销毁）。
+    pub fn clear(&self) {
+        *self.0.write().unwrap() = None;
+    }
+
+    /// 是否已接线。
+    pub fn is_set(&self) -> bool {
+        self.0.read().unwrap().is_some()
+    }
+
+    /// 请求一次审批；未接线 = `Unavailable`（fail-closed）。
+    pub fn request(&self, req: &ApprovalRequest) -> ApprovalOutcome {
+        let hook = self.0.read().unwrap().clone();
+        match hook {
+            Some(hook) => hook(req),
+            None => ApprovalOutcome::Unavailable,
+        }
+    }
+}
+
 /// The static part of a tool: name, description, JSON-schema parameters.
 #[derive(Clone, Debug)]
 pub struct ToolDefinition {

@@ -224,9 +224,22 @@ pub enum SessionEvent {
     /// 沙箱档位覆盖（log-only：web `sandbox/mode`，data.mode；fs 工具
     /// 三档承载，回放恢复）。
     SandboxModeSwitch { mode: String },
-    /// 审批策略覆盖（log-only：web `approval/policy`，data.policy；
-    /// rustdsh 无审批管线，事件为跨端互通与回放保留）。
+    /// 审批策略覆盖（log-only：web `approval/policy`，data.policy）。
     ApprovalPolicy { policy: String },
+    /// 一次审批问询（log-only 审计：web `approval/asked`，
+    /// data = {id, toolName, callId?, reason?}）。与紧随的
+    /// `approval/decided` 以 `id` 配对；非 surface 事件，不进模型面。
+    ApprovalAsked {
+        id: String,
+        tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// 审批结果（log-only 审计：web `approval/decided`，
+    /// data = {id, outcome}；outcome ∈ allowed-once/rejected/cancelled/unavailable）。
+    ApprovalDecided { id: String, outcome: String },
     /// 直接子 agent 发现事实（log-only；web `subagent/catalog`，父所有）。
     /// data = {version, childId, childCreatedAt, mode, name, label?}——
     /// version 由写侧固定 3（上游 SUBAGENT_CATALOG_VERSION）；`name` 为模型面向的

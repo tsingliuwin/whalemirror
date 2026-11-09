@@ -929,7 +929,18 @@ fn presets_page(app: &AppView, this: &Entity<AppView>) -> Div {
                     .line_height(px(22.0))
                     .text_color(tk.text_2)
                     .child(p.description),
-            );
+            )
+            // 偏差如实标注（backlog #104 / 路线图 B1）：PTC 执行器未接线前，
+            // 该模式的实际工具面与标准模式相同——不让卡片诈称已有能力。
+            .when(p.id == "ptc", |d| {
+                d.child(
+                    div()
+                        .text_size(px(theme::FONT_CAPTION))
+                        .line_height(px(theme::FONT_CAPTION_LEADING))
+                        .text_color(tk.text_3)
+                        .child("本构建暂以标准执行器运行；PTC 执行器随 B1（Node 运行时）接入。"),
+                )
+            });
         grid = grid.child(card);
     }
     div()

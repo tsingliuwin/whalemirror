@@ -33,6 +33,17 @@ pub trait FsPolicy: Send + Sync {
     fn deny_reason(&self) -> &'static str {
         "path denied by fs policy"
     }
+    /// 当前沙箱档位（上游 `ctx.fs.sandboxMode`）。`None` = 本策略不是
+    /// 沙箱实现（无升级面）。
+    fn mode(&self) -> Option<FsMode> {
+        None
+    }
+    /// 按指定档位判定写许可（越权批准后的单次调用用；默认回落
+    /// `allow_write`）。
+    fn allow_write_in(&self, mode: FsMode, path: &Path) -> bool {
+        let _ = mode;
+        self.allow_write(path)
+    }
 }
 
 /// 直通策略（默认）：全部允许，无沙箱。
@@ -145,11 +156,7 @@ impl SwitchablePolicy {
 
 impl FsPolicy for SwitchablePolicy {
     fn allow_write(&self, path: &Path) -> bool {
-        match self.mode() {
-            FsMode::ReadOnly => false,
-            FsMode::WorkspaceWrite => self.containment.allow_write(path),
-            FsMode::DangerFullAccess => true,
-        }
+        self.allow_write_in(self.mode(), path)
     }
 
     fn deny_reason(&self) -> &'static str {
@@ -159,6 +166,192 @@ impl FsPolicy for SwitchablePolicy {
             FsMode::DangerFullAccess => "write denied",
         }
     }
+
+    fn mode(&self) -> Option<FsMode> {
+        Some(self.mode())
+    }
+
+    fn allow_write_in(&self, mode: FsMode, path: &Path) -> bool {
+        match mode {
+            FsMode::ReadOnly => false,
+            FsMode::WorkspaceWrite => self.containment.allow_write(path),
+            FsMode::DangerFullAccess => true,
+        }
+    }
+}
+
+// ---- 沙箱升级（上游 `sandbox/escalation.ts` 的 rustdsh 等价）----
+//
+// 语义：被沙箱拒绝的调用可以「按模型声明、用户批准」升级一次。升级只对
+// 这一次调用生效；拒绝/撤回/无通道都必须 fail-closed，并把上游逐字文案
+// 回给模型。两条执行族（bash 的 command / fs 的 operation）共用同一套
+// 标记与提示，rustdsh 目前只有 fs 一族有真实执行面。
+
+/// 升级目标闭集（只能升到更宽档；`read-only` 是地板，不可作为目标）。
+pub const ESCALATION_TARGETS: &[FsMode] = &[FsMode::WorkspaceWrite, FsMode::DangerFullAccess];
+
+fn mode_rank(mode: FsMode) -> u8 {
+    match mode {
+        FsMode::ReadOnly => 0,
+        FsMode::WorkspaceWrite => 1,
+        FsMode::DangerFullAccess => 2,
+    }
+}
+
+/// 目标档是否严格宽于当前档（同档不需要也不允许走审批）。
+pub fn is_strictly_wider(target: FsMode, effective: FsMode) -> bool {
+    mode_rank(target) > mode_rank(effective)
+}
+
+/// 模型可见的沙箱拒绝标记（上游 `sandboxDenialMarker`，逐字）。
+pub fn sandbox_denial_marker(mode: FsMode) -> String {
+    format!("[sandbox: file access denied under {} mode]", mode.as_web())
+}
+
+/// 同轮升级提示（上游 `escalationHintMarker`，逐字；主语 fs 族用 `operation`）。
+pub fn escalation_hint_marker(subject: &str) -> String {
+    format!(
+        "[sandbox: escalation available — retry this exact {subject} once with sandbox_permissions \
+         (the narrowest wider mode that suffices) + justification; the approval prompt asks the user]"
+    )
+}
+
+/// `sandbox_permissions` 参数描述（上游 `sandboxPermissionsDescription`，逐字）。
+pub fn sandbox_permissions_description(subject: &str) -> String {
+    format!(
+        "The narrowest wider sandbox mode for a one-shot retry of the exact {subject} the sandbox \
+         just denied; the retry asks the user for approval."
+    )
+}
+
+/// `justification` 参数描述（上游 fs 族 schema 文案，逐字）。
+pub const JUSTIFICATION_DESCRIPTION: &str = "Required with sandbox_permissions: one sentence for the user explaining why this exact file operation needs the wider access. Use the language of the user’s current request.";
+
+/// 校验升级参数配对（上游 `validateEscalationArgs` 文案逐字）。
+pub fn validate_escalation_args(
+    sandbox_permissions: Option<&str>,
+    justification: Option<&str>,
+) -> Result<(), String> {
+    if sandbox_permissions.is_some() && justification.is_none() {
+        return Err("invalid escalation: sandbox_permissions requires a justification".into());
+    }
+    if sandbox_permissions.is_none() && justification.is_some() {
+        return Err(
+            "invalid escalation: justification is only valid together with sandbox_permissions".into(),
+        );
+    }
+    if let Some(text) = justification {
+        if text.trim().is_empty() {
+            return Err("invalid justification: expected a non-empty sentence".into());
+        }
+    }
+    Ok(())
+}
+
+/// 解析本次调用应使用的档位：重复当前档不需要审批；严格更宽则走审批缝。
+/// 返回 `Err(text)` 表示模型可见的失败（文案逐字对齐上游）。
+pub fn approve_escalation(
+    tool_name: &str,
+    call_id: &str,
+    effective: FsMode,
+    requested: &str,
+    justification: &str,
+    approval: Option<&dsh_tools::ApprovalSlot>,
+) -> Result<FsMode, String> {
+    let Some(target) = FsMode::from_web(requested) else {
+        return Err(format!(
+            "sandbox escalation to \"{requested}\" is not strictly wider than this call's current \"{}\" mode",
+            effective.as_web()
+        ));
+    };
+    if target == effective {
+        return Ok(effective);
+    }
+    if !is_strictly_wider(target, effective) {
+        return Err(format!(
+            "sandbox escalation to \"{}\" is not strictly wider than this call's current \"{}\" mode",
+            target.as_web(),
+            effective.as_web()
+        ));
+    }
+    let draft = dsh_tools::ApprovalRequest {
+        tool_name: tool_name.to_string(),
+        call_id: call_id.to_string(),
+        reason: format!("escalate sandbox to {}: {justification}", target.as_web()),
+        display: justification.to_string(),
+    };
+    let outcome = match approval {
+        Some(slot) => slot.request(&draft),
+        None => dsh_tools::ApprovalOutcome::Unavailable,
+    };
+    match outcome {
+        dsh_tools::ApprovalOutcome::AllowedOnce => Ok(target),
+        dsh_tools::ApprovalOutcome::Rejected => Err(format!(
+            "the user rejected escalating this operation to \"{}\"; it stays denied, so stop and explain instead of working around it",
+            target.as_web()
+        )),
+        dsh_tools::ApprovalOutcome::Cancelled => Err(format!(
+            "approval for escalating to \"{}\" was cancelled",
+            target.as_web()
+        )),
+        dsh_tools::ApprovalOutcome::Unavailable => Err(format!(
+            "sandbox escalation to \"{}\" requires approval, but no approval channel is available",
+            target.as_web()
+        )),
+    }
+}
+
+/// 一次写操作经升级解析后的档位（含写许可判定）。
+fn resolve_write_mode(
+    policy: &dyn FsPolicy,
+    tool_name: &str,
+    call_id: &str,
+    arguments: &serde_json::Value,
+    approval: Option<&dsh_tools::ApprovalSlot>,
+    path: &Path,
+) -> Result<FsMode, String> {
+    let Some(effective) = policy.mode() else {
+        // 非沙箱策略：无升级面（上游同文案）。
+        if arguments.get("sandbox_permissions").is_some() {
+            return Err(
+                "sandbox_permissions is not available in this composition (no sandboxing filesystem to escalate)"
+                    .into(),
+            );
+        }
+        return Ok(FsMode::DangerFullAccess);
+    };
+    let requested = arguments.get("sandbox_permissions").and_then(|v| v.as_str());
+    let justification = arguments.get("justification").and_then(|v| v.as_str());
+    // 重复当前档：不要求 justification（上游先判后校验）。
+    if let Some(req) = requested {
+        if FsMode::from_web(req) == Some(effective) {
+            return Ok(effective);
+        }
+    }
+    // 无模式 + 空 justification 视为未请求升级。
+    let justification = match (requested, justification) {
+        (None, Some(text)) if text.trim().is_empty() => None,
+        (_, j) => j,
+    };
+    validate_escalation_args(requested, justification)?;
+    match (requested, justification) {
+        (Some(req), Some(just)) => {
+            approve_escalation(tool_name, call_id, effective, req, just, approval)
+        }
+        _ => {
+            let _ = path;
+            Ok(effective)
+        }
+    }
+}
+
+/// 写被拒时给模型的文本：拒绝标记 + 同轮升级提示（上游 `mapError` 同形）。
+fn sandbox_denied(mode: FsMode) -> String {
+    format!(
+        "{}\n{}",
+        sandbox_denial_marker(mode),
+        escalation_hint_marker("operation")
+    )
 }
 
 /// 展开 `~` / `~/` 前缀。
@@ -204,16 +397,25 @@ fn canonicalize_best_effort(path: &Path) -> PathBuf {
 pub struct FsTool {
     policy: Arc<dyn FsPolicy>,
     workdir: dsh_tools::Workdir,
+    /// 审批缝（上游 `ctx.approval`）：沙箱越权重试时向用户要一次批准。
+    /// `None` = 未接线（越权按 `unavailable` fail-closed）。
+    approval: Option<dsh_tools::ApprovalSlot>,
 }
 
 impl FsTool {
     pub fn new(policy: Arc<dyn FsPolicy>) -> Self {
-        Self { policy, workdir: dsh_tools::Workdir::new() }
+        Self { policy, workdir: dsh_tools::Workdir::new(), approval: None }
     }
 
     /// 注入会话工作目录（相对路径的解析基准）。
     pub fn with_workdir(mut self, workdir: dsh_tools::Workdir) -> Self {
         self.workdir = workdir;
+        self
+    }
+
+    /// 注入审批槽（沙箱越权重试的用户批准通道）。
+    pub fn with_approval(mut self, approval: dsh_tools::ApprovalSlot) -> Self {
+        self.approval = Some(approval);
         self
     }
 }
@@ -235,7 +437,9 @@ impl Tool for FsTool {
                 "properties": {
                     "op": { "type": "string", "enum": ["read", "write", "list", "exists"] },
                     "path": { "type": "string", "description": "Filesystem path." },
-                    "content": { "type": "string", "description": "Content to write (write op only)." }
+                    "content": { "type": "string", "description": "Content to write (write op only)." },
+                    "sandbox_permissions": { "type": "string", "enum": ["workspace-write", "danger-full-access"], "description": sandbox_permissions_description("operation") },
+                    "justification": { "type": "string", "description": JUSTIFICATION_DESCRIPTION }
                 },
                 "required": ["op", "path"]
             }),
@@ -256,11 +460,7 @@ impl Tool for FsTool {
                     return ToolExecutionResult::error(self.policy.deny_reason());
                 }
             }
-            "write" => {
-                if !self.policy.allow_write(path) {
-                    return ToolExecutionResult::error(self.policy.deny_reason());
-                }
-            }
+            // write 的沙箱判定在下面按「升级解析后的档位」做（越权可批准一次）
             _ => {}
         }
         match op {
@@ -279,6 +479,22 @@ impl Tool for FsTool {
                 }
             }
             "write" => {
+                // 沙箱越权：按模型声明的 sandbox_permissions 走一次审批
+                // （上游 approveEscalation；未声明则按当前档位判定）
+                let mode = match resolve_write_mode(
+                    &*self.policy,
+                    "fs",
+                    input.call_id.as_str(),
+                    &input.arguments,
+                    self.approval.as_ref(),
+                    path,
+                ) {
+                    Ok(mode) => mode,
+                    Err(text) => return ToolExecutionResult::error(text),
+                };
+                if !self.policy.allow_write_in(mode, path) {
+                    return ToolExecutionResult::error(sandbox_denied(mode));
+                }
                 let content = input.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 // before 捕获（上游 DiffResultView.FileDiff：oldText null = 新文件/无先前内容；
                 // 非文本旧内容同样按 null——UI 元数据只服务文本 diff）
@@ -433,6 +649,12 @@ impl WriteTool {
     pub fn new(fs: FsTool) -> Self {
         Self { fs }
     }
+
+    /// 注入审批槽（转交内部 fs 工具）。
+    pub fn with_approval(mut self, approval: dsh_tools::ApprovalSlot) -> Self {
+        self.fs = self.fs.with_approval(approval);
+        self
+    }
 }
 
 #[async_trait]
@@ -445,7 +667,9 @@ impl Tool for WriteTool {
                 "type": "object",
                 "properties": {
                     "file_path": { "type": "string", "description": "Path to write, resolved by the filesystem backend. Provide `file_path` before `content` in the arguments." },
-                    "content": { "type": "string", "description": "Full UTF-8 text content to write." }
+                    "content": { "type": "string", "description": "Full UTF-8 text content to write." },
+                    "sandbox_permissions": { "type": "string", "enum": ["workspace-write", "danger-full-access"], "description": sandbox_permissions_description("operation") },
+                    "justification": { "type": "string", "description": JUSTIFICATION_DESCRIPTION }
                 },
                 "required": ["file_path", "content"]
             }),
@@ -467,10 +691,17 @@ impl Tool for WriteTool {
             Some(c) => c,
             None => return ToolExecutionResult::error("content is required for write"),
         };
+        let mut forwarded_args = json!({"op": "write", "path": path, "content": content});
+        // 升级参数透传（沙箱越权重试走一次审批）
+        for key in ["sandbox_permissions", "justification"] {
+            if let Some(value) = args.get(key) {
+                forwarded_args[key] = value.clone();
+            }
+        }
         let forwarded = ToolExecutionInput {
             call_id: input.call_id.clone(),
             name: "fs".into(),
-            arguments: json!({"op": "write", "path": path, "content": content}),
+            arguments: forwarded_args,
         };
         self.fs.execute(&forwarded).await
     }
@@ -485,11 +716,19 @@ impl Tool for WriteTool {
 pub struct EditTool {
     policy: Arc<dyn FsPolicy>,
     workdir: dsh_tools::Workdir,
+    /// 审批缝（沙箱越权重试的一次批准）。
+    approval: Option<dsh_tools::ApprovalSlot>,
 }
 
 impl EditTool {
     pub fn new(policy: Arc<dyn FsPolicy>, workdir: dsh_tools::Workdir) -> Self {
-        Self { policy, workdir }
+        Self { policy, workdir, approval: None }
+    }
+
+    /// 注入审批槽。
+    pub fn with_approval(mut self, approval: dsh_tools::ApprovalSlot) -> Self {
+        self.approval = Some(approval);
+        self
     }
 }
 
@@ -570,7 +809,9 @@ impl Tool for EditTool {
                     "file_path": { "type": "string", "description": "Path to edit, resolved by the filesystem backend. Provide `file_path` before `old_string` and `new_string` in the arguments." },
                     "old_string": { "type": "string", "description": "Literal text to replace." },
                     "new_string": { "type": "string", "description": "Literal replacement text. Use an empty string to delete the match." },
-                    "replace_all": { "type": "boolean", "description": "Replace all matches. Defaults to false; when false, old_string must appear exactly once." }
+                    "replace_all": { "type": "boolean", "description": "Replace all matches. Defaults to false; when false, old_string must appear exactly once." },
+                    "sandbox_permissions": { "type": "string", "enum": ["workspace-write", "danger-full-access"], "description": sandbox_permissions_description("operation") },
+                    "justification": { "type": "string", "description": JUSTIFICATION_DESCRIPTION }
                 },
                 "required": ["file_path", "old_string", "new_string"]
             }),
@@ -583,8 +824,19 @@ impl Tool for EditTool {
             Err(e) => return ToolExecutionResult::error(e),
         };
         let path = self.workdir.resolve(Path::new(&parsed.path));
-        if !self.policy.allow_write(&path) {
-            return ToolExecutionResult::error(self.policy.deny_reason());
+        let mode = match resolve_write_mode(
+            &*self.policy,
+            "edit",
+            input.call_id.as_str(),
+            &input.arguments,
+            self.approval.as_ref(),
+            &path,
+        ) {
+            Ok(mode) => mode,
+            Err(text) => return ToolExecutionResult::error(text),
+        };
+        if !self.policy.allow_write_in(mode, &path) {
+            return ToolExecutionResult::error(sandbox_denied(mode));
         }
         let raw = match std::fs::read_to_string(&path) {
             Ok(text) => text,
@@ -1352,6 +1604,196 @@ mod read_image_tests {
             other => panic!("expected image block, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod escalation_tests {
+    use super::*;
+    use dsh_tools::{ApprovalOutcome, ApprovalSlot};
+
+    fn slot(outcome: ApprovalOutcome) -> ApprovalSlot {
+        let slot = ApprovalSlot::new();
+        slot.set(std::sync::Arc::new(move |_req: &dsh_tools::ApprovalRequest| outcome));
+        slot
+    }
+
+    #[test]
+    fn validation_matches_upstream_wording() {
+        assert_eq!(
+            validate_escalation_args(Some("workspace-write"), None).unwrap_err(),
+            "invalid escalation: sandbox_permissions requires a justification"
+        );
+        assert_eq!(
+            validate_escalation_args(None, Some("because")).unwrap_err(),
+            "invalid escalation: justification is only valid together with sandbox_permissions"
+        );
+        assert_eq!(
+            validate_escalation_args(Some("workspace-write"), Some("   ")).unwrap_err(),
+            "invalid justification: expected a non-empty sentence"
+        );
+        assert!(validate_escalation_args(None, None).is_ok());
+        assert!(validate_escalation_args(Some("workspace-write"), Some("需要写上层目录")).is_ok());
+    }
+
+    #[test]
+    fn only_strictly_wider_targets_are_allowed() {
+        assert!(is_strictly_wider(FsMode::WorkspaceWrite, FsMode::ReadOnly));
+        assert!(is_strictly_wider(FsMode::DangerFullAccess, FsMode::WorkspaceWrite));
+        assert!(is_strictly_wider(FsMode::DangerFullAccess, FsMode::ReadOnly));
+        assert!(!is_strictly_wider(FsMode::WorkspaceWrite, FsMode::WorkspaceWrite));
+        assert!(!is_strictly_wider(FsMode::ReadOnly, FsMode::WorkspaceWrite));
+        assert_eq!(ESCALATION_TARGETS, &[FsMode::WorkspaceWrite, FsMode::DangerFullAccess]);
+    }
+
+    #[test]
+    fn denial_and_hint_markers_are_verbatim() {
+        assert_eq!(
+            sandbox_denial_marker(FsMode::WorkspaceWrite),
+            "[sandbox: file access denied under workspace-write mode]"
+        );
+        assert_eq!(
+            escalation_hint_marker("operation"),
+            "[sandbox: escalation available — retry this exact operation once with sandbox_permissions \
+             (the narrowest wider mode that suffices) + justification; the approval prompt asks the user]"
+        );
+        assert!(sandbox_permissions_description("operation").starts_with(
+            "The narrowest wider sandbox mode for a one-shot retry of the exact operation"
+        ));
+    }
+
+    #[test]
+    fn repeating_the_current_mode_needs_no_approval() {
+        // 槽未接线也能过：同档不产生审批请求
+        let bare = ApprovalSlot::new();
+        let got = approve_escalation("write", "c1", FsMode::WorkspaceWrite, "workspace-write", "", Some(&bare)).unwrap();
+        assert_eq!(got, FsMode::WorkspaceWrite);
+    }
+
+    #[test]
+    fn rejected_cancelled_unavailable_return_upstream_texts() {
+        let rejected = approve_escalation(
+            "write",
+            "c1",
+            FsMode::WorkspaceWrite,
+            "danger-full-access",
+            "需要清理系统临时目录",
+            Some(&slot(ApprovalOutcome::Rejected)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            rejected,
+            "the user rejected escalating this operation to \"danger-full-access\"; it stays denied, so stop and explain instead of working around it"
+        );
+
+        let cancelled = approve_escalation(
+            "write",
+            "c1",
+            FsMode::ReadOnly,
+            "workspace-write",
+            "需要落地实现",
+            Some(&slot(ApprovalOutcome::Cancelled)),
+        )
+        .unwrap_err();
+        assert_eq!(cancelled, "approval for escalating to \"workspace-write\" was cancelled");
+
+        let unavailable = approve_escalation(
+            "write",
+            "c1",
+            FsMode::ReadOnly,
+            "workspace-write",
+            "需要落地实现",
+            Some(&slot(ApprovalOutcome::Unavailable)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            unavailable,
+            "sandbox escalation to \"workspace-write\" requires approval, but no approval channel is available"
+        );
+    }
+
+    #[test]
+    fn allowed_once_grants_the_wider_mode() {
+        let got = approve_escalation(
+            "write",
+            "c1",
+            FsMode::ReadOnly,
+            "workspace-write",
+            "需要落地实现",
+            Some(&slot(ApprovalOutcome::AllowedOnce)),
+        )
+        .unwrap();
+        assert_eq!(got, FsMode::WorkspaceWrite);
+    }
+
+    #[test]
+    fn narrower_or_unknown_targets_are_rejected_before_asking() {
+        let err = approve_escalation(
+            "write",
+            "c1",
+            FsMode::DangerFullAccess,
+            "workspace-write",
+            "想收窄",
+            Some(&slot(ApprovalOutcome::AllowedOnce)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "sandbox escalation to \"workspace-write\" is not strictly wider than this call's current \"danger-full-access\" mode"
+        );
+        let err = approve_escalation(
+            "write",
+            "c1",
+            FsMode::ReadOnly,
+            "root",
+            "乱写",
+            Some(&slot(ApprovalOutcome::AllowedOnce)),
+        )
+        .unwrap_err();
+        assert!(err.contains("is not strictly wider"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn outside_write_denies_with_marker_then_grants_once_after_approval() {
+        let root = std::env::temp_dir().join(format!("dsh-fs-esc-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("dsh-fs-esc-out-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let policy: Arc<dyn FsPolicy> = Arc::new(SwitchablePolicy::new(FsMode::WorkspaceWrite, vec![root.clone()]));
+        let wd = dsh_tools::Workdir::new();
+        wd.set(root.clone());
+        let tool = FsTool::new(policy).with_workdir(wd.clone()).with_approval(slot(ApprovalOutcome::AllowedOnce));
+
+        let target = outside.join("esc.txt");
+        let raw = format!(
+            r#"{{"op":"write","path":{},"content":"hi"}}"#,
+            serde_json::to_string(&target.to_string_lossy().to_string()).unwrap()
+        );
+        // 未声明升级 = 拒绝（标记 + 提示）
+        let denied = tool
+            .execute(&ToolExecutionInput::with_raw_arguments(dsh_llm::CallId("c1".into()), "fs".into(), raw.clone()))
+            .await;
+        let text = denied.content.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        }).unwrap();
+        assert!(text.starts_with("[sandbox: file access denied under workspace-write mode]"), "{text}");
+        assert!(text.contains("escalation available"), "{text}");
+        assert!(denied.is_error, "拒绝按工具错误结果回给模型（上游 FsError 同形）");
+
+        // 声明升级 + 批准一次 → 写成功
+        let escalated = format!(
+            r#"{{"op":"write","path":{},"content":"hi","sandbox_permissions":"danger-full-access","justification":"需要写到工作区外"}}"#,
+            serde_json::to_string(&target.to_string_lossy().to_string()).unwrap()
+        );
+        let ok = tool
+            .execute(&ToolExecutionInput::with_raw_arguments(dsh_llm::CallId("c2".into()), "fs".into(), escalated))
+            .await;
+        assert!(!ok.is_error, "{:?}", ok.content);
+        assert!(target.exists(), "批准后写入生效");
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
 

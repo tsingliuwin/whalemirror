@@ -1,4 +1,4 @@
-//! 诊断：打印所有会话文件的行类型统计与头信息。
+﻿//! 诊断：打印所有会话文件的行类型统计与头信息。
 use dsh_persist::SessionRecorder;
 fn main() {
     let home = std::env::var("HOME").unwrap();
@@ -35,6 +35,8 @@ fn main() {
                         dsh_session::SessionEvent::PermissionPreset { .. } => "permission/preset",
                         dsh_session::SessionEvent::SandboxModeSwitch { .. } => "sandbox/mode",
                         dsh_session::SessionEvent::ApprovalPolicy { .. } => "approval/policy",
+                        dsh_session::SessionEvent::ApprovalAsked { .. } => "approval/asked",
+                        dsh_session::SessionEvent::ApprovalDecided { .. } => "approval/decided",
                         dsh_session::SessionEvent::PlanMode { .. } => "plan/mode",
                         dsh_session::SessionEvent::SubagentCatalog { .. } => "subagent/catalog",
                         dsh_session::SessionEvent::PresentedFiles { .. } => "deliverables/presented",

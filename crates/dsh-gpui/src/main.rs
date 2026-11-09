@@ -254,6 +254,18 @@ enum CenterTab {
     Trajectory,
 }
 
+/// 一次待决定的审批（上游 `conversation.approval.card` 的 rustdsh 子集）：
+/// 工具名 + 模型给的 justification + 调用 id（审计配对）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingApproval {
+    tool_name: String,
+    /// 用户可见正文（模型 justification 原文）。
+    display: String,
+    /// 审计 reason（`escalate sandbox to ...`；悬停/详情备用）。
+    reason: String,
+    call_id: String,
+}
+
 /// ChatView 的渲染期快照（AppView render 一次读取，嵌套渲染函数不再
 /// 逐个再进子实体）。
 /// 排队条带行快照（QueueDock 渲染面）。
@@ -1198,7 +1210,7 @@ fn migrate_legacy() {
 
 /// 内置权限预设表（上游部署表三行：read-only = read-only+ask、
 /// workspace-write = workspace-write+ask、danger-full-access =
-/// danger-full-access+never；approval 在 rustdsh 无审批管线，事件互通保留）。
+/// danger-full-access+never）。`ask` 由审批卡片执行（沙箱越权重试一次批准）。
 const PERMISSION_PRESETS: &[(&str, &str, &str, &str)] = &[
     // (key, 预设名, sandbox/mode, approval/policy)
     ("read-only", "仅可查看", "read-only", "ask"),
@@ -1844,6 +1856,12 @@ pub(crate) struct AppView {
     /// 审阅自定义反馈输入（上游 QuestionComposer 的 custom 反馈路径：
     /// 「要求修改」时把输入文本回给模型）
     plan_feedback: Entity<InputState>,
+    /// 审批卡片态（Some = 面板展示中；上游 ApprovalCard 一次一单）
+    pending_approval: Option<PendingApproval>,
+    /// 审批应答通道（面板按钮 → 阻塞中的工具线程）
+    approval_answer_tx: Option<std::sync::mpsc::Sender<dsh_tools::ApprovalOutcome>>,
+    /// 审批策略闸（`ask` 才弹卡；`never` 确定性拒绝——上游 user-approval 语义）
+    approval_ask: Arc<std::sync::atomic::AtomicBool>,
     /// #5 真并发：非当前会话的运行时表（发送时按需 spawn、轮终 reap）。
     /// 主 agent 恒代表「当前」会话；查看其它会话时在其上发消息 → 经此
     /// 表取/建该会话的独立 runtime（事件泵带会话标签按属主路由）。
@@ -1863,7 +1881,8 @@ pub(crate) struct AppView {
     full_access_ack: bool,
     /// 当前会话有效权限预设（web permission/preset；默认 workspace-write）
     permission_preset: String,
-    /// 当前会话有效审批策略（web approval/policy；无审批管线，互通保留）
+    /// 当前会话有效审批策略（web approval/policy；`ask` 时沙箱越权重试
+    /// 走审批卡片，`never` 确定性拒绝——上游 user-approval 语义）
     approval_policy: String,
     /// composer 命令菜单开合（上游 input.commands：加号 + '/' 前缀触发）
     command_menu: bool,
@@ -2200,6 +2219,9 @@ impl AppView {
             confirm_session_delete: None,
             image_viewer: dsh_gpui::ImageViewer::default(),
             plan_review: dsh_gpui::PlanReviewPanel::default(),
+        pending_approval: None,
+        approval_answer_tx: None,
+        approval_ask: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             plan_review_tx: None,
             session_runtimes: std::collections::HashMap::new(),
             running_sessions: dsh_gpui::MultiSessionGate::default(),
@@ -3615,6 +3637,7 @@ impl AppView {
             }
             let (_, _, sandbox, ap) = preset_spec(&self.permission_preset);
             self.approval_policy = approval.unwrap_or_else(|| ap.to_string());
+            self.sync_approval_gate();
             if let Some(m) = dsh_fs::FsMode::from_web(sandbox) {
                 self.fs_sandbox.set_mode(m);
             }
@@ -3716,6 +3739,7 @@ impl AppView {
             let (_, _, sandbox, approval) = preset_spec(&default_preset);
             self.permission_preset = default_preset;
             self.approval_policy = approval.to_string();
+            self.sync_approval_gate();
             if let Some(m) = dsh_fs::FsMode::from_web(sandbox) {
                 self.fs_sandbox.set_mode(m);
             }
@@ -4593,6 +4617,22 @@ impl AppView {
         }
     }
 
+    /// 审批应答（上游 ApprovalCard 的 answer：允许一次 / 拒绝）。点答即关
+    /// 面板并经 answer 通道回阻塞中的工具线程；一次批准只作用于这一次调用。
+    fn approval_decide(&mut self, outcome: dsh_tools::ApprovalOutcome) {
+        self.pending_approval = None;
+        if let Some(tx) = &self.approval_answer_tx {
+            let _ = tx.send(outcome);
+        }
+    }
+
+    /// 审批策略闸同步（`approval/policy` 的消费面：`ask` 才弹卡，
+    /// `never` 在派发前确定性拒绝——上游 user-approval 语义）。
+    fn sync_approval_gate(&self) {
+        self.approval_ask
+            .store(self.approval_policy == "ask", std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 「要求修改」带自定义反馈（上游 QuestionComposer 的 custom 路径：
     /// 输入文本回给模型；空输入=无反馈形态）。应答后清空输入。
     fn plan_review_request_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5440,6 +5480,7 @@ impl AppView {
             self.agent
                 .append_session_event(SessionEvent::ApprovalPolicy { policy: approval.to_string() });
             self.approval_policy = approval.to_string();
+            self.sync_approval_gate();
         }
         self.permission_preset = preset.to_string();
         // 上游 prompt narration：shell 节按档位告知模型写边界
@@ -6083,6 +6124,136 @@ impl Render for AppView {
                                                 });
                                             })
                                             .child("同意执行"),
+                                    ),
+                            ),
+                    ),
+            );
+        }
+        // 审批卡片（上游 ui-approval ApprovalCard：等待审批 → 工具 X 请求
+        // 越权执行 → justification 正文 → 拒绝 / 允许一次）。一次批准只对
+        // 这一次调用生效；拒绝后工具结果按上游文案回给模型。
+        if let Some(pending) = self.pending_approval.clone() {
+            let t_reject = this.clone();
+            let t_allow = this.clone();
+            root = root.child(
+                div()
+                    .id("approval-mask")
+                    .absolute()
+                    .size_full()
+                    .top_0()
+                    .left_0()
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::hsla(0.0, 0.0, 0.0, 0.5))
+                    .child(
+                        div()
+                            .id("approval-card")
+                            .w(px(460.0))
+                            .v_flex()
+                            .gap(px(12.0))
+                            .p(px(20.0))
+                            .rounded(px(16.0))
+                            .bg(theme::t().surface)
+                            .shadow(theme::elevation_prominent())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(widgets::state_dot(theme::t().warn_label))
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::FONT_TAB))
+                                            .line_height(px(theme::FONT_ROW_LEADING))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().text_2)
+                                            .child("等待审批"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(17.0))
+                                            .line_height(px(24.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme::t().text)
+                                            .child(format!(
+                                                "工具 {} 请求越权执行",
+                                                pending.tool_name
+                                            )),
+                                    )
+                                    .when(!pending.display.trim().is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .line_height(px(20.0))
+                                                .text_color(theme::t().text_2)
+                                                .child(pending.display.clone()),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .id("approval-reject")
+                                            .h(px(36.0))
+                                            .px(px(14.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(18.0))
+                                            .border(px(0.5))
+                                            .border_color(theme::t().border_l3)
+                                            .text_size(px(theme::FONT_ROW))
+                                            .line_height(px(22.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().text)
+                                            .cursor_pointer()
+                                            .hover(|st| st.bg(theme::t().hover))
+                                            .on_click(move |_, _, cx| {
+                                                t_reject.update(cx, |v, cx| {
+                                                    v.approval_decide(
+                                                        dsh_tools::ApprovalOutcome::Rejected,
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("拒绝"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("approval-allow")
+                                            .h(px(36.0))
+                                            .px(px(14.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(18.0))
+                                            .bg(theme::t().text)
+                                            .text_size(px(theme::FONT_ROW))
+                                            .line_height(px(22.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().bg_base)
+                                            .cursor_pointer()
+                                            .hover(|st| st.opacity(0.9))
+                                            .on_click(move |_, _, cx| {
+                                                t_allow.update(cx, |v, cx| {
+                                                    v.approval_decide(
+                                                        dsh_tools::ApprovalOutcome::AllowedOnce,
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("允许一次"),
                                     ),
                             ),
                     ),
@@ -8789,7 +8960,12 @@ fn main() {
         dsh_fs::FsMode::WorkspaceWrite,
         Vec::new(),
     ));
-    let fs_tool = FsTool::new(fs_sandbox.clone()).with_workdir(workdir.clone());
+    // 审批槽（沙箱越权重试的一次批准）：工具先持槽，UI 就绪后接线
+    //（上游 `ctx.approval` 的 rustdsh 等价；未接线时越权 fail-closed）
+    let approval_slot = dsh_tools::ApprovalSlot::new();
+    let fs_tool = FsTool::new(fs_sandbox.clone())
+        .with_workdir(workdir.clone())
+        .with_approval(approval_slot.clone());
     // agent 预设工具门（minimal 只留终端与图片读取；条件按步骤准入求值）
     let _fs = tools.register_when(Arc::new(fs_tool.clone()), preset_gate("fs")).unwrap();
     // 上游工具名形别名（tool-fs read/write.ts）：提示词 section 以「read
@@ -8800,7 +8976,10 @@ fn main() {
     // edit（上游 tool-fs/edit.ts 同名工具）：字面替换原语，沙箱/工作目录
     // 与 fs 原面同路；diff presentation 供改动审阅卡
     let _edit = tools.register_when(
-        Arc::new(dsh_fs::EditTool::new(fs_sandbox.clone(), workdir.clone())),
+        Arc::new(
+            dsh_fs::EditTool::new(fs_sandbox.clone(), workdir.clone())
+                .with_approval(approval_slot.clone()),
+        ),
         preset_gate("edit"),
     ).unwrap();
     // read_image（上游 tool-fs/read-image.ts 同名）：模型看图（vision）；
@@ -9305,6 +9484,89 @@ fn main() {
                 // 不被逐事件 notify，侧栏等兄弟子视图的 element 缓存保持
                 // 有效；peek 中运行会话的事件不进视图（照常落盘）。
                 let view = app.clone();
+                // 审批缝（上游 `ctx.approval` 的 rustdsh 等价）：工具线程阻塞
+                // 等用户决定，面板由 async 泵弹出（同 plan 审阅的泵模式）。
+                // `approval/policy = never` 时确定性拒绝、不弹卡（上游语义）。
+                {
+                    let (open_tx, open_rx) = std::sync::mpsc::channel::<PendingApproval>();
+                    let (answer_tx, answer_rx) =
+                        std::sync::mpsc::channel::<dsh_tools::ApprovalOutcome>();
+                    let answer_rx = std::sync::Mutex::new(answer_rx);
+                    let ask_flag = app.read_with(cx, |v: &AppView, _| v.approval_ask.clone());
+                    let audit_agent = Arc::clone(&agent);
+                    let hook: dsh_tools::ApprovalHook = std::sync::Arc::new(
+                        move |req: &dsh_tools::ApprovalRequest| {
+                            if !ask_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                return dsh_tools::ApprovalOutcome::Rejected;
+                            }
+                            let id = if req.call_id.is_empty() {
+                                format!("approval-{}", now_ms())
+                            } else {
+                                req.call_id.clone()
+                            };
+                            // 审计（上游 approval/asked：log-only，不进模型面）
+                            let _ = audit_agent.append_session_event(SessionEvent::ApprovalAsked {
+                                id: id.clone(),
+                                tool_name: req.tool_name.clone(),
+                                call_id: Some(req.call_id.clone()),
+                                reason: Some(req.reason.clone()),
+                            });
+                            let pending = PendingApproval {
+                                tool_name: req.tool_name.clone(),
+                                display: req.display.clone(),
+                                reason: req.reason.clone(),
+                                call_id: id.clone(),
+                            };
+                            let _ = open_tx.send(pending);
+                            let deadline = std::time::Instant::now()
+                                + std::time::Duration::from_secs(300);
+                            let outcome = loop {
+                                match answer_rx.lock().unwrap().try_recv() {
+                                    Ok(outcome) => break outcome,
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                        if std::time::Instant::now() > deadline {
+                                            break dsh_tools::ApprovalOutcome::Cancelled;
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(100));
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                        break dsh_tools::ApprovalOutcome::Unavailable;
+                                    }
+                                }
+                            };
+                            let _ = audit_agent.append_session_event(SessionEvent::ApprovalDecided {
+                                id,
+                                outcome: outcome.as_wire().to_string(),
+                            });
+                            outcome
+                        },
+                    );
+                    approval_slot.set(hook);
+                    {
+                        let answer_tx = answer_tx;
+                        app.update(cx, |v: &mut AppView, _| {
+                            v.approval_answer_tx = Some(answer_tx);
+                        });
+                    }
+                    // async 泵：开面板（无答案职责——UI 点击即关即发）
+                    let pump_view = app.clone();
+                    cx.spawn(async move |cx| {
+                        let mut cx = cx.clone();
+                        loop {
+                            if let Ok(pending) = open_rx.try_recv() {
+                                let _ = cx.update_entity(
+                                    &pump_view,
+                                    |v: &mut AppView, cx: &mut Context<AppView>| {
+                                        v.pending_approval = Some(pending);
+                                        cx.notify();
+                                    },
+                                );
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    })
+                    .detach();
+                }
                 // #2 plan 审阅缝（单进程 userQuestions.ask）：
                 // hook（工具线程）非阻塞投 plan → async 泵弹面板；
                 // UI 三钮答案走 answer_tx（AppView 字段）→ hook 轮询收。

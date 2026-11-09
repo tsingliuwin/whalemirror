@@ -407,21 +407,23 @@ pub(crate) fn session_row(
         .map(|d| if active { d.bg(theme::t().hover) } else { d })
         .hover(|s| s.bg(theme::t().hover))
         .on_click(on_click)
-        .when(running, |d| {
-            // 运行中状态点（上游 Rows SessionStatusDots：ongoing 像素追逐）。
-            // 上游行右侧另有 16px 状态槽 + 4px 标题距，rustdsh 行的 pl16 里
-            // 直接落点——不占位避免全量行位移（槽位对齐留待行结构专项）。
-            d.child(
-                div()
-                    .absolute()
-                    .left(px(3.0))
-                    .top_0()
-                    .bottom_0()
-                    .flex()
-                    .items_center()
-                    .child(state_dot_ongoing(("sb-run-dot", index as u64))),
-            )
-        })
+        // leading 状态槽（上游 `Rows.tsx` 的 `<span className={css.slot}>`：
+        // 16×20 定尺、flex:none、三级色）——运行中状态点落在这格，标题紧随
+        // 其后（`.title { margin: 0 6px 0 label-gap }`）。恒占位：有无状态点
+        // 都不移动标题（上游同构；旧实现把点 absolute 覆在行左内距里）。
+        .child(
+            div()
+                .flex_none()
+                .w(px(dsh_gpui::ui_metrics::SIDEBAR_SESSION_SLOT_W_PX))
+                .h(px(dsh_gpui::ui_metrics::SIDEBAR_SESSION_SLOT_H_PX))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme::t().text_3)
+                .when(running, |d| {
+                    d.child(state_dot_ongoing(("sb-run-dot", index as u64)))
+                }),
+        )
         .child(
             div()
                 .flex_1()
@@ -440,8 +442,12 @@ pub(crate) fn session_row(
             d.child(
                 div()
                     .id(SharedString::from(format!("session-time-{index}")))
-                    .text_size(px(12.0))
-                    .line_height(px(20.0))
+                    .flex_none()
+                    // 上游 `.time { font-size: 10px; line-height: 16px;
+                    // margin-inline-end: -1px }`
+                    .text_size(px(dsh_gpui::ui_metrics::SIDEBAR_ROW_TIME_FONT_PX))
+                    .line_height(px(dsh_gpui::ui_metrics::SIDEBAR_ROW_TIME_LEADING_PX))
+                    .mr(px(-dsh_gpui::ui_metrics::SIDEBAR_ROW_TIME_TRAIL_PULL_PX))
                     .text_color(theme::t().text_3)
                     .group_hover(group_time, |s| s.opacity(0.0))
                     .child(time_label),

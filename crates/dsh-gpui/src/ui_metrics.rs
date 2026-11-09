@@ -394,6 +394,17 @@ pub const SIDEBAR_ROW_RADIUS_PX: f32 = RADIUS_MD_PX;
 /// 行尾「…」菜单钮：16px 方形热区 + R4（上游行内小控件走 R4 档）。
 pub const SIDEBAR_ROW_ACTION_PX: f32 = 16.0;
 pub const SIDEBAR_ROW_ACTION_RADIUS_PX: f32 = RADIUS_XS_PX;
+/// 会话行 leading 状态槽（上游 `Rows.tsx` 的 `<span className={css.slot}>`：
+/// **16×20 定尺、flex:none、三级色**）——运行/待交互状态点与插件槽位都落
+/// 在这格；标题紧随其后（`.title { margin: 0 6px 0 label-gap }`）。
+/// 旧实现把状态点 absolute 覆在行左内距里，标题不缩进，与上游不同构。
+pub const SIDEBAR_SESSION_SLOT_W_PX: f32 = 16.0;
+pub const SIDEBAR_SESSION_SLOT_H_PX: f32 = 20.0;
+/// 会话行时间戳（上游 `.time { font-size: 10px; line-height: 16px;
+/// margin-inline-end: -1px }`）——rustdsh 曾用 12/20。
+pub const SIDEBAR_ROW_TIME_FONT_PX: f32 = 10.0;
+pub const SIDEBAR_ROW_TIME_LEADING_PX: f32 = 16.0;
+pub const SIDEBAR_ROW_TIME_TRAIL_PULL_PX: f32 = -1.0;
 
 /// 弹出菜单（上游 ui-dockkit `.menu` / `.menuItem`）：条目 padding 4/7、
 /// R12、字号 13-1=12；菜单本体 padding 4、最小宽 96、0.5px 发丝边。
@@ -851,6 +862,22 @@ mod tests {
         assert_eq!(COMPOSER_RAIL_PAD_T_PX, 2.0);
         assert_eq!(COMPOSER_RAIL_MARGIN_BOTTOM_PX, -6.0);
         assert!(COMPOSER_RAIL_MARGIN_BOTTOM_PX < 0.0);
+    }
+
+    #[test]
+    fn session_row_leading_slot_and_time_typography() {
+        // 上游 `Rows.tsx` slot：16×20 定尺；`.title` 紧随（gap 6）
+        assert_eq!(SIDEBAR_SESSION_SLOT_W_PX, 16.0);
+        assert_eq!(SIDEBAR_SESSION_SLOT_H_PX, 20.0);
+        // 槽高不超过行高的一半以内且行内垂直居中成立
+        assert!(SIDEBAR_SESSION_SLOT_H_PX < SIDEBAR_ROW_HEIGHT_PX);
+        // `.time { font-size: 10px; line-height: 16px; margin-inline-end: -1px }`
+        assert_eq!(SIDEBAR_ROW_TIME_FONT_PX, 10.0);
+        assert_eq!(SIDEBAR_ROW_TIME_LEADING_PX, 16.0);
+        assert_eq!(SIDEBAR_ROW_TIME_TRAIL_PULL_PX, -1.0);
+        // 时间不再沿用 12/20 的正文档（曾误用）
+        assert_ne!(SIDEBAR_ROW_TIME_FONT_PX, 12.0);
+        assert_ne!(SIDEBAR_ROW_TIME_LEADING_PX, 20.0);
     }
 
     #[test]

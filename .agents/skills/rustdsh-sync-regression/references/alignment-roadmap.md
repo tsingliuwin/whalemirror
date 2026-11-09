@@ -272,7 +272,7 @@ A4 ──→ A6 的 skill/team UI
 | 批次 | 内容 | 依赖 | 预估 | DoD |
 |---|---|---|---|---|
 | A1.1 | `todo_write` + 计划常显 + 重启恢复 | 无 | 2-3 天 | ✅ **已落 11-09**（backlog #106）：工具 + 整表 `todo/write` 事件 + composer 上方面板（聚焦/折叠/进度摘要）+ turn/start 清空 + 重载 fold；端到端 2 条 + 单测 3 条 + persist 往返 1 条 |
-| A1.2 | `jobs`：后台执行 / 读 / 等 / 取消 / 完成回注 + 会话头 roster | 工具层钩子 | 3-5 天 | 后台跑 30s 命令不阻塞；完成自动续一轮 |
+| A1.2 | `jobs`：后台执行 / 读 / 等 / 取消 / 完成回注 + 会话头 roster | 工具层钩子 | 3-5 天 | ✅ **数据+工具面已落 11-09**（backlog #107）：`dsh-jobs` crate（输出环绝对偏移/淘汰、注册表 read/wait/kill/remove/subscribe、三工具逐字对齐、完成通知）+ bash `run_in_background` + `job/*` 审计事件 + prompt section；剩 UI roster（A6） |
 | A1.3 | `goal`：投影 + 工具 + `/goal` + round driver + turn-trigger 行 | A1.1 | 5-7 天 | 给一个跨 3 轮的目标，自动推进到完成 |
 | A1.4 | `schedule`：任务存储 + 到期投递 + 侧栏自动化页 + 工具 | A1.3 的 follow-up 缝 | 5-7 天 | 每分钟任务到点在自己的会话收到 follow-up |
 | A1.5 | `team`：任务板 + `tool-agent-team` + `ui-agent-team` | B1 / A1.2 | 1-2 周 | 两个子代理共享任务板、不重复劳动 |

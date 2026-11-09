@@ -31,6 +31,11 @@ impl SkillTool {
         self.catalog.lock().unwrap().clone()
     }
 
+    /// 目录快照句柄（宿主另用，如 `/name` 显式调用的 user-invocable 判定）。
+    pub fn catalog(&self) -> SkillCatalog {
+        Arc::clone(&self.catalog)
+    }
+
     /// 按名字取模型可见技能。
     pub fn find(&self, name: &str) -> Option<SkillEntry> {
         self.entries()

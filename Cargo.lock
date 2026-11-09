@@ -1293,6 +1293,7 @@ dependencies = [
  "dsh-session",
  "dsh-session-projection",
  "dsh-shell",
+ "dsh-skill",
  "dsh-spill",
  "dsh-system-prompt",
  "dsh-tools",

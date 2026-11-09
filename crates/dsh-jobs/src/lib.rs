@@ -1,4 +1,4 @@
-﻿//! dsh-jobs — 后台作业运行时（上游 `packages/jobs/*` 的等价面）。
+//! dsh-jobs — 后台作业运行时（上游 `packages/jobs/*` 的等价面）。
 //!
 //! 三个包合成一个 crate：
 //! - `jobs`：类型与投影词汇（`JobId` / `JobStatus` / `JobChannel` /
@@ -842,9 +842,11 @@ mod tests {
 
     #[test]
     fn utf8_tail_never_splits_a_codepoint() {
-        let (tail, bytes) = utf8_tail("你好世界", 6);
-        assert_eq!(bytes, 6);
         // 上游语义：起点越过续字节后取尾（可能短于预算）——`你好世界` 12B、预算 6B → `世界`
+        let (cjk_tail, cjk_bytes) = utf8_tail("你好世界", 6);
+        assert_eq!(cjk_bytes, 6);
+        assert_eq!(cjk_tail, "世界");
+        assert_eq!(cjk_tail.len(), cjk_bytes);
         let (tail, bytes) = utf8_tail("abc", 10);
         assert_eq!((tail.as_str(), bytes), ("abc", 3));
     }

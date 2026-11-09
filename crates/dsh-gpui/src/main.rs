@@ -9604,6 +9604,19 @@ fn main() {
             )));
         }
     }
+    // 用户显式技能调用缝（上游 tool-skill 的 `/name` 手势）：只有
+    // user-invocable 的技能能被这样调起，且正文每次重读文件
+    {
+        let loader_tool = Arc::clone(&skill_tool);
+        agent.set_skill_loader(Arc::new(move |name: &str| {
+            let entries = loader_tool.catalog().lock().unwrap().clone();
+            let entry = entries.iter().find(|e| e.name == name)?;
+            if !entry.user_invocable {
+                return None;
+            }
+            loader_tool.load(name).ok()
+        }));
+    }
     // 检查点缝（上游 session-checkpoint-policy）：请求派生与顶层工具派发前
     // 把已提交的事件刷到稳定存储
     {

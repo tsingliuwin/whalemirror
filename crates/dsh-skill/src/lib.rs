@@ -290,6 +290,43 @@ pub fn render_skill_content(name: &str, base_dir: &Path, body: &str) -> String {
     )
 }
 
+/// `/name` 手势解析（上游 `SKILL_GESTURE`）：
+/// `/(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g`。
+///
+/// 等价实现：按空白切词，整词形如 `/<kebab-case 名>` 才算手势——上游的前瞻
+/// 要求名字后面是空白或结尾，所以 `/name,` 不算（我的整词判定同语义）。
+/// 按首次出现顺序去重。
+pub fn invoked_skill_names(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for token in text.split_whitespace() {
+        let Some(rest) = token.strip_prefix('/') else { continue };
+        if !is_skill_name(rest) {
+            continue;
+        }
+        if !names.iter().any(|n| n == rest) {
+            names.push(rest.to_string());
+        }
+    }
+    names
+}
+
+/// 一次显式调用的消息（上游 `skill-invocation` / `form: instructions`）。
+pub fn invocation_message(name: &str, content: String) -> dsh_llm::Message {
+    dsh_llm::Message::new(
+        dsh_llm::Role::User,
+        vec![ContentBlock::text(content)],
+        dsh_llm::MessageSource::Context {
+            context_kind: "skill-invocation".into(),
+            plugin: None,
+            form: Some("instructions".into()),
+            summary: None,
+            changes_paths: Vec::new(),
+            reference_labels: Vec::new(),
+            name: Some(name.to_string()),
+        },
+    )
+}
+
 /// 目录消息（`source` 走 plugin 形，`form: catalog`）。
 pub fn catalog_message(text: String, entries: usize) -> dsh_llm::Message {
     dsh_llm::Message::new(
@@ -310,6 +347,45 @@ pub fn catalog_message(text: String, entries: usize) -> dsh_llm::Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slash_gesture_picks_exact_kebab_tokens_in_order() {
+        assert_eq!(
+            invoked_skill_names("/office-docx 帮我做个表格"),
+            vec!["office-docx".to_string()]
+        );
+        // 大小写、下划线、空名都不是手势
+        assert!(invoked_skill_names("/Office-Docx").is_empty());
+        assert!(invoked_skill_names("/office_docx").is_empty());
+        assert!(invoked_skill_names("/").is_empty());
+        // 名字后面紧跟标点不是手势（上游前瞻要求空白或结尾）
+        assert!(invoked_skill_names("/office-docx，做表格").is_empty());
+        // 词中出现不算（前面不是空白/开头）
+        assert!(invoked_skill_names("见(/office-docx)").is_empty());
+        // 去重保序
+        assert_eq!(
+            invoked_skill_names("/b-skill /a-skill /b-skill"),
+            vec!["b-skill".to_string(), "a-skill".to_string()]
+        );
+        // 普通斜杠路径不误判：含 `/` 的整段不是合法技能名
+        assert!(invoked_skill_names("/usr/local/bin").is_empty());
+        // 而 `/tmp` 本身是合法 kebab 名——手势解析只管形状，是否真的注入由
+        // 目录查找（存在且 user-invocable）决定，所以这里允许它被解析出来
+        assert_eq!(invoked_skill_names("/tmp"), vec!["tmp".to_string()]);
+    }
+
+    #[test]
+    fn invocation_message_carries_the_producer_kind() {
+        let m = invocation_message("demo-skill", "<skill_content/>".into());
+        match &m.source {
+            dsh_llm::MessageSource::Context { context_kind, form, name, .. } => {
+                assert_eq!(context_kind, "skill-invocation");
+                assert_eq!(form.as_deref(), Some("instructions"));
+                assert_eq!(name.as_deref(), Some("demo-skill"));
+            }
+            other => panic!("expected Context source, got {other:?}"),
+        }
+    }
 
     fn write_skill(root: &Path, name: &str, description: &str, extra: &str, body: &str) -> PathBuf {
         let dir = root.join(name);
@@ -446,7 +522,11 @@ mod tests {
         assert!(empty.contains("No skills could be confirmed"), "{empty}");
         assert!(empty.contains("Do not infer skill instructions from an empty catalog."), "{empty}");
 
-        let incomplete = render_catalog(&entries, true, 500);
+        let incomplete_catalog = render_catalog(&entries, true, 500);
+        assert!(
+            incomplete_catalog.contains("Some skills could not be checked."),
+            "{incomplete_catalog}"
+        );
         
 
         let content = render_skill_content("office-docx", Path::new("/skills/office-docx"), "Do the thing\n");

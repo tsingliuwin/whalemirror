@@ -221,6 +221,8 @@ pub struct ReactLoopAgent {
     last_visible_ms: Arc<RwLock<Option<u64>>>,
     /// 检查点缝（上游 session-checkpoint-policy）
     checkpoint: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    /// 技能加载缝（上游 tool-skill 的 `/name` 显式调用）
+    skill_loader: Arc<Mutex<Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>>>,
     session: Arc<Mutex<Session>>,
     inbox: Arc<Mutex<Inbox>>,
     llm: Arc<LlmRuntime>,
@@ -289,6 +291,7 @@ impl ReactLoopAgent {
         time_context: Arc::new(RwLock::new(None)),
         last_visible_ms: Arc::new(RwLock::new(None)),
         checkpoint: Arc::new(Mutex::new(None)),
+        skill_loader: Arc::new(Mutex::new(None)),
             session: Arc::new(Mutex::new(Session::new(id))),
             inbox: Arc::new(Mutex::new(Inbox::new())),
             llm,
@@ -485,6 +488,42 @@ impl ReactLoopAgent {
             last_injection_ms: None,
             last_reading_ms: None,
         });
+    }
+
+    /// 装配技能加载缝（上游 `tool-skill` 的显式调用面）：`/name` 手势按名取
+    /// 已渲染好的 `<skill_content>` 正文；返回 None = 未知或不可由人调用。
+    pub fn set_skill_loader(
+        &self,
+        loader: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    ) {
+        *self.skill_loader.lock().unwrap() = Some(loader);
+    }
+
+    /// 扫描本步用户消息里的 `/name` 手势，把命中技能的正文追加到消息批尾。
+    fn append_skill_invocations(&self, messages: &mut Vec<Message>) {
+        let loader = { self.skill_loader.lock().unwrap().clone() };
+        let Some(loader) = loader else { return };
+        let mut names: Vec<String> = Vec::new();
+        for message in messages.iter() {
+            // 只有直接用户输入算手势（外部文本无法伪造这个动作）
+            if !matches!(message.source, dsh_llm::MessageSource::User) {
+                continue;
+            }
+            for block in &message.content {
+                if let ContentBlock::Text { text } = block {
+                    for name in dsh_skill::invoked_skill_names(text) {
+                        if !names.iter().any(|n| *n == name) {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        for name in names {
+            if let Some(content) = loader(&name) {
+                messages.push(dsh_skill::invocation_message(&name, content));
+            }
+        }
     }
 
     /// 装配检查点缝（上游 `session-checkpoint-policy`）：请求派生与顶层
@@ -1037,6 +1076,11 @@ impl ReactLoopAgent {
                     ));
                 }
             }
+            // 用户显式技能调用（上游 `skill-invocation`）：用户消息里整词形如
+            // `/name` 且该技能存在、可被人调用时，把 `<skill_content>` 正文作为
+            // 本步的注入上下文追加在**最后**——背景材料在前，模型该照做的在
+            // 最后、离答案最近。未知名与 user-invocable=false 保持普通文本。
+            self.append_skill_invocations(&mut messages);
             *self.last_visible_ms.write().unwrap() = Some(now_ms());
             for m in &messages {
                 self.append_event(SessionEvent::UserMessage(m.clone()));

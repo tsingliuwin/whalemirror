@@ -1,4 +1,4 @@
-//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
+﻿//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
 //!
 //! 布局契约（`packages/client/ui-layout`）：左 sidebar（280px，可折叠成 56px
 //! 图标栏）· 中会话区（≥640px，内容列 748px）· 右 details
@@ -361,6 +361,37 @@ pub(crate) struct AppSettings {
     /// 新会话解析它，运行中会话保持其开始时的预设）。
     #[serde(default)]
     pub(crate) agent_preset: String,
+    /// MCP 服务端清单（settings.yaml `mcp.servers`；上游 mcp-manager 的
+    /// 设置驱动集群的 rustdsh 等价面）。
+    #[serde(default)]
+    pub(crate) mcp: McpSettings,
+}
+
+/// MCP 设置（上游 `mcp-manager`：一组 stdio 服务端 + 启停）。
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct McpSettings {
+    /// 服务端清单（每项一个 stdio 服务）。
+    #[serde(default)]
+    pub(crate) servers: Vec<McpServerConfig>,
+}
+
+/// 一个 MCP stdio 服务端的声明（上游 `mcp-client` config 的子集）。
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct McpServerConfig {
+    /// 命名空间（工具名会变成 `mcp__<name>__<tool>`；`[A-Za-z0-9_-]{1,32}`）。
+    #[serde(default)]
+    pub(crate) name: String,
+    /// 是否启用（默认关：加进来不等于跑起来）。
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// 可执行文件。
+    #[serde(default)]
+    pub(crate) command: String,
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
+    /// 额外环境变量（`KEY=VALUE` 形）。
+    #[serde(default)]
+    pub(crate) env: Vec<String>,
 }
 
 /// web_search 设置卡（上游 web-search-deepseek：开关/API key/base URL/count）。
@@ -401,6 +432,7 @@ impl Default for AppSettings {
             web_search: WebSearchSettings::default(),
             plugins_enabled: Vec::new(),
             agent_preset: dsh_gpui::agent_presets::DEFAULT_PRESET.to_string(),
+            mcp: McpSettings::default(),
         }
     }
 }
@@ -9141,6 +9173,9 @@ fn main() {
     };
 
     let tools = Arc::new(ToolRegistry::new());
+    // MCP 服务端在 agent 造好之后才注册（需要 agent 注入 instructions），
+    // 那时 `tools` 已被移入 agent——先留一个句柄。
+    let tools_for_mcp = Arc::clone(&tools);
     // 会话工作目录（web session.header.cwd）：工具执行基准 + 模型可见上下文，
     // 随工作区/会话切换经 AppView 同步
     let workdir = dsh_tools::Workdir::new();
@@ -9603,6 +9638,80 @@ fn main() {
                 entries.len(),
             )));
         }
+    }
+    // MCP 服务端（上游 mcp-manager 的设置驱动集群的本地子集）：按
+    // settings.yaml `mcp.servers` 拉起启用的 stdio 服务端，initialize 后把
+    // 它们的工具注册成 `mcp__<server>__<tool>`。启动失败只记日志、不影响宿主
+    // （上游 `failOnStartupError` 默认 false）。
+    {
+        let mcp_servers = user_settings.mcp.servers.clone();
+        let registry_mcp = Arc::clone(&tools_for_mcp);
+        let agent_mcp = Arc::clone(&agent);
+        let rt = tokio::runtime::Handle::current();
+        let started: Arc<std::sync::Mutex<Vec<Vec<dsh_llm::Disposer>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started_out = Arc::clone(&started);
+        std::thread::spawn(move || {
+            for server in mcp_servers.iter().filter(|s| s.enabled && !s.command.trim().is_empty()) {
+                let env: Vec<(String, String)> = server
+                    .env
+                    .iter()
+                    .filter_map(|entry| {
+                        let (key, value) = entry.split_once('=')?;
+                        Some((key.trim().to_string(), value.trim().to_string()))
+                    })
+                    .collect();
+                let outcome = rt.block_on(async {
+                    let client = dsh_mcp::spawn_stdio(&server.command, &server.args, &env, None)?;
+                    let init = client
+                        .initialize(
+                            "whalemirror",
+                            "0.1.0",
+                            dsh_mcp::DEFAULT_MAX_INSTRUCTION_BYTES,
+                            std::time::Duration::from_secs(30),
+                        )
+                        .await?;
+                    let tools = if init.has_tools {
+                        client.list_tools(&server.name, std::time::Duration::from_secs(30)).await?
+                    } else {
+                        Vec::new()
+                    };
+                    Ok::<_, String>((Arc::new(client), init, tools))
+                });
+                match outcome {
+                    Ok((client, init, discovered)) => {
+                        let bridge = dsh_mcp::McpServer::new(
+                            server.name.clone(),
+                            Arc::clone(&client),
+                            discovered,
+                            init.instructions.clone(),
+                        );
+                        match bridge.register(&registry_mcp) {
+                            Ok(disposers) => {
+                                let count = disposers.len();
+                                started_out.lock().unwrap().push(disposers);
+                                // 服务端 instructions 作为上下文注入（带归属）
+                                if let Some(message) = init
+                                    .instructions
+                                    .as_deref()
+                                    .and_then(|text| dsh_mcp::instruction_message(&server.name, text))
+                                {
+                                    agent_mcp.append_session_event(SessionEvent::UserMessage(message));
+                                }
+                                eprintln!(
+                                    "mcp: {} connected ({} tools)",
+                                    server.name, count
+                                );
+                            }
+                            Err(error) => eprintln!("mcp: {error}"),
+                        }
+                    }
+                    Err(error) => eprintln!("mcp: server {} failed: {error}", server.name),
+                }
+            }
+            // 保住客户端与 disposer：进程活多久工具就在多久
+            std::mem::forget(started_out);
+        });
     }
     // 用户显式技能调用缝（上游 tool-skill 的 `/name` 手势）：只有
     // user-invocable 的技能能被这样调起，且正文每次重读文件

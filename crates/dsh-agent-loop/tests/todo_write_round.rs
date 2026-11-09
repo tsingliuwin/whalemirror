@@ -1,4 +1,4 @@
-//! 端到端验收：todo_write 整表快照（上游 `todo/tool-todo` 的等价面）。
+﻿//! 端到端验收：todo_write 整表快照（上游 `todo/tool-todo` 的等价面）。
 //!
 //! 1. 工具出现在请求工具面；
 //! 2. 一次调用把整表经 sink 落成会话 `todo/write` 事件（模型看到计数回执）；
@@ -14,7 +14,7 @@ use dsh_llm::{
 };
 use dsh_session::SessionEvent;
 use dsh_system_prompt::SystemPrompt;
-use dsh_tools::{TodoTool, Tool, ToolAdmission, ToolExecutionInput, ToolDefinition, ToolExecutionResult, ToolRegistry};
+use dsh_tools::{TodoTool, Tool, ToolAdmission, ToolRegistry};
 use futures::stream;
 use std::sync::{Arc, Mutex};
 

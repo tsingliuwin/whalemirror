@@ -206,6 +206,19 @@ impl SessionRecorder {
         f.write_all(&frame)
     }
 
+    /// 检查点（上游 `session-checkpoint-policy`）：把已经写入的日志刷到
+    /// 稳定存储。追加路径每次都 write+close（内核页缓存已经收到），这里再
+    /// 补一次 `sync_all` 才能保证「崩溃后不重做/不丢」——request 与顶层工具
+    /// 派发前各一次。
+    pub fn checkpoint(&self, id: &SessionId, cwd: &str) -> io::Result<()> {
+        let file = self.session_file(id, cwd);
+        if !file.exists() {
+            return Ok(());
+        }
+        let f = fs::OpenOptions::new().append(true).open(&file)?;
+        f.sync_all()
+    }
+
     /// 下一个可写 seq：缓存优先；首触或缓存缺失时整档解码初始化。
     fn next_seq(&self, id: &SessionId, file: &Path) -> u64 {
         let mut cache = self.seqs.lock().unwrap();

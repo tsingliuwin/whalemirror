@@ -1,4 +1,4 @@
-//! dsh-agent-loop — the default agent driver.
+﻿//! dsh-agent-loop — the default agent driver.
 //!
 //! Mirrors [`packages/core/agent-loop`](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/core/agent-loop):
 //! the `ReactLoopAgent` state machine that drives one session through turn and
@@ -23,8 +23,7 @@ use dsh_llm::{
     AbortSignal, BlockAssembler, CallId, ContentBlock, FinishReason, GenerateOptions, LlmCallConfig,
     LlmRuntime, Message, MessageId, MessageSource, Role, SessionId, StreamChunk,
 };
-use dsh_session::SessionEntry;
-use dsh_session::{EpochHeader, HeaderReason, Session, SessionEvent, TurnEndReason};
+use dsh_session::{EpochHeader, HeaderReason, Session, SessionEntry, SessionEvent, TurnEndReason};
 use dsh_session_projection::{Disposer, ProjectionDefinition, SessionProjections};
 use dsh_system_prompt::{PromptAssembly, SystemPrompt};
 use dsh_tools::{ToolExecutionInput, ToolExecutionResult, ToolRegistry};
@@ -37,6 +36,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Notify;
 
 pub mod retry;
+pub mod time_context;
 
 /// 一步的边界事实（`step/start` 或 `step/end` 及其 seq）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -215,6 +215,12 @@ pub struct ReactLoopAgent {
     /// 值 = 剪枝后的消息；请求组装与压缩输入都读这一层（日志本体不改）。
     pruned: Arc<RwLock<std::collections::HashMap<u64, Message>>>,
     spill: Arc<RwLock<Option<Arc<dsh_spill::SpillPolicy>>>>,
+    /// 时间上下文（上游 context/time-context）：配置 + 上次注入/读数时刻。
+    time_context: Arc<RwLock<Option<time_context::TimeContextState>>>,
+    /// 最近一条模型可见消息的时刻（step 1 的 elapsed 基线）。
+    last_visible_ms: Arc<RwLock<Option<u64>>>,
+    /// 检查点缝（上游 session-checkpoint-policy）
+    checkpoint: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
     session: Arc<Mutex<Session>>,
     inbox: Arc<Mutex<Inbox>>,
     llm: Arc<LlmRuntime>,
@@ -280,6 +286,9 @@ impl ReactLoopAgent {
             options: Arc::new(RwLock::new(options)),
         spill: Arc::new(RwLock::new(None)),
         pruned: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        time_context: Arc::new(RwLock::new(None)),
+        last_visible_ms: Arc::new(RwLock::new(None)),
+        checkpoint: Arc::new(Mutex::new(None)),
             session: Arc::new(Mutex::new(Session::new(id))),
             inbox: Arc::new(Mutex::new(Inbox::new())),
             llm,
@@ -466,6 +475,73 @@ impl ReactLoopAgent {
     /// 装配工具结果外置策略（上游 spill-policy 的 maxInlineTokens）。
     pub fn set_spill_policy(&self, policy: Option<Arc<dsh_spill::SpillPolicy>>) {
         *self.spill.write().unwrap() = policy;
+    }
+
+    /// 装配时间上下文（上游 context/time-context）：每步进入前按节流注入
+    /// 一条带时区说明的时间读数。`None` = 不注入。
+    pub fn set_time_context(&self, config: Option<time_context::TimeContextConfig>) {
+        *self.time_context.write().unwrap() = config.map(|config| time_context::TimeContextState {
+            config,
+            last_injection_ms: None,
+            last_reading_ms: None,
+        });
+    }
+
+    /// 装配检查点缝（上游 `session-checkpoint-policy`）：请求派生与顶层
+    /// 工具派发之前把已提交的事件刷到稳定存储。`None` = 不检查点。
+    pub fn set_checkpoint_sink(&self, sink: Arc<dyn Fn() + Send + Sync>) {
+        *self.checkpoint.lock().unwrap() = Some(sink);
+    }
+
+    /// 执行一次检查点（失败静默：与上游 fail-closed 不同，rustdsh 的落盘
+    /// 失败已在写路径可见，这里不再阻断轮次）。
+    fn checkpoint_now(&self) {
+        let sink = { self.checkpoint.lock().unwrap().clone() };
+        if let Some(sink) = sink {
+            sink();
+        }
+    }
+
+    /// 本步进入时的时间上下文注入（上游 pre-step 的 `time-context` 面）。
+    ///
+    /// 读数三行 + `snapshot` source 落成持久化的 user-role 上下文消息；
+    /// 节流窗口内的步跳过。基线：step 1 = 最近一条模型可见消息的时刻，
+    /// 之后 = 上次读数（缺失报 `unavailable`）。
+    fn maybe_inject_time_context(&self, turn: u64, step: u64) {
+        let mut state = match self.time_context.write().unwrap().clone() {
+            Some(state) => state,
+            None => return,
+        };
+        let now = now_ms();
+        if !time_context::injection_due(now, state.last_injection_ms, &state.config) {
+            return;
+        }
+        let previous = if step == 1 { *self.last_visible_ms.read().unwrap() } else { state.last_reading_ms };
+        let offset_seconds = local_utc_offset_seconds();
+        let zone = match &state.config.time_zone {
+            Some(zone) => zone.clone(),
+            None => time_context::local_zone_label(offset_seconds),
+        };
+        let reading = time_context::TimeReading {
+            timestamp: time_context::format_timestamp(now as i64 / 1000, offset_seconds, &zone),
+            zone,
+        };
+        let text = time_context::render_reading(turn, step, &reading, previous, now);
+        let message = Message::new(
+            Role::User,
+            vec![ContentBlock::text(text.clone())],
+            MessageSource::Plugin {
+                plugin: "time-context".into(),
+                form: Some("snapshot".into()),
+                summary: Some(text.lines().next().unwrap_or("").to_string()),
+                sections: Some(vec![dsh_llm::ContextSnapshotSection { name: "time-context".into(), text }]),
+            },
+        );
+        state.last_injection_ms = Some(now);
+        state.last_reading_ms = Some(now);
+        *self.time_context.write().unwrap() = Some(state);
+        self.append_event(SessionEvent::UserMessage(message.clone()));
+        self.emit_ui(AgentEvent::ContextMessage { message });
     }
 
     pub fn set_event_sink(&self, sink: impl Fn(SessionEvent) + Send + Sync + 'static) {
@@ -906,6 +982,8 @@ impl ReactLoopAgent {
             let assembly = self.assemble_prompt();
             // 上游 agent.ts 落盘序：step/start → system commits → user 批。
             self.append_event(SessionEvent::StepStart { turn, step, time_ms: None });
+            // 时间上下文（上游 context/time-context 的 entering pre-step 面）
+            self.maybe_inject_time_context(turn, step);
             // v3 system prompt 面节点：rustdsh 的 provider 路线走请求 system
             // 参数（非 in-history），按上游 SystemPromptProjection 归一化语义
             // ——无 head 则 append（空 prompt 也保留 head），变化则精确替换
@@ -959,6 +1037,7 @@ impl ReactLoopAgent {
                     ));
                 }
             }
+            *self.last_visible_ms.write().unwrap() = Some(now_ms());
             for m in &messages {
                 self.append_event(SessionEvent::UserMessage(m.clone()));
                 // 非 user source（认领的注入通知、model-switch 公告）随批
@@ -1206,6 +1285,8 @@ impl ReactLoopAgent {
         tool_calls: &[(CallId, String, String)],
         _signal: &AbortSignal,
     ) -> bool {
+        // 顶层工具派发前检查点（上游：已记录的调用先变耐久，再执行外部副作用）
+        self.checkpoint_now();
         let mut concluded = false;
         for (id, name, arguments) in tool_calls {
             self.emit_ui(AgentEvent::ToolCall {
@@ -1400,5 +1481,50 @@ mod tests {
             ),
             other => panic!("text block expected, got {other:?}"),
         }
+    }
+}
+
+/// 当前 epoch 毫秒。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// 本地 UTC 偏移（秒）。Windows 下按当前时刻取 bias：DST 差异由系统时区
+/// 规则给出，rustdsh 不自行维护时区库。
+fn local_utc_offset_seconds() -> i32 {
+    #[cfg(windows)]
+    {
+        use std::os::raw::c_int;
+        // GetTimeZoneInformation 的 TIME_ZONE_INFORMATION：bias 在前，标准/夏令时
+        // 两段各 8 个 WORD 后跟名称。这里只需要 bias 与夏令时 bias。
+        #[repr(C)]
+        #[derive(Default)]
+        struct TzInfo {
+            bias: c_int,
+            standard_name: [u16; 32],
+            standard_date: [u16; 8],
+            standard_bias: c_int,
+            daylight_name: [u16; 32],
+            daylight_date: [u16; 8],
+            daylight_bias: c_int,
+        }
+        unsafe extern "system" {
+            fn GetTimeZoneInformation(info: *mut TzInfo) -> u32;
+        }
+        let mut info = TzInfo::default();
+        let result = unsafe { GetTimeZoneInformation(&mut info) };
+        // 2 = TIME_ZONE_ID_DAYLIGHT
+        let extra = if result == 2 { info.daylight_bias } else { 0 };
+        // bias 是「本地→UTC」的分钟差，取反才是 UTC→本地
+        -(info.bias + extra) * 60
+    }
+    #[cfg(not(windows))]
+    {
+        // 无 libc 依赖：按进程时区的 GMT 偏移自零点起算不可得，回落到 0（UTC）。
+        // 模型仍能拿到 UTC 时间戳与 Etc/GMT 标签，语义明确不误导。
+        0
     }
 }

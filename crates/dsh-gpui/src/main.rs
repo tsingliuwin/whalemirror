@@ -1,4 +1,4 @@
-﻿//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
+//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
 //!
 //! 布局契约（`packages/client/ui-layout`）：左 sidebar（280px，可折叠成 56px
 //! 图标栏）· 中会话区（≥640px，内容列 748px）· 右 details
@@ -9517,17 +9517,32 @@ fn main() {
     if let Ok(policy) = dsh_spill::SpillPolicy::new(12_500) {
         agent.set_spill_policy(Some(Arc::new(policy)));
     }
+    // 时间上下文（上游 standard/ptc/cordis 预设的 time-context 行；minimal 不挂）
+    agent.set_time_context(Some(dsh_agent_loop::time_context::TimeContextConfig::default()));
 
     // 持久化：每个追加的会话事件写入 web 布局（cwd 由 AppView 维护）
     let recorder_sink = Arc::clone(&recorder);
     let agent_sink = Arc::clone(&agent);
     let cwd_slot = Arc::new(std::sync::Mutex::new(initial_cwd.clone()));
     let cwd_slot_for_view = Arc::clone(&cwd_slot);
+    let cwd_slot_sink = Arc::clone(&cwd_slot);
     agent.set_event_sink(move |event| {
         let id = agent_sink.session().lock().unwrap().id.clone();
-        let cwd = cwd_slot.lock().unwrap().clone();
+        let cwd = cwd_slot_sink.lock().unwrap().clone();
         let _ = recorder_sink.append(&id, &cwd, &event);
     });
+    // 检查点缝（上游 session-checkpoint-policy）：请求派生与顶层工具派发前
+    // 把已提交的事件刷到稳定存储
+    {
+        let agent_ckpt = Arc::clone(&agent);
+        let recorder_ckpt = Arc::clone(&recorder);
+        let cwd_ckpt = Arc::clone(&cwd_slot);
+        agent.set_checkpoint_sink(Arc::new(move || {
+            let id = agent_ckpt.session().lock().unwrap().id.clone();
+            let cwd = cwd_ckpt.lock().unwrap().clone();
+            let _ = recorder_ckpt.checkpoint(&id, &cwd);
+        }));
+    }
 
     // 子会话耐久化 + 父目录 catalog（backlog #4 数据面）：子会话落同一
     // sessions 根（cwd 取当前会话工作区；标题=description，侧栏可回看），

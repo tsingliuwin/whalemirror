@@ -3178,8 +3178,10 @@ Role::Notice => {
                 idx: *ci,
                 x0: x,
                 x1: x + w,
+                // 上游 `.span { top: lane*14 }` 三泳道：输入（user+context）/
+                // 模型（message）/ 工具
                 lane: match kind {
-                    TrajKind::User => 0,
+                    TrajKind::User | TrajKind::Context => 0,
                     TrajKind::Message => 1,
                     TrajKind::Tool => 2,
                 },
@@ -3573,8 +3575,11 @@ Role::Notice => {
                         // accent 即该档；曾误用语义绿），message = 品牌×红混、
                         // tool = warn-label；间隙 min(宽×8%,1px) 两侧内缩
                         let (left, w) = um::traj_span_box(sp.x0, sp.x1);
+                        // context = `color-mix(success 68%, label-2)`，rustdsh
+                        // 既有 token `tag_context_fg` 即该混色（不透明度同 user）
                         let (color, opacity) = match sp.kind {
                             TrajKind::User => (t.accent, um::TRAJ_TL_USER_OPACITY),
+                            TrajKind::Context => (t.tag_context_fg, um::TRAJ_TL_USER_OPACITY),
                             TrajKind::Message => (t.tag_message_fg, 1.0),
                             TrajKind::Tool => (t.warn_label, 1.0),
                         };
@@ -3740,7 +3745,34 @@ Role::Notice => {
                 .collect::<Vec<_>>()
                 .join("\n\n");
             match entry.role {
-                Role::User | Role::Context | Role::Notice => {
+                // 上下文注入独立成 context 类目（上游 TrajectoryCellKind.context：
+                // 标签「上下文」、success-68% mix 色、时间条 context 泳道混色）；
+                // 旧实现与用户提问共用 User 类目，注入行被显示成「用户」。
+                Role::Context => {
+                    let info = entry.context.clone().unwrap_or_default();
+                    let text = dsh_gpui::traj_context_text(
+                        &info.title,
+                        info.label.as_deref(),
+                        &joined,
+                    );
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    cells.push(TrajCell {
+                        turn: entry.turn,
+                        kind: TrajKind::Context,
+                        index: cells.len() + 1,
+                        text,
+                        dim: false,
+                        step: None,
+                        detail_text: raw,
+                        reasoning: None,
+                        metrics: None,
+                        time_ms: None,
+                        tool: None,
+                    });
+                }
+                Role::User | Role::Notice => {
                     if joined.trim().is_empty() {
                         continue;
                     }
@@ -3877,11 +3909,16 @@ Role::Notice => {
         selected_msg: Option<usize>,
     ) -> Stateful<Div> {
         let t = theme::t();
-        let (tag_label, tag_fg, tag_bg) = match c.kind {
-            TrajKind::User => ("用户", t.green, t.success_tertiary),
-            TrajKind::Message => ("消息", t.tag_message_fg, t.tag_message_bg),
-            TrajKind::Tool => ("工具", t.warn_label, t.warn_tertiary),
+        // 上游 TrajectoryCell `.tag{#User,#Context,#Message,#Tool}`：context 用
+        // success-68% mix 前景 + success-tertiary 底（与用户同为绿色系但更柔）
+        let (tag_fg, tag_bg) = match c.kind {
+            TrajKind::User => (t.green, t.success_tertiary),
+            TrajKind::Context => (t.tag_context_fg, t.success_tertiary),
+            TrajKind::Message => (t.tag_message_fg, t.tag_message_bg),
+            TrajKind::Tool => (t.warn_label, t.warn_tertiary),
         };
+        // 文案走统一 helper（含 context 独立类目；旧实现把注入并入「用户」）
+        let tag_label = dsh_gpui::traj_tag(c.kind);
         let is_sel = match (&c.tool, selected) {
             (Some(tool), Some(sel)) => sel.name == tool.name && sel.arguments == tool.arguments,
             _ => false,

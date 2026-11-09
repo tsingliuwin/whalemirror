@@ -76,9 +76,40 @@ pub struct TrajCell {
     pub tool: Option<ToolBlock>,
 }
 
+/// 台账 context 行摘要：注入正文首行（单行化）；正文为空时回退
+/// `标题 · 标签`（标题/标签皆空给空串）。上游 context cell 的文本列同样
+/// 是记录内容预览，标签列由 `traj_tag` 给「上下文」。
+pub fn traj_context_text(title: &str, label: Option<&str>, body: &str) -> String {
+    let line = body.split(['\r', '\n']).next().unwrap_or("").trim();
+    if !line.is_empty() {
+        return line.to_string();
+    }
+    let label = label.map(str::trim).filter(|s| !s.is_empty());
+    match (title.trim(), label) {
+        ("", None) => String::new(),
+        (t, Some(l)) if !t.is_empty() => format!("{t} · {l}"),
+        (_, Some(l)) => l.to_string(),
+        (t, None) => t.to_string(),
+    }
+}
+
+/// 台账 cell 类目标签（上游 TrajectoryCell `.tag`：用户/上下文/消息/工具）。
+/// context 是独立类目——不得与用户提问合并（旧实现即在此处合并）。
+pub fn traj_tag(kind: TrajKind) -> &'static str {
+    match kind {
+        TrajKind::User => "用户",
+        TrajKind::Context => "上下文",
+        TrajKind::Message => "消息",
+        TrajKind::Tool => "工具",
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum TrajKind {
     User,
+    /// 上下文注入（上游 TrajectoryCellKind.context：独立类目与标签、
+    /// success-68% mix 色、时间条 context 泳道）。
+    Context,
     Message,
     Tool,
 }
@@ -1972,6 +2003,40 @@ mod read_page_root_tests {
         assert!(matches!(r, Err(PreviewErrorKind::OutsideWorkspace)), "{r:?}");
         let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod traj_kind_tests {
+    use super::*;
+
+    #[test]
+    fn traj_context_cells_are_their_own_kind() {
+        // 上游 TrajectoryCellKind.context：独立标签「上下文」，不与用户合并
+        assert_eq!(traj_tag(TrajKind::User), "用户");
+        assert_eq!(traj_tag(TrajKind::Context), "上下文");
+        assert_eq!(traj_tag(TrajKind::Message), "消息");
+        assert_eq!(traj_tag(TrajKind::Tool), "工具");
+        assert_ne!(traj_tag(TrajKind::Context), traj_tag(TrajKind::User));
+    }
+
+    #[test]
+    fn traj_context_text_prefers_body_first_line() {
+        // 正文首行优先（记录内容预览），多行只取首行
+        assert_eq!(
+            traj_context_text("上下文注入", Some("plan-mode"), "The user switched.
+Second line"),
+            "The user switched."
+        );
+        // 正文空 → 「标题 · 标签」
+        assert_eq!(
+            traj_context_text("上下文注入", Some("time-context"), "  "),
+            "上下文注入 · time-context"
+        );
+        // 无标签 → 仅标题
+        assert_eq!(traj_context_text("上下文注入", None, ""), "上下文注入");
+        // 标题与标签皆空 → 空串（调用方跳过该行）
+        assert_eq!(traj_context_text("", None, ""), "");
     }
 }
 

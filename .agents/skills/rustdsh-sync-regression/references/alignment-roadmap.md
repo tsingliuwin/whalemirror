@@ -282,7 +282,7 @@ A4 ──→ A6 的 skill/team UI
 | A3.2 | `approval` 全链 + `sandbox` 策略/升级 + reminder/timeout | A0-a | 1-2 周 | ask 档真正拦截；一次批准可升级执行 |
 | A4.1 | `skill`：发现 + `tool-skill` + `/name` + `ui-skill` | 无 | 3-5 天 | 放一个 SKILL.md 即被按需加载并执行 |
 | A4.2 | `mcp`：客户端 + manager + resources + 设置页集群 | 设置页扩展 | 1-2 周 | 接本地 stdio server，其工具出现在工具面 |
-| A4.3 | `lsp`：stdio + `tool-lsp` + 设置 | B3 | 1-2 周 | 跳定义 / 引用 / hover |
+| A4.3 | `lsp`：stdio + `tool-lsp` + 设置 | B3 | 1-2 周 | 跳定义 / 引用 / hover；✅ **纯面已落 11-09**（backlog #114）：`dsh-lsp` 缝（四操作闭集、`final_extension`、全有或全无注册、错误码文案）、帧协议（Content-Length、64KiB 头上限、五类失败文案）、渲染（一基↔零基换算、`path:line:character`、两类截断标记、`file:` URI 相对化、空结果文案、present 卡）；30 条测试。**剩批②**：stdio client + provider + `lsp` 工具 + `settings.yaml servers` 表与宿主接线 |
 | A4.4 | `worktree` + `session-query`（工具 + 侧栏检索） | 无 | 4-6 天 | 建 worktree 进入；跨会话关键词检索并跳转 |
 | A5.1 | `ask-user` 通用提问 + 已回答批次气泡 + 提问卡 | A0-a | 3-5 天 | 提问 → 选择 → 答案回模型；多轮不串话 |
 | A5.2 | feedback / quotes / 命令目录 / 快捷键 / 右键 / 参数页 / `@`候选 / 文件另存 | 无 | 1-2 周 | 逐项 UI 判据 |

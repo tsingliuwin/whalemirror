@@ -1293,6 +1293,7 @@ dependencies = [
  "dsh-session",
  "dsh-session-projection",
  "dsh-shell",
+ "dsh-spill",
  "dsh-system-prompt",
  "dsh-tools",
  "dsh-web",
@@ -1352,6 +1353,7 @@ dependencies = [
  "dsh-session",
  "dsh-session-projection",
  "dsh-shell",
+ "dsh-spill",
  "dsh-subagent",
  "dsh-system-prompt",
  "dsh-tools",
@@ -1484,6 +1486,17 @@ dependencies = [
  "encoding_rs",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "dsh-spill"
+version = "0.1.0"
+dependencies = [
+ "dsh-llm",
+ "dsh-tools",
+ "serde_json",
+ "sha2 0.10.9",
+ "uuid",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-﻿//! dsh-agent-loop — the default agent driver.
+//! dsh-agent-loop — the default agent driver.
 //!
 //! Mirrors [`packages/core/agent-loop`](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/core/agent-loop):
 //! the `ReactLoopAgent` state machine that drives one session through turn and
@@ -210,6 +210,11 @@ fn uuid_simple() -> String {
 
 pub struct ReactLoopAgent {
     options: Arc<RwLock<AgentOptions>>,
+    /// 工具结果外置策略（上游 spill-policy；宿主装配，None = 不外置）
+    /// 历史工具结果剪枝的内存面（上游 compaction/prune 的等价）：键 = 事件 seq，
+    /// 值 = 剪枝后的消息；请求组装与压缩输入都读这一层（日志本体不改）。
+    pruned: Arc<RwLock<std::collections::HashMap<u64, Message>>>,
+    spill: Arc<RwLock<Option<Arc<dsh_spill::SpillPolicy>>>>,
     session: Arc<Mutex<Session>>,
     inbox: Arc<Mutex<Inbox>>,
     llm: Arc<LlmRuntime>,
@@ -273,6 +278,8 @@ impl ReactLoopAgent {
         let turn_boundary_registration = projections.register(turn_boundary_projection_definition());
         Arc::new(Self {
             options: Arc::new(RwLock::new(options)),
+        spill: Arc::new(RwLock::new(None)),
+        pruned: Arc::new(RwLock::new(std::collections::HashMap::new())),
             session: Arc::new(Mutex::new(Session::new(id))),
             inbox: Arc::new(Mutex::new(Inbox::new())),
             llm,
@@ -456,6 +463,11 @@ impl ReactLoopAgent {
 
     /// Register a side-channel observer for every appended session event
     /// (e.g. JSONL persistence). Called with the session lock released.
+    /// 装配工具结果外置策略（上游 spill-policy 的 maxInlineTokens）。
+    pub fn set_spill_policy(&self, policy: Option<Arc<dsh_spill::SpillPolicy>>) {
+        *self.spill.write().unwrap() = policy;
+    }
+
     pub fn set_event_sink(&self, sink: impl Fn(SessionEvent) + Send + Sync + 'static) {
         *self.on_event.lock().unwrap() = Some(Box::new(sink));
     }
@@ -717,7 +729,49 @@ impl ReactLoopAgent {
         if dsh_compaction::estimate_tokens(&msgs) <= config.threshold_tokens {
             return;
         }
+        // 触发确认后才剪枝（上游顺序）：把超阈值的历史工具结果换成
+        // 头 + 标记 + 尾，写进内存面；压缩输入随之变小。
+        let pruned_any = self.prune_tool_results(&pairs);
+        let pairs = if pruned_any {
+            let overlay = self.pruned.read().unwrap().clone();
+            pairs
+                .into_iter()
+                .map(|(seq, m)| (seq, overlay.get(&seq).cloned().unwrap_or(m)))
+                .collect::<Vec<_>>()
+        } else {
+            pairs
+        };
         self.compact_pairs(assembly, &pairs).await;
+    }
+
+    /// 剪枝内存面：逐条 `tool/result` 按码点预算换掉过长的中段。
+    /// 返回是否发生了替换（上游 `pruneSession` 的模型可见等价）。
+    fn prune_tool_results(&self, pairs: &[(u64, Message)]) -> bool {
+        let config = dsh_spill::prune::PruneConfig::default();
+        let mut changed = false;
+        let mut overlay = self.pruned.write().unwrap();
+        for (seq, message) in pairs {
+            let has_result = message
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+            if !has_result {
+                continue;
+            }
+            let mut next = message.clone();
+            for block in next.content.iter_mut() {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    if let Ok(Some(pruned)) = dsh_spill::prune::prune_content(content, config) {
+                        *content = pruned;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                overlay.insert(*seq, next);
+            }
+        }
+        changed
     }
 
     /// 影子区压缩核心（自动阈值路径与手动 /compact 共用）：边界选择 →
@@ -1184,6 +1238,15 @@ impl ReactLoopAgent {
             };
             concluded |= result.concludes_turn;
 
+            // 工具结果外置（上游 spill-policy 的 post-execute 面）：超预算的
+            // 文本/图片结果存到 spill 后端、模型只看到头尾预览 + 定位符；
+            // 存储失败/通知放不下时保留原文（策略永不吞结果）。
+            let mut result = result;
+            if let Some(policy) = self.spill.read().unwrap().clone() {
+                let session_id = self.session.lock().unwrap().id.as_str().to_string();
+                policy.apply(&session_id, name, id.as_str(), &mut result);
+            }
+
             let msg = Message::tool_result(id.clone(), result.content.clone(), result.is_error);
             // 工具的 UI 元数据缝（上游 output.presentationMeta 投影等价）随
             // tool/result 落盘，历史回放的 diff 卡等从这里恢复
@@ -1233,6 +1296,27 @@ impl ReactLoopAgent {
         let (boundary, session_id) = {
             let s = self.session.lock().unwrap();
             (s.derive_messages(), s.id.clone())
+        };
+        // 剪枝内存面叠加（上游 compaction/prune 的模型可见等价：日志保留
+        // 原文，请求看到的是剪枝后的结果）——按 seq 对齐后替换。
+        let boundary = {
+            let overlay = self.pruned.read().unwrap();
+            if overlay.is_empty() {
+                boundary
+            } else {
+                let seqs = {
+                    let s = self.session.lock().unwrap();
+                    s.derive_messages_with_seqs()
+                        .into_iter()
+                        .map(|(seq, _)| seq)
+                        .collect::<Vec<_>>()
+                };
+                boundary
+                    .into_iter()
+                    .zip(seqs)
+                    .map(|(message, seq)| overlay.get(&seq).cloned().unwrap_or(message))
+                    .collect()
+            }
         };
         // 请求组装：FileBlock → 确定性 handle 文本（上游
         // projectFilesToText 在所有 provider 路由前无条件执行——provider

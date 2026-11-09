@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "dsh-agent-loop"
 version.workspace = true
 edition.workspace = true
@@ -10,6 +10,7 @@ dsh-cordis = { path = "../cordis" }
 dsh-llm = { path = "../dsh-llm" }
 dsh-session = { path = "../dsh-session" }
 dsh-tools = { path = "../dsh-tools" }
+dsh-spill = { path = "../dsh-spill" }
 dsh-system-prompt = { path = "../dsh-system-prompt" }
 dsh-agent = { path = "../dsh-agent" }
 dsh-compaction = { path = "../dsh-compaction" }

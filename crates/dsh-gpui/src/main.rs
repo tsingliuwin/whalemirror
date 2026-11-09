@@ -1,4 +1,4 @@
-//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
+﻿//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
 //!
 //! 布局契约（`packages/client/ui-layout`）：左 sidebar（280px，可折叠成 56px
 //! 图标栏）· 中会话区（≥640px，内容列 748px）· 右 details
@@ -9513,6 +9513,10 @@ fn main() {
     recorder.set_default_agent_preset(&user_settings.agent_preset);
     agent.set_session(initial_session);
     let _ = retry_agent_slot.set(Arc::clone(&agent));
+    // 工具结果外置（上游 web-app 组合里的 spill-policy：maxInlineTokens 12500）
+    if let Ok(policy) = dsh_spill::SpillPolicy::new(12_500) {
+        agent.set_spill_policy(Some(Arc::new(policy)));
+    }
 
     // 持久化：每个追加的会话事件写入 web 布局（cwd 由 AppView 维护）
     let recorder_sink = Arc::clone(&recorder);

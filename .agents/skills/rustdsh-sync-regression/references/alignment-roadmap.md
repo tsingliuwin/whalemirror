@@ -276,7 +276,7 @@ A4 ──→ A6 的 skill/team UI
 | A1.3 | `goal`：投影 + 工具 + `/goal` + round driver + turn-trigger 行 | A1.1 | 5-7 天 | 给一个跨 3 轮的目标，自动推进到完成 |
 | A1.4 | `schedule`：任务存储 + 到期投递 + 侧栏自动化页 + 工具 | A1.3 的 follow-up 缝 | 5-7 天 | 每分钟任务到点在自己的会话收到 follow-up |
 | A1.5 | `team`：任务板 + `tool-agent-team` + `ui-agent-team` | B1 / A1.2 | 1-2 周 | 两个子代理共享任务板、不重复劳动 |
-| A2.1 | `spill` + `tool-result-pruner` | 无 | 2-3 天 | 超阈值落盘 + 按 locator 取回；长会话 token 曲线下降 |
+| A2.1 | `spill` + `tool-result-pruner` | 无 | 2-3 天 | ✅ **已落 11-09**（backlog #108）：`dsh-spill` crate（本机后端/保留策略/剪枝）+ 宿主 `maxInlineTokens=12500` + 压缩触发后先剪枝；剩 shadow 价事件与 spill 清理 |
 | A2.2 | `checkpoint` + `time-context` + `token-meter` | 无 | 3-4 天 | 请求前检查点可回退；时间注入；计量口径对齐 |
 | A3.1 | `fs-observation-policy` + `fs-patch`(apply_patch) | 无 | 3-4 天 | 未读直接 edit 被拒；整补丁预检与守卫 |
 | A3.2 | `approval` 全链 + `sandbox` 策略/升级 + reminder/timeout | A0-a | 1-2 周 | ask 档真正拦截；一次批准可升级执行 |

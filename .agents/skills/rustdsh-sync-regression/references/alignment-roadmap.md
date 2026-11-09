@@ -278,7 +278,7 @@ A4 ──→ A6 的 skill/team UI
 | A1.5 | `team`：任务板 + `tool-agent-team` + `ui-agent-team` | B1 / A1.2 | 1-2 周 | 两个子代理共享任务板、不重复劳动 |
 | A2.1 | `spill` + `tool-result-pruner` | 无 | 2-3 天 | ✅ **已落 11-09**（backlog #108）：`dsh-spill` crate（本机后端/保留策略/剪枝）+ 宿主 `maxInlineTokens=12500` + 压缩触发后先剪枝；剩 shadow 价事件与 spill 清理 |
 | A2.2 | `checkpoint` + `time-context` + `token-meter` | 无 | 3-4 天 | ✅ **前两件已落 11-09**（backlog #109）：时间注入 + `sync_all` 检查点；剩 token-meter 口径（沿用 chars/4，见 #110 待登记） |
-| A3.1 | `fs-observation-policy` + `fs-patch`(apply_patch) | 无 | 3-4 天 | 未读直接 edit 被拒；整补丁预检与守卫 |
+| A3.1 | `fs-observation-policy` + `fs-patch`(apply_patch) | 无 | 3-4 天 | ✅ **观察策略已落 11-09**（backlog #110）：改前必读门 + 版本 CAS（默认关闭，同官方发货形态）；`apply_patch` 待做 |
 | A3.2 | `approval` 全链 + `sandbox` 策略/升级 + reminder/timeout | A0-a | 1-2 周 | ask 档真正拦截；一次批准可升级执行 |
 | A4.1 | `skill`：发现 + `tool-skill` + `/name` + `ui-skill` | 无 | 3-5 天 | 放一个 SKILL.md 即被按需加载并执行 |
 | A4.2 | `mcp`：客户端 + manager + resources + 设置页集群 | 设置页扩展 | 1-2 周 | 接本地 stdio server，其工具出现在工具面 |

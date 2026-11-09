@@ -1427,6 +1427,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dsh-llm",
+ "dsh-subprocess",
  "dsh-tools",
  "serde",
  "serde_json",
@@ -1498,6 +1499,7 @@ dependencies = [
  "codepage",
  "dsh-jobs",
  "dsh-llm",
+ "dsh-subprocess",
  "dsh-tools",
  "encoding_rs",
  "serde_json",
@@ -1543,6 +1545,13 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "dsh-subprocess"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

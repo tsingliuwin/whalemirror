@@ -8,6 +8,7 @@ description.workspace = true
 [dependencies]
 dsh-tools = { path = "../dsh-tools" }
 dsh-llm = { path = "../dsh-llm" }
+dsh-subprocess = { path = "../dsh-subprocess" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

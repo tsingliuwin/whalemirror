@@ -1,0 +1,12 @@
+[package]
+name = "dsh-subprocess"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util"] }

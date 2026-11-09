@@ -1,4 +1,4 @@
-﻿//! dsh-mcp — MCP（Model Context Protocol）客户端的 rustdsh 实现。
+//! dsh-mcp — MCP（Model Context Protocol）客户端的 rustdsh 实现。
 //!
 //! 上游用官方 `@modelcontextprotocol/client` SDK；rustdsh 没有 JS 运行时，
 //! 这里直接实现 **stdio 传输 + JSON-RPC 2.0**（MCP stdio 的帧格式是
@@ -203,6 +203,12 @@ pub struct McpClient {
     /// 后台读循环句柄（drop 即中止）。
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     closed: Arc<AtomicU64>,
+    /// stdio 子进程（仅 `spawn_stdio` 构造时有）。
+    ///
+    /// 此前用 `std::mem::forget(child)` 保住句柄，等于把「drop 时 kill」的
+    /// 保证也一起丢弃——服务端进程永不回收。挂在客户端上才是对的：
+    /// `kill_on_drop` 随客户端 drop 生效。
+    _process: Option<dsh_subprocess::ManagedProcess>,
 }
 
 impl McpClient {
@@ -265,7 +271,14 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             reader_task: Mutex::new(Some(task)),
             closed,
+            _process: None,
         }
+    }
+
+    /// 把 stdio 子进程挂到客户端上（drop 客户端即回收进程）。
+    pub fn with_process(mut self, process: dsh_subprocess::ManagedProcess) -> Self {
+        self._process = Some(process);
+        self
     }
 
     /// 连接是否已关闭（读循环退出）。
@@ -468,8 +481,8 @@ impl Drop for McpClient {
 
 /// 拉起一个 stdio MCP 服务端子进程。
 ///
-/// `env` 是**额外**环境变量；其余继承宿主环境（上游会对继承面做凭据清洗，
-/// 见 backlog 偏差登记）。
+/// `env` 是**额外**环境变量；其余继承宿主环境——但经 [`dsh_subprocess`] 的
+/// seam 清洗（凭据形状的名字与 `DSH_*` 不外泄），与其它子进程同一套规则。
 /// 测试辅助：拉起一个 stdio 服务端子进程（arg 列表形式，便于 fixture 脚本）。
 pub fn spawn_stdio(
     command: &str,
@@ -477,33 +490,20 @@ pub fn spawn_stdio(
     env: &[(String, String)],
     cwd: Option<&std::path::Path>,
 ) -> Result<McpClient, String> {
-    use tokio::process::Command;
-    let mut cmd = Command::new(command);
-    cmd.args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
-    if let Some(cwd) = cwd {
-        cmd.current_dir(cwd);
-    }
-    #[cfg(windows)]
-    {
-        // GUI 宿主无控制台可继承：不设此标志每个 MCP 服务端都会弹黑窗
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let mut child = cmd.spawn().map_err(|e| format!("failed to spawn MCP server: {e}"))?;
-    let stdout = child.stdout.take().ok_or("MCP server stdout unavailable")?;
-    let stdin = child.stdin.take().ok_or("MCP server stdin unavailable")?;
-    // 子进程随客户端一起活；这里把 child 挂到读循环的 drop 上
-    let client = McpClient::new(stdout, stdin);
-    // 保住 child：drop client 时 kill_on_drop 生效
-    std::mem::forget(child);
-    Ok(client)
+    let mut argv = vec![command.to_string()];
+    argv.extend(args.iter().cloned());
+    let mut spec = dsh_subprocess::SpawnSpec::new(argv);
+    spec.cwd = cwd.map(std::path::Path::to_path_buf);
+    spec.stdin = dsh_subprocess::Stdio::Pipe;
+    spec.stdout = dsh_subprocess::Stdio::Pipe;
+    // 服务端常往 stderr 打日志：给 null 而不是「给管道再丢掉读端」（那会让
+    // 写 stderr 的服务端吃 EPIPE）
+    spec.stderr = dsh_subprocess::Stdio::Ignore;
+    spec.env = env.to_vec();
+    let (managed, stdout, _stderr, stdin) = dsh_subprocess::spawn_piped(&spec)?;
+    let stdout = stdout.ok_or("MCP server stdout unavailable")?;
+    let stdin = stdin.ok_or("MCP server stdin unavailable")?;
+    Ok(McpClient::new(stdout, stdin).with_process(managed))
 }
 
 /// 测试/联调辅助：`spawn_stdio(..., &[], None)` 的简写。

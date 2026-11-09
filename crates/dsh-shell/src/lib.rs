@@ -1,4 +1,4 @@
-﻿//! dsh-shell — a shell-command tool.
+//! dsh-shell — a shell-command tool.
 //!
 //! One `shell` tool that runs a command line (through `cmd /C` on Windows,
 //! `sh -c` elsewhere) and returns combined stdout/stderr, with a foreground
@@ -8,10 +8,15 @@
 //!
 //! PTY 会话：参考实现同样推迟（bash-local 的 XXX 注记——持久 cwd 与 PTY
 //! 会话留待工作流需要时再做），这里保持一致。
+//!
+//! 子进程一律经 [`dsh_subprocess`] 的统一缝拉起（环境清洗、可执行文件显式
+//! 解析、输出有界收集、终止语义），本 crate 只保留**产品策略**：Windows 上
+//! 优先 Git Bash，以及把退出状态渲染成 seam 约定的标记行。
 
 use std::time::Duration;
 
 use async_trait::async_trait;
+use dsh_subprocess::{ManagedProcess, SpawnSpec, Stdio as SpawnStdio, spawn, spawn_piped};
 use dsh_tools::{Tool, ToolDefinition, ToolExecutionInput, ToolExecutionResult};
 use serde_json::json;
 
@@ -19,6 +24,11 @@ use serde_json::json;
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// 每调用覆盖的上限。
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
+/// 前台两条流各自的有界上限：保留尾部这么多字节，超出部分淘汰并如实告知。
+///
+/// 上游 subprocess seam 同样有界；此前用 `read_to_end` 无界收集，`yes` 之类
+/// 命令能直接把内存吃满。
+pub const FOREGROUND_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 
 pub struct ShellTool {
     default_timeout_ms: u64,
@@ -178,98 +188,66 @@ fn start_background_job(
             tool_call_id: None,
             output_limit_bytes: None,
             run: Box::new(move |writer: dsh_jobs::JobWriter| {
-                let mut cmd = shell_command(&command);
-                cmd.kill_on_drop(true)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .current_dir(&cwd);
-                #[cfg(windows)]
-                {
-                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                    cmd.creation_flags(CREATE_NO_WINDOW);
-                }
-                let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-                let stdout = child.stdout.take();
-                let stderr = child.stderr.take();
-                let child = Arc::new(Mutex::new(Some(child)));
-                let cancel_child = Arc::clone(&child);
+                let mut spec = shell_spec(&command);
+                spec.cwd = Some(cwd.clone());
+                spec.stdin = SpawnStdio::Ignore;
+                // Pipe 而非 Collect：后台作业要把输出**增量**泵进 JobWriter
+                // （拉取式流可见性），批量收集会让 job_output 长时间空白。
+                let (managed, stdout, stderr, _stdin) = spawn_piped(&spec)?;
+                let managed: Arc<Mutex<Option<ManagedProcess>>> =
+                    Arc::new(Mutex::new(Some(managed)));
+                let cancel_managed = Arc::clone(&managed);
                 let cancel: dsh_jobs::CancelHook = Arc::new(move |_reason: Option<String>| {
-                    if let Some(mut proc) = cancel_child.lock().unwrap().take() {
-                        let _ = proc.start_kill();
+                    // 同步钩子只投递终止信号；回收在泵任务的 wait 侧完成
+                    if let Ok(mut slot) = cancel_managed.lock() {
+                        if let Some(process) = slot.as_mut() {
+                            let _ = process.start_kill();
+                        }
                     }
                 });
                 // 泵 + 等退出都在后台任务里跑（registry 已先提交记录）
                 tokio::spawn(async move {
-                    use tokio::io::AsyncReadExt;
-                    let run_out = async {
-                        let mut buf = Vec::new();
-                        if let Some(mut s) = stdout {
-                            let mut piece = vec![0u8; 4096];
-                            loop {
-                                match s.read(&mut piece).await {
-                                    Ok(0) | Err(_) => break,
-                                    Ok(n) => {
-                                        let text = decode_output(&piece[..n]);
-                                        writer.append(&text, Some(dsh_jobs::JobChannel::Stdout));
-                                        buf.extend_from_slice(&piece[..n]);
-                                    }
-                                }
+                    /// 把一条流逐块泵进输出环（后台作业的流式可见性全靠它）。
+                    async fn pump_into<R>(
+                        stream: Option<R>,
+                        writer: &dsh_jobs::JobWriter,
+                        channel: dsh_jobs::JobChannel,
+                    ) where
+                        R: tokio::io::AsyncRead + Unpin,
+                    {
+                        use tokio::io::AsyncReadExt;
+                        let Some(mut stream) = stream else { return };
+                        let mut piece = vec![0u8; 4096];
+                        loop {
+                            match stream.read(&mut piece).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => writer.append(&decode_output(&piece[..n]), Some(channel)),
                             }
                         }
-                        buf
-                    };
-                    let run_err = async {
-                        let mut buf = Vec::new();
-                        if let Some(mut s) = stderr {
-                            let mut piece = vec![0u8; 4096];
-                            loop {
-                                match s.read(&mut piece).await {
-                                    Ok(0) | Err(_) => break,
-                                    Ok(n) => {
-                                        let text = decode_output(&piece[..n]);
-                                        writer.append(&text, Some(dsh_jobs::JobChannel::Stderr));
-                                        buf.extend_from_slice(&piece[..n]);
-                                    }
-                                }
-                            }
+                    }
+                    let run_out = pump_into(stdout, &writer, dsh_jobs::JobChannel::Stdout);
+                    let run_err = pump_into(stderr, &writer, dsh_jobs::JobChannel::Stderr);
+                    tokio::join!(run_out, run_err);
+                    // 先把受管进程从共享槽里取出来（不在 await 点持锁）
+                    let taken = { managed.lock().unwrap().take() };
+                    let (code, signal) = match taken {
+                        Some(mut process) => {
+                            let code = process.wait_for_exit().await.ok().flatten();
+                            (code, process.signal.clone())
                         }
-                        buf
+                        None => (None, None),
                     };
-                    let (_out, _err) = tokio::join!(run_out, run_err);
-                    // 先把子进程从共享槽里取出来（不在 await 点持锁）
-                    let taken = { child.lock().unwrap().take() };
-                    let status = match taken {
-                        Some(mut proc) => proc.wait().await.ok(),
-                        None => None,
-                    };
-                    let outcome = match status {
-                        Some(status) => {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::process::ExitStatusExt;
-                                if let Some(sig) = status.signal() {
-                                    dsh_jobs::JobOutcome {
-                                        status: dsh_jobs::JobStatus::Killed,
-                                        detail: Some(format!("signal: {sig}")),
-                                        result: None,
-                                    }
-                                } else {
-                                    dsh_jobs::JobOutcome::completed_with(format!(
-                                        "exit code: {}",
-                                        status.code().unwrap_or(0)
-                                    ))
-                                }
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                dsh_jobs::JobOutcome::completed_with(format!(
-                                    "exit code: {}",
-                                    status.code().unwrap_or(0)
-                                ))
-                            }
+                    // 上游 killed 语义：信号终止 / 拿不到退出状态都算 killed
+                    let outcome = match (code, signal) {
+                        (_, Some(sig)) => dsh_jobs::JobOutcome {
+                            status: dsh_jobs::JobStatus::Killed,
+                            detail: Some(format!("signal: {sig}")),
+                            result: None,
+                        },
+                        (Some(code), None) => {
+                            dsh_jobs::JobOutcome::completed_with(format!("exit code: {code}"))
                         }
-                        // 被 kill 的进程在这里拿不到退出状态：按上游 killed 语义
-                        None => dsh_jobs::JobOutcome {
+                        (None, None) => dsh_jobs::JobOutcome {
                             status: dsh_jobs::JobStatus::Killed,
                             detail: Some("killed before exit".into()),
                             result: None,
@@ -286,30 +264,18 @@ fn start_background_job(
     Ok(id)
 }
 
-/// 构造一条命令（与前台 `run` 同款 shell 选择与 Windows 无窗口标志）。
-fn shell_command(command: &str) -> tokio::process::Command {
-    #[cfg(target_os = "windows")]
-    let cmd = match shell_program() {
-        Some(bash) => {
-            {
-                let mut c = tokio::process::Command::new(bash);
-                c.args(["-c", command]);
-                c
-            }
-        }
-        None => {
-            let mut c = tokio::process::Command::new("cmd");
-            c.args(["/C", command]);
-            c
-        }
+/// 构造一条命令的 spawn 请求（前台 `run` 与后台作业共用同一份 shell 选择）。
+///
+/// Windows 上优先 Git Bash，找不到才退 `cmd /C`；Unix 一律 `sh -c`。
+fn shell_spec(command: &str) -> SpawnSpec {
+    #[cfg(windows)]
+    let (program, flag) = match shell_program() {
+        Some(bash) => (bash.to_string_lossy().into_owned(), "-c"),
+        None => ("cmd".to_string(), "/C"),
     };
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("sh");
-        c.args(["-c", command]);
-        c
-    };
-    cmd
+    #[cfg(not(windows))]
+    let (program, flag) = ("sh".to_string(), "-c");
+    SpawnSpec::command(program, &[flag, command])
 }
 
 /// Windows 上优先 Git Bash：模型惯用 bash 语法（`;`、`$()`、引号、
@@ -370,83 +336,46 @@ pub fn shell_kind() -> &'static str {
 }
 
 async fn run(command: &str, timeout_ms: u64, workdir: &dsh_tools::Workdir) -> ToolExecutionResult {
-    use tokio::io::AsyncReadExt;
-
-    #[cfg(target_os = "windows")]
-    let mut cmd = match shell_program() {
-        Some(bash) => {
-            {
-                let mut c = tokio::process::Command::new(bash);
-                c.args(["-c", command]);
-                c
-            }
-        }
-        None => {
-            let mut c = tokio::process::Command::new("cmd");
-            c.args(["/C", command]);
-            c
-        }
+    let mut spec = shell_spec(command);
+    spec.cwd = Some(workdir.get().unwrap_or_else(|| std::env::current_dir().unwrap_or_default()));
+    spec.stdout = SpawnStdio::Collect { max_bytes: FOREGROUND_OUTPUT_LIMIT, spill: None };
+    spec.stderr = SpawnStdio::Collect { max_bytes: FOREGROUND_OUTPUT_LIMIT, spill: None };
+    let mut process = match spawn(&spec) {
+        Ok(process) => process,
+        Err(error) => return ToolExecutionResult::error(error),
     };
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("sh");
-        c.args(["-c", command]);
-        c
-    };
-    cmd.kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .current_dir(workdir.get().unwrap_or_else(|| std::env::current_dir().unwrap_or_default()));
-    #[cfg(windows)]
-    {
-        // GUI 宿主无控制台可继承：不设此标志，每个命令都会弹出黑色
-        // 控制台窗口并抢前台（真实使用中每次工具执行闪一个 bash 窗）
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return ToolExecutionResult::error(format!("spawn failed: {e}")),
-    };
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    // 三路并发：读 stdout / 读 stderr / 等退出；整体受前台超时约束
-    let read_out = async move {
-        let mut buf = Vec::new();
-        if let Some(s) = stdout.as_mut() {
-            let _ = s.read_to_end(&mut buf).await;
-        }
-        buf
-    };
-    let read_err = async move {
-        let mut buf = Vec::new();
-        if let Some(s) = stderr.as_mut() {
-            let _ = s.read_to_end(&mut buf).await;
-        }
-        buf
-    };
-    let waited = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-        let (out, err, status) = tokio::join!(read_out, read_err, child.wait());
-        (out, err, status)
-    })
+    // 整体受前台超时约束：超时杀进程（kill_on_drop 兜底孤儿）
+    let waited = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        process.wait_for_exit(),
+    )
     .await;
     match waited {
-        Ok((out, err, Ok(status))) => {
+        Ok(Ok(exit_code)) => {
+            let out = process.stdout().map(|s| s.bytes()).unwrap_or_default();
+            let err = process.stderr().map(|s| s.bytes()).unwrap_or_default();
+            let lossy = process.stdout().is_some_and(|s| s.lossy())
+                || process.stderr().is_some_and(|s| s.lossy());
             let mut text = decode_output(&out);
             if !err.is_empty() {
                 text.push_str("\n[stderr]\n");
                 text.push_str(&decode_output(&err));
             }
-            append_exit_marker(&mut text, &status);
+            if lossy {
+                // 有界收集必须自曝：模型看不出「尾部」就无从判断自己少读了什么
+                text.push_str(&format!(
+                    "\n[output truncated: 仅保留尾部 {FOREGROUND_OUTPUT_LIMIT} 字节]"
+                ));
+            }
+            append_exit_marker(&mut text, exit_code, process.signal.as_deref());
             // 上游 seam 语义：命令失败也是 completed call（isError=false——
             // 退出状态是结果数据，模型读标记自诊断）；调用级失败（spawn
             // 失败/超时）才走 error，且不带标记（超时等事实留在正文）。
             ToolExecutionResult::text(text)
         }
-        Ok((_, _, Err(e))) => ToolExecutionResult::error(format!("spawn failed: {e}")),
+        Ok(Err(error)) => ToolExecutionResult::error(error),
         Err(_) => {
-            // 超时：杀进程（kill_on_drop 兜底孤儿），报错并说明预算
-            let _ = child.kill().await;
+            process.kill().await;
             ToolExecutionResult::error(format!("command timed out after {timeout_ms}ms"))
         }
     }
@@ -457,16 +386,12 @@ async fn run(command: &str, timeout_ms: u64, workdir: &dsh_tools::Workdir) -> To
 /// `[killed by signal: X]`——模型因此总能知道命令如何结束；呈现侧
 /// parseExitStatus 剥除标记还原结构化状态（终端卡把退出状态画成自己的
 /// pill，标记留在输出里就会双重渲染）。
-fn append_exit_marker(text: &mut String, status: &std::process::ExitStatus) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(sig) = status.signal() {
-            text.push_str(&format!("\n[killed by signal: {sig}]"));
-            return;
-        }
+fn append_exit_marker(text: &mut String, exit_code: Option<i32>, signal: Option<&str>) {
+    if let Some(signal) = signal {
+        text.push_str(&format!("\n[killed by signal: {signal}]"));
+        return;
     }
-    match status.code() {
+    match exit_code {
         Some(code) => text.push_str(&format!("\n[exit code: {code}]")),
         None => text.push_str("\n[exit code: null]"),
     }

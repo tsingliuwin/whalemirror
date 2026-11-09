@@ -1,4 +1,4 @@
-﻿# 与官方 deepseek-harness 的差距盘点 × 对齐路线（2026-11-09）
+# 与官方 deepseek-harness 的差距盘点 × 对齐路线（2026-11-09）
 
 > 用途：`feature-backlog.md` 是「逐项补缺」的账本，本文是「先看清全局再决定补什么」的地图。
 > 上游基准：E:\aiproject\deepseek-harness HEAD `fcc0ad4621`（2026-11-04，0.2.2-rc.1 合并进 master）。
@@ -296,6 +296,15 @@ A4 ──→ A6 的 skill/team UI
 | B2 | 本地 HTTP + SSE + gateway/controllers/remotes + 多端 store | 无 | 1.5-2.5 个月 | 本地端口起来，wire 形状与上游一致（可直接跑上游 spec） |
 | B3 | 统一 subprocess 缝（进程组/输出上限/杀灭）+ PTY + terminal UI | 无 | 1-1.5 个月 | 侧栏终端可交互，环境跨调用存活 |
 | B4 | webview + PDF canvas + GPUI 渲染缺口（sticky/逐 span/inline icon） | 生态或自绘 | 1-2 个月 | 侧栏浏览器可开页面；PDF 可看；细节判据通过 |
+
+**B3 进度（分批）**
+
+| 子批 | 内容 | 状态 |
+|---|---|---|
+| ① | 统一 subprocess 缝 `dsh-subprocess`：环境清洗 / 可执行文件解析 / `SpawnSpec`+`Stdio` / 有界 `Collected` / `ManagedProcess` / `spawn_piped` / `run`；`dsh-shell` 前台与后台泵、`dsh-mcp::spawn_stdio` 三处改道（顺带修掉 MCP 子进程 `mem::forget` 不回收、前台输出无界收集） | **已落 11-09**（f70fc0a，backlog #113） |
+| ② | bash 族沙箱升级（A3.2 遗留的 `command` 面 escalation）——依赖缝的受管范围 | 待做 |
+| ③ | PTY（portable-pty/conpty）+ terminal 工具 + 侧栏终端 UI + 跨调用环境存活 | 待做 |
+| ④ | 后代回收：Linux scope owner / Windows Job Object（当前只保证直接子进程） | 待做 |
 
 ### 7.4 平台与生态面（地基之上）
 

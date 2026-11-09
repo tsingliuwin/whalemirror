@@ -3142,8 +3142,9 @@ Role::Notice => {
                 sticky = Some((turn, top));
             }
         }
-        // --- 时间条（上游 TrajectoryTimeline 子集）：三泳道 span（user/
-        // message/tool）+ 轮界刻度 + 拖选聚焦；sequence 等宽 / 时长按比例 ---
+        // --- 时间条（上游 TrajectoryTimeline 子集）：左 44px 三泳道标签列
+        // （输入/模型/工具）+ 右轨道三泳道 span（user/message/tool）+ 轮界
+        // 刻度 + 拖选聚焦；sequence 等宽 / 时长按比例 ---
         struct TlSpan {
             idx: usize,
             x0: f32,
@@ -3151,7 +3152,8 @@ Role::Notice => {
             lane: u8,
             kind: TrajKind,
         }
-        let strip_w = width;
+        // 轨道宽 = 内容宽 − 标签列（上游 grid `44px minmax(0,1fr)`）
+        let strip_w = (width - dsh_gpui::ui_metrics::TRAJ_TL_LABEL_W_PX).max(0.0);
         // spans 取未折叠的可见 cell（上游 timelineTurns 用未折叠布局）
         let span_cells: Vec<(usize, TrajKind, Option<u64>)> = cells_rc
             .iter()
@@ -3483,14 +3485,39 @@ Role::Notice => {
         let t_up = this.clone();
         let anchor = self.traj_tl_anchor;
         let current = self.traj_tl_current;
-        let mut strip = div()
-            .relative()
-            .w_full()
-            .h(px(50.0))
+        use dsh_gpui::ui_metrics as um;
+        // 左泳道标签列（`.labels`：44px、右边 0.5px l1 发丝；10px 右对齐，
+        // top 7/21/35、高 8、右缘 3px、caption 色）
+        let label_span = |text: &'static str, top: f32| {
+            div()
+                .absolute()
+                .top(px(top))
+                .right(px(3.0))
+                .h(px(8.0))
+                .flex()
+                .items_center()
+                .justify_end()
+                .text_size(px(10.0))
+                .line_height(px(10.0))
+                .text_color(t.caption)
+                .child(text)
+        };
+        let labels = div()
+            .w(px(um::TRAJ_TL_LABEL_W_PX))
+            .h_full()
             .flex_none()
-            .border_b(px(0.5))
-            .border_color(t.border_l2)
-            .bg(theme::t().bg_base)
+            .relative()
+            .border_r(px(0.5))
+            .border_color(t.border_l1)
+            .child(label_span("输入", um::TRAJ_TL_LANE_TOP_PX))
+            .child(label_span("模型", um::traj_span_top(1)))
+            .child(label_span("工具", um::traj_span_top(2)));
+        // 右轨道：拖选坐标以轨道 bounds 为原点（上游 `.track` 事件语义）
+        let mut track = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .on_children_prepainted({
                 let tb = tl_bounds.clone();
                 move |children, _, _| {
@@ -3542,33 +3569,39 @@ Role::Notice => {
                     .absolute()
                     .inset_0()
                     .children(spans_rc.iter().map(|sp| {
-                        let color = match sp.kind {
-                            TrajKind::User => t.green,
-                            TrajKind::Message => t.tag_message_fg,
-                            TrajKind::Tool => t.warn_label,
+                        // 上游 span 底色：user = business-primary（rustdsh 的
+                        // accent 即该档；曾误用语义绿），message = 品牌×红混、
+                        // tool = warn-label；间隙 min(宽×8%,1px) 两侧内缩
+                        let (left, w) = um::traj_span_box(sp.x0, sp.x1);
+                        let (color, opacity) = match sp.kind {
+                            TrajKind::User => (t.accent, um::TRAJ_TL_USER_OPACITY),
+                            TrajKind::Message => (t.tag_message_fg, 1.0),
+                            TrajKind::Tool => (t.warn_label, 1.0),
                         };
                         div()
                             .absolute()
-                            .left(px(sp.x0))
-                            .w(px((sp.x1 - sp.x0).max(1.0)))
-                            .top(px(7.0 + sp.lane as f32 * 14.0))
-                            .h(px(8.0))
-                            .rounded(px(2.0))
+                            .left(px(left))
+                            .w(px(w))
+                            .top(px(um::traj_span_top(sp.lane)))
+                            .h(px(um::TRAJ_TL_SPAN_H_PX))
+                            .rounded(px(um::TRAJ_TL_SPAN_RADIUS_PX))
+                            .opacity(opacity)
                             .bg(color)
                     }))
                     .children(ticks.iter().map(|tx| {
+                        // `.turnBoundary`：0.5px、贯穿全高、border-l2
                         div()
                             .absolute()
                             .left(px(*tx))
-                            .top(px(4.0))
-                            .bottom(px(4.0))
-                            .w(px(1.0))
-                            .bg(t.border_l3)
+                            .top_0()
+                            .bottom_0()
+                            .w(px(0.5))
+                            .bg(t.border_l2)
                     })),
             );
         if let (Some(a), Some(b)) = (anchor, current) {
             let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-            strip = strip.child(
+            track = track.child(
                 div()
                     .absolute()
                     .left(px(lo))
@@ -3580,6 +3613,18 @@ Role::Notice => {
                     .bg(gpui::hsla(0.6, 0.6, 0.5, 0.12)),
             );
         }
+        // 条外壳：`.plot` 50px、bg-layer-2（rustdsh `surface`）、底边 0.5px l2；
+        // grid 两列 = 标签列 + 轨道
+        let strip = div()
+            .w_full()
+            .h(px(um::TRAJ_TL_PLOT_H_PX))
+            .flex_none()
+            .flex()
+            .border_b(px(0.5))
+            .border_color(t.border_l2)
+            .bg(t.surface)
+            .child(labels)
+            .child(track);
         // 轮头通栏铺底 + 内层 880 居中道；行卡 848（道内 padding 16）居中——
         // 行右 320px 指标栏与轮头列标签同靠居中道右缘（lane-24）对齐。
         let mut col = div()

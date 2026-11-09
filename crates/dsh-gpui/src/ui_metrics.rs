@@ -316,6 +316,35 @@ pub fn settings_panel_height(viewport_h: f32) -> f32 {
         .max(0.0)
 }
 
+// ---- 轨迹时间条（上游 ui-trajectory TrajectoryTimeline.module.css/tsx）----
+//
+// `.plot` 高 50、grid `44px minmax(0,1fr)`（左 44px 三泳道标签列 + 右轨道），
+// 背景 bg-layer-2；`.lanes` top/bottom 各 7px；`.span` 高 8、圆角 1px、
+// top = 7 + lane×14；span 两侧间隙 = min(span 宽×8%, 1px)（tsx 行内变量）；
+// user span 底色 business-primary（rustdsh `accent` 即该档）、基础不透明度
+// 0.78（message/tool 覆盖为 1）；轮界刻度 0.5px border-l2 全高。
+pub const TRAJ_TL_PLOT_H_PX: f32 = 50.0;
+pub const TRAJ_TL_LABEL_W_PX: f32 = 44.0;
+pub const TRAJ_TL_LANE_TOP_PX: f32 = 7.0;
+pub const TRAJ_TL_LANE_GAP_PX: f32 = 14.0;
+pub const TRAJ_TL_SPAN_H_PX: f32 = 8.0;
+pub const TRAJ_TL_SPAN_RADIUS_PX: f32 = 1.0;
+pub const TRAJ_TL_SPAN_MIN_W_PX: f32 = 2.0;
+pub const TRAJ_TL_USER_OPACITY: f32 = 0.78;
+
+/// 泳道纵向位置：`7 + lane×14`（user/message/tool = 0/1/2）。
+pub fn traj_span_top(lane: u8) -> f32 {
+    TRAJ_TL_LANE_TOP_PX + lane as f32 * TRAJ_TL_LANE_GAP_PX
+}
+
+/// span 几何：`gap = min(width×8%, 1px)`，左移 gap、宽 `max(2, w−2gap)`。
+/// 返回 `(left, width)`（输入为轨道内 x 区间）。
+pub fn traj_span_box(x0: f32, x1: f32) -> (f32, f32) {
+    let w = (x1 - x0).max(TRAJ_TL_SPAN_MIN_W_PX);
+    let gap = (w * 0.08).min(1.0);
+    (x0 + gap, (w - gap * 2.0).max(TRAJ_TL_SPAN_MIN_W_PX))
+}
+
 // ---- 设置页行（上游 ui-primitives settings-form/fields.module.css）----
 //
 // `.field`：纵向 flex、`gap: 6px`、`padding: 12px 0`（行间距全在 padding，
@@ -822,5 +851,37 @@ mod tests {
         assert_eq!(COMPOSER_RAIL_PAD_T_PX, 2.0);
         assert_eq!(COMPOSER_RAIL_MARGIN_BOTTOM_PX, -6.0);
         assert!(COMPOSER_RAIL_MARGIN_BOTTOM_PX < 0.0);
+    }
+
+    #[test]
+    fn trajectory_timeline_geometry_matches_upstream() {
+        // `.plot { height: 50px }`、grid `44px minmax(0,1fr)`、`.lanes` top 7
+        assert_eq!(TRAJ_TL_PLOT_H_PX, 50.0);
+        assert_eq!(TRAJ_TL_LABEL_W_PX, 44.0);
+        assert_eq!(TRAJ_TL_LANE_TOP_PX, 7.0);
+        // 三泳道 top = 7/21/35（`.span { top: lane*14px }`）
+        assert_eq!(traj_span_top(0), 7.0);
+        assert_eq!(traj_span_top(1), 21.0);
+        assert_eq!(traj_span_top(2), 35.0);
+        // 三条 8px 泳道 + 上下 7px 留白 = 50px 内
+        assert!(TRAJ_TL_LANE_TOP_PX + 2.0 * TRAJ_TL_LANE_GAP_PX + TRAJ_TL_SPAN_H_PX <= TRAJ_TL_PLOT_H_PX);
+        assert_eq!(TRAJ_TL_SPAN_H_PX, 8.0);
+        assert_eq!(TRAJ_TL_SPAN_RADIUS_PX, 1.0);
+        assert_eq!(TRAJ_TL_USER_OPACITY, 0.78);
+    }
+
+    #[test]
+    fn trajectory_span_box_insets_by_upstream_gap() {
+        // 全宽 span：gap = min(1000*8%, 1px) = 1px → left+1 / width-2
+        let (left, w) = traj_span_box(0.0, 1000.0);
+        assert!((left - 1.0).abs() < 0.001);
+        assert!((w - 998.0).abs() < 0.001);
+        // 10px span：gap = 0.8 → left 0.8 / width 8.4
+        let (left, w) = traj_span_box(20.0, 30.0);
+        assert!((left - 20.8).abs() < 0.001);
+        assert!((w - 8.4).abs() < 0.001);
+        // 极窄：min 宽 2 兜底
+        let (_, w) = traj_span_box(0.0, 0.5);
+        assert!((w - 2.0).abs() < 0.001);
     }
 }

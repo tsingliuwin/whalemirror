@@ -1,4 +1,4 @@
-//! dsh-fs — a local-filesystem tool.
+﻿//! dsh-fs — a local-filesystem tool.
 //!
 //! One `fs` tool exposing `read` / `write` / `list` / `exists` operations over
 //! `std::fs`, behind an injected [`FsPolicy`]（web `fs-sandbox` containment +
@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+
+pub mod observation;
 
 use async_trait::async_trait;
 use dsh_tools::{Tool, ToolDefinition, ToolExecutionInput, ToolExecutionResult};
@@ -397,6 +399,8 @@ fn canonicalize_best_effort(path: &Path) -> PathBuf {
 pub struct FsTool {
     policy: Arc<dyn FsPolicy>,
     workdir: dsh_tools::Workdir,
+    /// 观察策略（上游 fs-observation-policy；默认关闭，同发货组合）
+    observation: Option<observation::ObservationPolicy>,
     /// 审批缝（上游 `ctx.approval`）：沙箱越权重试时向用户要一次批准。
     /// `None` = 未接线（越权按 `unavailable` fail-closed）。
     approval: Option<dsh_tools::ApprovalSlot>,
@@ -404,7 +408,7 @@ pub struct FsTool {
 
 impl FsTool {
     pub fn new(policy: Arc<dyn FsPolicy>) -> Self {
-        Self { policy, workdir: dsh_tools::Workdir::new(), approval: None }
+        Self { policy, workdir: dsh_tools::Workdir::new(), approval: None, observation: None }
     }
 
     /// 注入会话工作目录（相对路径的解析基准）。
@@ -416,6 +420,12 @@ impl FsTool {
     /// 注入审批槽（沙箱越权重试的用户批准通道）。
     pub fn with_approval(mut self, approval: dsh_tools::ApprovalSlot) -> Self {
         self.approval = Some(approval);
+        self
+    }
+
+    /// 注入观察策略（上游 fs-observation-policy）。
+    pub fn with_observation(mut self, observation: observation::ObservationPolicy) -> Self {
+        self.observation = Some(observation);
         self
     }
 }
@@ -473,12 +483,24 @@ impl Tool for FsTool {
                         path.display()
                     ));
                 }
-                match std::fs::read_to_string(path) {
+                let outcome = std::fs::read_to_string(path);
+                // 观察登记（上游 fs/*-observe：读过即 record；不存在即 absent）
+                if let Some(obs) = &self.observation {
+                    obs.after_read(path, outcome.is_ok());
+                }
+                match outcome {
                     Ok(text) => ToolExecutionResult::text(text),
                     Err(e) => ToolExecutionResult::error(format!("read failed: {e}")),
                 }
             }
             "write" => {
+                // 观察门（上游 fs-observation-policy 的 write-intent）：未读的既有
+                // 文件拒绝覆盖；新建放行
+                if let Some(obs) = &self.observation {
+                    if let Err(text) = obs.check_write(path) {
+                        return ToolExecutionResult::error(text);
+                    }
+                }
                 // 沙箱越权：按模型声明的 sandbox_permissions 走一次审批
                 // （上游 approveEscalation；未声明则按当前档位判定）
                 let mode = match resolve_write_mode(
@@ -718,16 +740,24 @@ pub struct EditTool {
     workdir: dsh_tools::Workdir,
     /// 审批缝（沙箱越权重试的一次批准）。
     approval: Option<dsh_tools::ApprovalSlot>,
+    /// 观察策略（上游 fs-observation-policy 的 edit-intent）
+    observation: Option<observation::ObservationPolicy>,
 }
 
 impl EditTool {
     pub fn new(policy: Arc<dyn FsPolicy>, workdir: dsh_tools::Workdir) -> Self {
-        Self { policy, workdir, approval: None }
+        Self { policy, workdir, approval: None, observation: None }
     }
 
     /// 注入审批槽。
     pub fn with_approval(mut self, approval: dsh_tools::ApprovalSlot) -> Self {
         self.approval = Some(approval);
+        self
+    }
+
+    /// 注入观察策略（edit 要求先前读过且版本未变）。
+    pub fn with_observation(mut self, observation: observation::ObservationPolicy) -> Self {
+        self.observation = Some(observation);
         self
     }
 }
@@ -824,6 +854,12 @@ impl Tool for EditTool {
             Err(e) => return ToolExecutionResult::error(e),
         };
         let path = self.workdir.resolve(Path::new(&parsed.path));
+        // 观察门（上游 edit-intent）：必须先读到 present 且版本未变
+        if let Some(obs) = &self.observation {
+            if let Err(text) = obs.check_edit(&path) {
+                return ToolExecutionResult::error(text);
+            }
+        }
         let mode = match resolve_write_mode(
             &*self.policy,
             "edit",

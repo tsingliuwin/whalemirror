@@ -1865,6 +1865,8 @@ pub(crate) struct AppView {
     /// 后台作业属主槽（切会话即更新；job 工具与 bash 后台在调用时读取）
     job_owner: dsh_jobs::OwnerCell,
     /// 任务清单（上游 `todos` 投影：整表 last-write-wins，下一个 turn/start 清空）
+    /// 文件观察策略（切会话时刷新属主；上游 fs-observation-policy）
+    fs_observation: dsh_fs::observation::ObservationPolicy,
     todos: Vec<dsh_session::TodoEntry>,
     /// 清单面板折叠态（上游 TodoPanel 默认折叠=true，只露标题行）
     todos_collapsed: bool,
@@ -2109,6 +2111,7 @@ impl AppView {
         web_search_count_input: Entity<InputState>,
         queue_edit_input: Entity<InputState>,
         job_owner: dsh_jobs::OwnerCell,
+        fs_observation: dsh_fs::observation::ObservationPolicy,
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
@@ -2230,6 +2233,7 @@ impl AppView {
         approval_answer_tx: None,
         approval_ask: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         job_owner: job_owner.clone(),
+        fs_observation,
         todos: Vec::new(),
         todos_collapsed: true,
             plan_review_tx: None,
@@ -4662,7 +4666,9 @@ impl AppView {
     /// 后台作业属主槽同步（切会话后调用：job 工具与 bash 后台按它判访问）。
     fn sync_job_owner(&self) {
         let id = self.agent.session().lock().unwrap().id.clone();
-        *self.job_owner.lock().unwrap() = Some(id);
+        *self.job_owner.lock().unwrap() = Some(id.clone());
+        // 文件观察也按会话隔离（上游 weak owner map 的等价）
+        self.fs_observation.set_owner(Some(id.as_str().to_string()));
     }
 
     /// 「要求修改」带自定义反馈（上游 QuestionComposer 的 custom 路径：
@@ -9129,6 +9135,12 @@ fn main() {
         dsh_fs::FsMode::WorkspaceWrite,
         Vec::new(),
     ));
+    // 文件观察策略（上游 fs/fs-observation-policy）：守护「改前必读」。
+    // 上游发货组合把该行 `disabled: true`，rustdsh 保持同样的默认（
+    // `DSH_FS_OBSERVATION_POLICY=1` 才启用）。
+    let fs_observation = dsh_fs::observation::ObservationPolicy::from_env(
+        dsh_fs::observation::ObservationStore::new(),
+    );
     // 审批槽（沙箱越权重试的一次批准）：工具先持槽，UI 就绪后接线
     //（上游 `ctx.approval` 的 rustdsh 等价；未接线时越权 fail-closed）
     let approval_slot = dsh_tools::ApprovalSlot::new();
@@ -9806,6 +9818,7 @@ fn main() {
                         web_search_count_input.clone(),
                         queue_edit_input.clone(),
                         job_owner.clone(),
+                        fs_observation.clone(),
                         cx,
                     )
                 });

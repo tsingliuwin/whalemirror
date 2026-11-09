@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 resolver = "3"
 members = [
   "crates/cordis",
@@ -24,6 +24,7 @@ members = [
   "crates/dsh-skill",
   "crates/dsh-mcp",
   "crates/dsh-subprocess",
+  "crates/dsh-lsp",
 ]
 
 # vendor 补丁版（0.9.0 基线）：markdown 渲染排版对齐 web（li 6px 间距、圆点次级色

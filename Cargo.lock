@@ -1422,6 +1422,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-lsp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "dsh-mcp"
 version = "0.1.0"
 dependencies = [

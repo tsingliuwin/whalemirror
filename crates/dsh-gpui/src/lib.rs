@@ -861,6 +861,9 @@ pub enum ProcessActivity {
     Plan,
     Questions,
     Tools,
+    /// 纯上下文注入组（上游 44ad857798：全 Context 成员报告单一 context
+    /// 类目——标题「已注入上下文」；混合组 Context 不计入）。
+    Context,
 }
 
 impl ProcessActivity {
@@ -880,6 +883,8 @@ impl ProcessActivity {
             ProcessActivity::Plan => "更新了计划",
             ProcessActivity::Questions => "向用户提出了问题",
             ProcessActivity::Tools => "已调用工具",
+            // 上游 message.stepProcess.done.context（44ad857798 新增）
+            ProcessActivity::Context => "已注入上下文",
         }
     }
 }
@@ -997,6 +1002,21 @@ pub fn process_activity_counts(
     out
 }
 
+/// 过程组类目计数（上游 `processActivity`，44ad857798 语义）：
+/// 工具调用按 distinct 计数排序；**全 Context 组**改报单一 `context`
+/// 类目、计成员数（标题「已注入上下文」）；Context 与其它成员混合时
+/// 不添加计数（上下文注入是过程证据，不改变摘要标题）。
+pub fn process_group_activities(
+    calls: impl IntoIterator<Item = (String, String, String)>,
+    context_members: usize,
+    all_context: bool,
+) -> Vec<(ProcessActivity, usize)> {
+    if all_context {
+        return vec![(ProcessActivity::Context, context_members)];
+    }
+    process_activity_counts(calls)
+}
+
 #[cfg(test)]
 mod process_title_tests {
     use super::*;
@@ -1052,6 +1072,29 @@ mod process_title_tests {
         assert_eq!(process_activity("web_fetch", "{}"), PA::WebFetch);
         assert_eq!(process_activity("subagent", "{}"), PA::Subagents);
         assert_eq!(process_activity("mystery", "{}"), PA::Tools);
+    }
+
+    #[test]
+    fn context_only_group_titles_as_injected_context() {
+        // 上游 44ad857798：全 Context 组报告单一 context 类目（成员数），
+        // 标题「已注入上下文」，不再回落「已完成分析」
+        assert_eq!(process_title(&[(PA::Context, 2)]), "已注入上下文");
+        let all = process_group_activities(Vec::new(), 2, true);
+        assert_eq!(all, vec![(PA::Context, 2)]);
+        assert_eq!(process_title(&all), "已注入上下文");
+        // 混合组：Context 不加计数，标题仍是工具类目组合
+        let mixed = process_group_activities(
+            vec![
+                ("c1".to_string(), "read".to_string(), "{}".to_string()),
+            ],
+            3,
+            false,
+        );
+        assert_eq!(mixed, vec![(PA::Read, 1)]);
+        assert_eq!(process_title(&mixed), "已读取文件");
+        // 无工具也无 Context（如纯思考）：空类目回落「已完成分析」
+        assert_eq!(process_group_activities(Vec::new(), 0, false), Vec::new());
+        assert_eq!(process_title(&[]), "已完成分析");
     }
 
     #[test]

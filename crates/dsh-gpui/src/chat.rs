@@ -1675,7 +1675,26 @@ open: false,
                     }
                 }
             }
-            let activities = dsh_gpui::process_activity_counts(calls);
+            // 上游 44ad857798：全 Context 成员的过程组报告单一 context 类目
+            //（计成员数）——标题「已注入上下文」；混合组 Context 不加计数。
+            // 系统提示词前置行不算过程成员（与下方 member 判定同口径）。
+            let is_system_prompt_entry = |i: usize| {
+                matches!(
+                    &self.entries[i].context,
+                    Some(info) if info.title == "系统提示词" || info.title == "系统提示词更新"
+                )
+            };
+            let member_idxs: Vec<usize> =
+                process.iter().copied().filter(|&i| !is_system_prompt_entry(i)).collect();
+            let all_context = !member_idxs.is_empty()
+                && member_idxs
+                    .iter()
+                    .all(|&i| self.entries[i].role == Role::Context);
+            let activities = dsh_gpui::process_group_activities(
+                calls,
+                member_idxs.len(),
+                all_context,
+            );
             // 用户气泡在折叠头之上：头锚在轮内最后一条用户消息之后的第一个
             // 过程条目（系统提示词等前置上下文行随折叠隐藏）
             let last_user = (process[0]..=answer)

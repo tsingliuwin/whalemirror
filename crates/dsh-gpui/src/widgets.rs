@@ -687,6 +687,10 @@ pub(crate) fn turn_process_control(
         Some(dsh_gpui::ProcessActivity::Subagents) => IconName::Bot,
         Some(dsh_gpui::ProcessActivity::Plan) => IconName::LayoutDashboard,
         Some(dsh_gpui::ProcessActivity::Questions) => IconName::Inbox,
+        // 纯上下文注入组（上游 IconContextInjectionOutlineRegular；组件图标
+        // 集无 import 形，用向下箭头近似「注入」——同 #97 图标近似策略，
+        // 偏差登记 backlog #105）
+        Some(dsh_gpui::ProcessActivity::Context) => IconName::ArrowDown,
         // read/readImage/write/edit（上游 Browse / Edit）→ 文件图标
         _ => IconName::File,
     };

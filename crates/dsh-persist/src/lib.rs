@@ -1334,6 +1334,23 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .unwrap_or_default()
                 .to_string(),
         }),
+        "todo/write" => Some(SessionEvent::TodoWrite {
+            todos: data?
+                .get("todos")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            Some(dsh_session::TodoEntry {
+                                content: item.get("content")?.as_str()?.to_string(),
+                                status: item.get("status")?.as_str()?.to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }),
         "subagent/catalog" => Some(SessionEvent::SubagentCatalog {
             child_id: data?
                 .get("childId")
@@ -1883,6 +1900,15 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
             "approval/decided",
             serde_json::json!({"id": id, "outcome": outcome}),
         )),
+        SessionEvent::TodoWrite { todos } => Some(row(
+            "todo/write",
+            serde_json::json!({
+                "todos": todos
+                    .iter()
+                    .map(|t| serde_json::json!({"content": t.content, "status": t.status}))
+                    .collect::<Vec<_>>(),
+            }),
+        )),
         // 重试链（web llm/retry：normal 模式带 maxRetries，always 模式不带）
         SessionEvent::LlmRetry {
             retry_id,
@@ -2330,6 +2356,76 @@ mod tests {
     }
 
     #[test]
+    fn todo_write_and_approval_round_trip_through_web_rows() {
+        // todo/write（上游整表快照）：camelCase 无，直接 {todos:[{content,status}]}
+        let ev = SessionEvent::TodoWrite {
+            todos: vec![
+                dsh_session::TodoEntry { content: "读代码".into(), status: "completed".into() },
+                dsh_session::TodoEntry { content: "写实现".into(), status: "in_progress".into() },
+            ],
+        };
+        let row = event_to_web_line(&ev, 11, 100).unwrap();
+        assert_eq!(row["type"], "todo/write");
+        assert_eq!(row["data"]["todos"][0]["content"], "读代码");
+        assert_eq!(row["data"]["todos"][1]["status"], "in_progress");
+        match web_line_to_event(&row).expect("known type parses back") {
+            SessionEvent::TodoWrite { todos } => {
+                assert_eq!(todos.len(), 2);
+                assert_eq!(todos[0].status, "completed");
+            }
+            other => panic!("expected TodoWrite, got {other:?}"),
+        }
+
+        // approval/asked（log-only 审计，可选字段缺省不写）
+        let ev = SessionEvent::ApprovalAsked {
+            id: "call-1".into(),
+            tool_name: "write".into(),
+            call_id: Some("call-1".into()),
+            reason: Some("escalate sandbox to danger-full-access: 需要清理".into()),
+        };
+        let row = event_to_web_line(&ev, 12, 100).unwrap();
+        assert_eq!(row["type"], "approval/asked");
+        assert_eq!(row["data"]["toolName"], "write");
+        assert_eq!(row["data"]["callId"], "call-1");
+        let parsed = web_line_to_event(&row).expect("known type parses back");
+        match parsed {
+            SessionEvent::ApprovalAsked { tool_name, call_id, .. } => {
+                assert_eq!(tool_name, "write");
+                assert_eq!(call_id.as_deref(), Some("call-1"));
+            }
+            other => panic!("expected ApprovalAsked, got {other:?}"),
+        }
+        // 无可选字段：写侧落 null、读侧回 None
+        let ev = SessionEvent::ApprovalAsked {
+            id: "call-2".into(),
+            tool_name: "edit".into(),
+            call_id: None,
+            reason: None,
+        };
+        let row = event_to_web_line(&ev, 13, 100).unwrap();
+        assert!(row["data"]["reason"].is_null());
+        match web_line_to_event(&row).expect("parses back") {
+            SessionEvent::ApprovalAsked { call_id, reason, .. } => {
+                assert!(call_id.is_none());
+                assert!(reason.is_none());
+            }
+            other => panic!("expected ApprovalAsked, got {other:?}"),
+        }
+
+        // approval/decided（闭集 outcome 原文）
+        let ev = SessionEvent::ApprovalDecided { id: "call-1".into(), outcome: "allowed-once".into() };
+        let row = event_to_web_line(&ev, 14, 100).unwrap();
+        assert_eq!(row["type"], "approval/decided");
+        assert_eq!(row["data"]["outcome"], "allowed-once");
+        match web_line_to_event(&row).expect("parses back") {
+            SessionEvent::ApprovalDecided { id, outcome } => {
+                assert_eq!(id, "call-1");
+                assert_eq!(outcome, "allowed-once");
+            }
+            other => panic!("expected ApprovalDecided, got {other:?}"),
+        }
+    }
+
     fn subagent_catalog_round_trips_through_web_row() {
         // 父所有的子 agent 发现事实：写形 {version:3, childId,
         // childCreatedAt, mode, name, label?}（label 缺省省略），读侧还原

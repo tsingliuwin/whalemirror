@@ -1862,6 +1862,10 @@ pub(crate) struct AppView {
     approval_answer_tx: Option<std::sync::mpsc::Sender<dsh_tools::ApprovalOutcome>>,
     /// 审批策略闸（`ask` 才弹卡；`never` 确定性拒绝——上游 user-approval 语义）
     approval_ask: Arc<std::sync::atomic::AtomicBool>,
+    /// 任务清单（上游 `todos` 投影：整表 last-write-wins，下一个 turn/start 清空）
+    todos: Vec<dsh_session::TodoEntry>,
+    /// 清单面板折叠态（上游 TodoPanel 默认折叠=true，只露标题行）
+    todos_collapsed: bool,
     /// #5 真并发：非当前会话的运行时表（发送时按需 spawn、轮终 reap）。
     /// 主 agent 恒代表「当前」会话；查看其它会话时在其上发消息 → 经此
     /// 表取/建该会话的独立 runtime（事件泵带会话标签按属主路由）。
@@ -2222,6 +2226,8 @@ impl AppView {
         pending_approval: None,
         approval_answer_tx: None,
         approval_ask: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        todos: Vec::new(),
+        todos_collapsed: true,
             plan_review_tx: None,
             session_runtimes: std::collections::HashMap::new(),
             running_sessions: dsh_gpui::MultiSessionGate::default(),
@@ -2812,6 +2818,8 @@ impl AppView {
                 self.running_sessions.mark_running(owner.clone());
                 if owner == self.current_session_id().as_str() {
                     self.agent_busy = true;
+                    // 上游 todos 投影：下一个 turn/start 清空上一轮的清单
+                    self.todos.clear();
                 }
             } else {
                 let all_idle = self.running_sessions.mark_idle(&owner);
@@ -3640,6 +3648,16 @@ impl AppView {
             self.sync_approval_gate();
             if let Some(m) = dsh_fs::FsMode::from_web(sandbox) {
                 self.fs_sandbox.set_mode(m);
+            }
+        }
+        // 任务清单恢复（上游 todos 投影 fold）：整表 last-write-wins，
+        // 每遇 turn/start 清空（轮末保留已完成清单可见）。
+        self.todos.clear();
+        for e in session.entries() {
+            match &e.event {
+                SessionEvent::TurnStart { .. } => self.todos.clear(),
+                SessionEvent::TodoWrite { todos } => self.todos = todos.clone(),
+                _ => {}
             }
         }
         // 标题来源（web SessionTitleSource，latest-wins）：user 源 = 置顶，
@@ -6972,6 +6990,11 @@ impl AppView {
             .v_flex()
             .bg(theme::t().bg_base)
             .pb_2()
+            // 任务清单（上游 conversation.input.dock 的 todo 槽，order 0）：
+            // 输入卡上方、排队条带之前
+            .when(!self.todos.is_empty(), |d| {
+                d.child(self.todo_panel(&this, card_w))
+            })
             // 排队条带（上游 QueueDock 槽位）：输入卡上方
             .when(!snap.queued.is_empty(), |d| {
                 d.child(self.queue_dock_render(&this, snap, card_w))
@@ -7756,6 +7779,135 @@ impl AppView {
 
     /// 输入卡（web InputBar .card）：r22、白 6% 描边、850 表面、
     /// 文本在上（16/24），控件行在下（+ / 模式 | 模型 / 发送）。
+    /// 任务清单面板（上游 `ui-conversation` TodoPanel：菜单面 R16 + 面板投影；
+    /// 头行 = 清单图标 + 「任务」13/24/500 + 进度摘要 13/20 三级 + chevron；
+    /// 展开体 gap 8、最大高 180、行为 13/20 二级 + 16px 状态点）。
+    fn todo_panel(&self, this: &Entity<AppView>, card_w: f32) -> Div {
+        let t = theme::t();
+        let todos = &self.todos;
+        let done = todos.iter().filter(|i| i.status == "completed").count();
+        let active = todos.iter().filter(|i| i.status == "in_progress").count();
+        let pending = todos.len() - done - active;
+        let mut segments: Vec<String> = Vec::new();
+        if done > 0 {
+            segments.push(format!("{done} 已完成"));
+        }
+        if active > 0 {
+            segments.push(format!("{active} 进行中"));
+        }
+        if pending > 0 {
+            segments.push(format!("{pending} 待处理"));
+        }
+        let progress = segments.join("\u{2002}·\u{2002}");
+        let collapsed = self.todos_collapsed;
+        let t_toggle = this.clone();
+        let header = div()
+            .id("todo-panel-header")
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .w_full()
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                t_toggle.update(cx, |v, cx| {
+                    v.todos_collapsed = !v.todos_collapsed;
+                    cx.notify();
+                });
+            })
+            .child(
+                gpui::svg()
+                    .path("icons/todo-list.svg")
+                    .size(px(16.0))
+                    .text_color(t.text_3),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(13.0))
+                    .line_height(px(24.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t.text)
+                    .child("任务"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
+                    .text_color(t.text_3)
+                    .child(progress),
+            )
+            .child(
+                // 折叠态朝上、展开态朝下（上游 TodoPanel 的 chevron 语义）
+                Icon::new(if collapsed { IconName::ChevronUp } else { IconName::ChevronDown })
+                    .size(px(16.0))
+                    .text_color(t.text_3),
+            );
+        let mut panel = div()
+            .flex_none()
+            .v_flex()
+            .gap(px(8.0))
+            .w(px((card_w - 16.0).max(120.0)))
+            .mx_auto()
+            .py(px(6.0))
+            .px(px(12.0))
+            .rounded(px(16.0))
+            .bg(t.menu)
+            .border(px(0.5))
+            .border_color(t.border_l1)
+            .shadow(theme::elevation_prominent())
+            .child(header);
+        if !collapsed {
+            let mut list = div()
+                .id("todo-panel-list")
+                .v_flex()
+                .gap(px(8.0))
+                .max_h(px(180.0))
+                .overflow_y_scroll();
+            for item in todos {
+                // 状态点色（上游 StateDot done/ongoing/idle 的近似映射）
+                let dot = match item.status.as_str() {
+                    "completed" => t.success_tertiary,
+                    "in_progress" => t.warn_label,
+                    _ => t.text_3,
+                };
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .min_w_0()
+                        .text_size(px(13.0))
+                        .line_height(px(20.0))
+                        .text_color(t.text_2)
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(16.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(widgets::state_dot(dot)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(item.content.clone()),
+                        ),
+                );
+            }
+            panel = panel.child(list);
+        }
+        panel
+    }
+
     fn composer_card(&self, this: Entity<AppView>, has_text: bool, card_w: f32, running: bool, locked: bool, slash_query: Option<&str>, hero: bool) -> Stateful<Div> {
         // #5 真并发：异会话运行中 composer 不再让位（消息路由到被查看
         // 会话的 runtime）；运行态按钮跟被查看会话（chat.running 由按属主
@@ -8999,6 +9151,12 @@ fn main() {
     let _web = tools.register_when(Arc::new(WebTool::new()), preset_gate("web_fetch")).unwrap();
     let _grep = tools.register_when(Arc::new(dsh_search::GrepTool::default().with_workdir(workdir.clone())), preset_gate("grep")).unwrap();
     let _glob = tools.register_when(Arc::new(dsh_search::GlobTool::default().with_workdir(workdir.clone())), preset_gate("glob")).unwrap();
+    // todo_write（上游 todo/tool-todo）：整表替换 → 会话 `todo/write` 事件；
+    // 部署策略 allowParallelInProgress=false（标准预设的单活跃纪律）
+    let todo_tool = Arc::new(dsh_tools::TodoTool::new(false));
+    let _todo = tools.register_when(todo_tool.clone(), preset_gate("todo_write")).unwrap();
+    // 清单 UI 推送（工具线程 → UI 泵；单一来源仍是会话日志）
+    let (todo_tx, todo_rx) = std::sync::mpsc::channel::<Vec<dsh_session::TodoEntry>>();
     // exit_plan_mode（上游 plan-mode 包同名工具最小等价）：模型提交计划，
     // 审阅流与 plan-mode 状态机留待后续（偏差固化 backlog #2）
     // exit_plan_mode 审阅流（#2）：模型提交计划后经宿主审阅面板等用户
@@ -9199,6 +9357,22 @@ fn main() {
     );
     agent.set_agent_preset(startup_preset);
     agent.set_system_prompt(agent_persona(&startup_preset));
+    // todo_write 持久化缝：整表快照落会话日志（`todo/write`），并推给 UI 泵
+    {
+        let agent_todo = Arc::clone(&agent);
+        let todo_tx = todo_tx.clone();
+        todo_tool.set_sink(Arc::new(move |items: &[dsh_tools::TodoItem]| {
+            let entries: Vec<dsh_session::TodoEntry> = items
+                .iter()
+                .map(|t| dsh_session::TodoEntry {
+                    content: t.content.clone(),
+                    status: t.status.as_wire().to_string(),
+                })
+                .collect();
+            agent_todo.append_session_event(SessionEvent::TodoWrite { todos: entries.clone() });
+            let _ = todo_tx.send(entries);
+        }));
+    }
     recorder.set_default_agent_preset(&user_settings.agent_preset);
     agent.set_session(initial_session);
     let _ = retry_agent_slot.set(Arc::clone(&agent));
@@ -9484,6 +9658,27 @@ fn main() {
                 // 不被逐事件 notify，侧栏等兄弟子视图的 element 缓存保持
                 // 有效；peek 中运行会话的事件不进视图（照常落盘）。
                 let view = app.clone();
+                // 任务清单泵：工具线程写入 → UI 快照（单一来源仍是会话日志，
+                // 这里只是把落盘那一刻的整表推给视图）
+                {
+                    let pump_view = app.clone();
+                    cx.spawn(async move |cx| {
+                        let mut cx = cx.clone();
+                        loop {
+                            while let Ok(todos) = todo_rx.try_recv() {
+                                let _ = cx.update_entity(
+                                    &pump_view,
+                                    |v: &mut AppView, cx: &mut Context<AppView>| {
+                                        v.todos = todos.clone();
+                                        cx.notify();
+                                    },
+                                );
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    })
+                    .detach();
+                }
                 // 审批缝（上游 `ctx.approval` 的 rustdsh 等价）：工具线程阻塞
                 // 等用户决定，面板由 async 泵弹出（同 plan 审阅的泵模式）。
                 // `approval/policy = never` 时确定性拒绝、不弹卡（上游语义）。

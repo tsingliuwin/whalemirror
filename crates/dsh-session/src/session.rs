@@ -73,6 +73,17 @@ pub struct PresentedFile {
     pub description: Option<String>,
 }
 
+/// 一条任务清单项（上游 `todo/write` 的 TodoItem）。`status` 是闭集字符串
+/// `pending | in_progress | completed`——取值校验在工具边界做（工具层是
+/// 唯一写入口），日志读侧按原样保留以维持 web 互读。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoEntry {
+    /// 任务内容（短祈使句）。
+    pub content: String,
+    /// 状态闭集字符串。
+    pub status: String,
+}
+
 /// 一次图片卸载决定命中的一个消息：其内被选中省略的图片下标集。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageOffloadTarget {
@@ -240,6 +251,10 @@ pub enum SessionEvent {
     /// 审批结果（log-only 审计：web `approval/decided`，
     /// data = {id, outcome}；outcome ∈ allowed-once/rejected/cancelled/unavailable）。
     ApprovalDecided { id: String, outcome: String },
+    /// 任务清单整表快照（web `todo/write`，data = {todos:[{content,status}]}）：
+    /// 每次调用整表替换，回放 last-write-wins；下一个 turn/start 清空
+    /// （上游 todos 投影语义——轮末保留已完成清单可见）。
+    TodoWrite { todos: Vec<TodoEntry> },
     /// 直接子 agent 发现事实（log-only；web `subagent/catalog`，父所有）。
     /// data = {version, childId, childCreatedAt, mode, name, label?}——
     /// version 由写侧固定 3（上游 SUBAGENT_CATALOG_VERSION）；`name` 为模型面向的

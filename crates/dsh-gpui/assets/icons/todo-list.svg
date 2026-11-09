@@ -1,0 +1,8 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 任务清单图标（上游 IconChecklistOutlineRegular 的本地近似：Lucide list-checks 形，
+       1px 描边 + 勾选行，尺寸基准 16）。 -->
+  <path d="M6.5 3.5H14M6.5 8H14M6.5 12.5H14" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+  <path d="M1.8 3.2L3 4.4L4.9 2.2" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M1.8 7.7L3 8.9L4.9 6.7" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="3" cy="12" r="1.4" stroke="currentColor" stroke-width="1"/>
+</svg>

@@ -58,6 +58,8 @@ const LOCAL: &[(&str, &[u8])] = &[
     ("filetype/ppt-mark.svg", include_bytes!("../assets/filetype/ppt-mark.svg")),
     ("filetype/video-mark.svg", include_bytes!("../assets/filetype/video-mark.svg")),
     ("filetype/word-mark.svg", include_bytes!("../assets/filetype/word-mark.svg")),
+    // 任务清单面板头行图标（上游 IconChecklistOutlineRegular 的本地近似）
+    ("icons/todo-list.svg", include_bytes!("../assets/icons/todo-list.svg")),
 ];
 
 pub struct AppAssets {

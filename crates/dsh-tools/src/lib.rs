@@ -185,6 +185,180 @@ impl ApprovalSlot {
     }
 }
 
+// ---- todo_write（上游 `todo/tool-todo`）----
+
+/// 任务状态闭集（web wire 形 = snake_case）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl TodoStatus {
+    /// wire 形取值（pending / in_progress / completed）。
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+        }
+    }
+
+    /// 解析 wire 取值。
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "in_progress" => Some(Self::InProgress),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
+/// 一条任务（整表快照的一项）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
+/// 校验并规范化整表（上游 `toTodoList` 文案逐字）：内容 trim 后非空且唯一；
+/// 未开并行时至多一个 `in_progress`。
+pub fn validate_todos(
+    raw: &[(String, String)],
+    allow_parallel: bool,
+) -> Result<Vec<TodoItem>, String> {
+    let mut todos: Vec<TodoItem> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut active = 0usize;
+    for (content, status) in raw {
+        let content = content.trim();
+        if content.is_empty() {
+            return Err("invalid todo: `content` must be a non-empty string".into());
+        }
+        if !seen.insert(content.to_string()) {
+            return Err(format!("invalid todos: duplicate content {content:?}"));
+        }
+        let Some(status) = TodoStatus::from_wire(status) else {
+            return Err(format!("invalid todos: unknown status {status:?}"));
+        };
+        if matches!(status, TodoStatus::InProgress) {
+            active += 1;
+        }
+        todos.push(TodoItem { content: content.to_string(), status });
+    }
+    if !allow_parallel && active > 1 {
+        return Err(format!(
+            "invalid todos: at most one task may be in_progress (got {active})"
+        ));
+    }
+    Ok(todos)
+}
+
+/// 工具描述（上游 describe 三段式：head + 活跃策略 + tail）。
+pub fn todo_description(allow_parallel: bool) -> String {
+    const HEAD: &str = "Record and update a task list to plan multi-step work and show progress; skip it for trivial single-step tasks. Add one todo per concrete step before you start. ";
+    const PARALLEL: &str = "While work remains, keep the todos being worked on `in_progress`, several only when work runs in parallel. ";
+    const SINGLE: &str = "While work remains, keep exactly one todo `in_progress`. ";
+    const TAIL: &str = "Mark each todo `completed` as soon as it is done.";
+    format!(
+        "{HEAD}{}{TAIL}",
+        if allow_parallel { PARALLEL } else { SINGLE }
+    )
+}
+
+/// 整表持久化缝（宿主注入：把快照追加成会话的 `todo/write` 事件）。
+pub type TodoSink = Arc<dyn Fn(&[TodoItem]) + Send + Sync>;
+
+/// 模型面向的任务清单工具：每次调用整表替换，快照经 sink 落会话日志。
+pub struct TodoTool {
+    allow_parallel: bool,
+    sink: RwLock<Option<TodoSink>>,
+}
+
+impl TodoTool {
+    /// `allow_parallel` = 部署是否允许同时多个 in_progress（上游必填配置）。
+    pub fn new(allow_parallel: bool) -> Self {
+        Self { allow_parallel, sink: RwLock::new(None) }
+    }
+
+    /// 注入持久化缝（宿主在 agent 就绪后接线）。
+    pub fn set_sink(&self, sink: TodoSink) {
+        *self.sink.write().unwrap() = Some(sink);
+    }
+}
+
+#[async_trait]
+impl Tool for TodoTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "todo_write".into(),
+            description: todo_description(self.allow_parallel),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "The COMPLETE task list, replacing any previous list.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "content": { "type": "string", "description": "What the task is — a short imperative line." },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "pending (not started) | in_progress (now) | completed (done)."
+                                }
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        let Some(items) = input.arguments.get("todos").and_then(|v| v.as_array()) else {
+            return ToolExecutionResult::error("todos must be an array");
+        };
+        let raw: Vec<(String, String)> = items
+            .iter()
+            .map(|item| {
+                (
+                    item.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    item.get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            })
+            .collect();
+        let todos = match validate_todos(&raw, self.allow_parallel) {
+            Ok(todos) => todos,
+            Err(text) => return ToolExecutionResult::error(text),
+        };
+        if let Some(sink) = self.sink.read().unwrap().as_ref() {
+            sink(&todos);
+        }
+        let count = |status: TodoStatus| todos.iter().filter(|t| t.status == status).count();
+        let (pending, in_progress, completed) = (
+            count(TodoStatus::Pending),
+            count(TodoStatus::InProgress),
+            count(TodoStatus::Completed),
+        );
+        ToolExecutionResult::text(format!(
+            "Updated todo list: {pending} pending, {in_progress} in progress, {completed} completed."
+        ))
+    }
+}
+
 /// The static part of a tool: name, description, JSON-schema parameters.
 #[derive(Clone, Debug)]
 pub struct ToolDefinition {
@@ -843,5 +1017,82 @@ mod registry_admission_tests {
         disposer();
         assert!(registry.list_admitted(&ctx).is_empty());
         assert!(registry.get("temp").is_none());
+    }
+}
+
+#[cfg(test)]
+mod todo_tests {
+    use super::*;
+
+    fn raw(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items.iter().map(|(c, s)| (c.to_string(), s.to_string())).collect()
+    }
+
+    #[test]
+    fn validation_trims_dedupes_and_pins_one_active_task() {
+        let ok = validate_todos(&raw(&[("  写测试  ", "in_progress"), ("跑回归", "pending")]), false).unwrap();
+        assert_eq!(ok[0].content, "写测试");
+        assert_eq!(ok[0].status, TodoStatus::InProgress);
+
+        assert_eq!(
+            validate_todos(&raw(&[("  ", "pending")]), false).unwrap_err(),
+            "invalid todo: `content` must be a non-empty string"
+        );
+        assert_eq!(
+            validate_todos(&raw(&[("a", "pending"), (" a ", "completed")]), false).unwrap_err(),
+            "invalid todos: duplicate content \"a\""
+        );
+        assert_eq!(
+            validate_todos(&raw(&[("a", "in_progress"), ("b", "in_progress")]), false).unwrap_err(),
+            "invalid todos: at most one task may be in_progress (got 2)"
+        );
+        // 并行部署允许两个活跃
+        assert!(validate_todos(&raw(&[("a", "in_progress"), ("b", "in_progress")]), true).is_ok());
+        assert!(validate_todos(&raw(&[("a", "bogus")]), false).is_err());
+    }
+
+    #[test]
+    fn description_switches_the_active_clause_only() {
+        assert!(todo_description(false).contains("keep exactly one todo `in_progress`"));
+        assert!(todo_description(true).contains("several only when work runs in parallel"));
+        assert!(todo_description(false).starts_with("Record and update a task list"));
+        assert!(todo_description(true).ends_with("Mark each todo `completed` as soon as it is done."));
+    }
+
+    #[tokio::test]
+    async fn execute_persists_the_whole_list_and_reports_counts() {
+        let tool = TodoTool::new(false);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<TodoItem>>::new()));
+        let seen_sink = Arc::clone(&seen);
+        tool.set_sink(Arc::new(move |items: &[TodoItem]| {
+            seen_sink.lock().unwrap().push(items.to_vec());
+        }));
+
+        let r = tool
+            .execute(&ToolExecutionInput::with_raw_arguments(
+                dsh_llm::CallId("c1".into()),
+                "todo_write".into(),
+                r#"{"todos":[{"content":"读代码","status":"completed"},{"content":"写实现","status":"in_progress"},{"content":"跑测试","status":"pending"}]}"#.into(),
+            ))
+            .await;
+        assert!(!r.is_error);
+        let text = r.content.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        }).unwrap();
+        assert_eq!(text, "Updated todo list: 1 pending, 1 in progress, 1 completed.");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert_eq!(seen.lock().unwrap()[0].len(), 3);
+
+        // 校验失败不落盘
+        let r = tool
+            .execute(&ToolExecutionInput::with_raw_arguments(
+                dsh_llm::CallId("c2".into()),
+                "todo_write".into(),
+                r#"{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}"#.into(),
+            ))
+            .await;
+        assert!(r.is_error);
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 }

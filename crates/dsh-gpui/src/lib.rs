@@ -14,6 +14,7 @@ pub mod reasoning_efforts;
 pub mod shell_exit;
 pub mod stat_popup;
 pub mod stat_reading;
+pub mod title_marquee;
 pub mod turn_error;
 pub mod ui_metrics;
 pub mod agent_presets;

@@ -277,16 +277,24 @@ A4 ──→ A6 的 skill/team UI
 | A1.4 | `schedule`：任务存储 + 到期投递 + 侧栏自动化页 + 工具 | A1.3 的 follow-up 缝 | 5-7 天 | 每分钟任务到点在自己的会话收到 follow-up |
 | A1.5 | `team`：任务板 + `tool-agent-team` + `ui-agent-team` | B1 / A1.2 | 1-2 周 | 两个子代理共享任务板、不重复劳动 |
 | A2.1 | `spill` + `tool-result-pruner` | 无 | 2-3 天 | ✅ **已落 11-09**（backlog #108）：`dsh-spill` crate（本机后端/保留策略/剪枝）+ 宿主 `maxInlineTokens=12500` + 压缩触发后先剪枝；剩 shadow 价事件与 spill 清理 |
-| A2.2 | `checkpoint` + `time-context` + `token-meter` | 无 | 3-4 天 | ✅ **前两件已落 11-09**（backlog #109）：时间注入 + `sync_all` 检查点；剩 token-meter 口径（沿用 chars/4，见 #110 待登记） |
+| A2.2 | `checkpoint` + `time-context` + `token-meter` | 无 | 3-4 天 | ✅ **前两件已落 11-09**（backlog #109）：时间注入 + `sync_all` 检查点；剩 token-meter 口径（沿用 chars/4，未登记） |
 | A3.1 | `fs-observation-policy` + `fs-patch`(apply_patch) | 无 | 3-4 天 | ✅ **观察策略已落 11-09**（backlog #110）：改前必读门 + 版本 CAS（默认关闭，同官方发货形态）；`apply_patch` 待做 |
 | A3.2 | `approval` 全链 + `sandbox` 策略/升级 + reminder/timeout | A0-a | 1-2 周 | ask 档真正拦截；一次批准可升级执行 |
-| A4.1 | `skill`：发现 + `tool-skill` + `/name` + `ui-skill` | 无 | 3-5 天 | 放一个 SKILL.md 即被按需加载并执行 |
-| A4.2 | `mcp`：客户端 + manager + resources + 设置页集群 | 设置页扩展 | 1-2 周 | 接本地 stdio server，其工具出现在工具面 |
+| A4.1 | `skill`：发现 + `tool-skill` + `/name` + `ui-skill` | 无 | 3-5 天 | ✅ **已落 11-09**（backlog #111）：`dsh-skill` crate（五根秩发现 / frontmatter / 目录与正文渲染逐字）+ `skill` 工具按预设门注册 + 首个请求前落 durable `skill-catalog` 消息（按 producer-owned kind 去重）+ `/name` 直接调用；11 条测试，实机发现 85 条技能。剩 fs 监听 / custom 根 |
+| A4.2 | `mcp`：客户端 + manager + resources + 设置页集群 | 设置页扩展 | 1-2 周 | ✅ **已落 11-09**（backlog #112）：`dsh-mcp` crate（stdio + JSON-RPC 2.0、initialize 四版协商、`tools/list` 分页与重名整表拒绝、`tools/call` 60s、`mcp__<server>__<raw>` 桥两阶段换代）+ 宿主按 `settings.yaml mcp.servers[]` 拉起；13 条测试。剩 Streamable HTTP / 重连退避 / mcp-resources / 设置页编辑 |
 | A4.3 | `lsp`：stdio + `tool-lsp` + 设置 | B3 | 1-2 周 | 跳定义 / 引用 / hover；✅ **纯面已落 11-09**（backlog #114）：`dsh-lsp` 缝（四操作闭集、`final_extension`、全有或全无注册、错误码文案）、帧协议（Content-Length、64KiB 头上限、五类失败文案）、渲染（一基↔零基换算、`path:line:character`、两类截断标记、`file:` URI 相对化、空结果文案、present 卡）；30 条测试。**剩批②**：stdio client + provider + `lsp` 工具 + `settings.yaml servers` 表与宿主接线 |
 | A4.4 | `worktree` + `session-query`（工具 + 侧栏检索） | 无 | 4-6 天 | 建 worktree 进入；跨会话关键词检索并跳转 |
 | A5.1 | `ask-user` 通用提问 + 已回答批次气泡 + 提问卡 | A0-a | 3-5 天 | 提问 → 选择 → 答案回模型；多轮不串话 |
 | A5.2 | feedback / quotes / 命令目录 / 快捷键 / 右键 / 参数页 / `@`候选 / 文件另存 | 无 | 1-2 周 | 逐项 UI 判据 |
 | A6 | `workspace-changes` 轮改动卡 + 整文件 diff + 任务类页面 | A1/A4 | 2-3 周 | 轮尾 ±行数卡、可点开单文件 diff |
+
+**A4.3 进度（分批）**
+
+| 小批 | 内容 | 状态 |
+|---|---|---|
+| ① | 缝 + 帧协议 + 渲染纯面：`dsh-lsp`（四操作闭集、`final_extension`、全有或全无注册、错误码文案）、Content-Length 帧（64KiB 头上限、五类失败文案）、渲染（一基↔零基 UTF-16、`path:line:character`、两类截断标记、`file:` URI 相对化、present 卡） | **已落 11-09**（6618693，backlog #114），30 条测试 |
+| ② | stdio client（`spawn` → `initialize` → 瞬态文档 `didOpen/didChange/didClose` → 四类语义请求 → `shutdown`/`exit` 升级）+ provider（按 `workspaceRoot` 实例缓存、读源文件、URI 规范化）+ `lsp` 工具（`LSP_PROMPT_TEXT`、60s 预算）+ `settings.yaml servers` 表 + 宿主接线 | 待做 |
+| ③ | provider 查询的取消信号转发（上游 AbortSignal）与并发查询下的实例复用 | 待做（随 ②） |
 
 ### 7.3 轨 B 批次（平台地基）
 

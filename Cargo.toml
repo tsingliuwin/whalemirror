@@ -26,6 +26,7 @@ members = [
   "crates/dsh-subprocess",
   "crates/dsh-lsp",
   "crates/dsh-goal",
+  "crates/dsh-schedule",
 ]
 
 # vendor 补丁版（0.9.0 基线）：markdown 渲染排版对齐 web（li 6px 间距、圆点次级色

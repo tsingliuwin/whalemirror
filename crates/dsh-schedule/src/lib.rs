@@ -12,12 +12,23 @@ mod parse;
 mod record;
 mod recurrence;
 mod rrule;
+mod service;
 mod store;
 mod task;
 mod update;
 
 pub use cron::{Cron, CronFields, CRON_SEARCH_HORIZON_YEARS};
 pub use rrule::{RRule, MAX_PERIOD_CANDIDATES, MAX_RRULE_COUNT, MAX_SET_POSITIONS, MIN_RRULE_YEAR};
+pub use service::{
+    advanced, append_delivery, batch_session_of, catalog_entry, compare_entries, delivered,
+    delivery_floor_end, delivery_history_page, format_task_local_time, involved,
+    new_reserved_session_id, new_schedule_id, next_admission_at, resolve_list_page,
+    resolve_recurring_occurrence, revised_at, revised_task, render_delivery_text,
+    DeliveryRetentionBounds, ScheduleCatalogEntry, ScheduleEditAction, ScheduleEditRequest,
+    ScheduleHistoryPageError, SchedulePatchRequest, ScheduleRuntimeLimits,
+    DEFAULT_DELIVERY_HISTORY_DAYS, DEFAULT_DELIVERY_HISTORY_RECORDS, DEFAULT_LIST_LIMIT,
+    DEFAULT_NEW_SESSION_INTERVAL_SECONDS, MAX_LIST_LIMIT, SUBAGENT_SESSION_REFUSAL,
+};
 pub use store::{
     ScheduleListing, ScheduleStore, ScheduleStoreError, SCHEDULE_COMPATIBLE_VERSIONS,
     SCHEDULE_DOMAIN_VERSION,
@@ -275,6 +286,64 @@ impl ScheduleRecord {
     /// 是否循环规则（上游 `isRecurringScheduleRecord`）。
     pub fn is_recurring(&self) -> bool {
         !matches!(self, Self::After(_) | Self::At(_))
+    }
+
+    /// 记录的权威时区（after/at 与 rrule 的时区在规则内，返回 None/
+    /// 解析形；上游 `'timeZone' in record` 的服务面）。
+    pub fn time_zone(&self) -> Option<&str> {
+        match self {
+            Self::Daily(r) => Some(&r.time_zone),
+            Self::Weekly(r) => Some(&r.time_zone),
+            Self::Cron(r) => Some(&r.time_zone),
+            _ => None,
+        }
+    }
+
+    /// 替换已承诺目标（runtime 前进与编辑重算用）。
+    pub fn set_scheduled_at(&mut self, scheduled_at: String) {
+        match self {
+            Self::After(r) => r.scheduled_at = scheduled_at,
+            Self::At(r) => r.scheduled_at = scheduled_at,
+            Self::Every(r) => r.scheduled_at = scheduled_at,
+            Self::Daily(r) => r.scheduled_at = scheduled_at,
+            Self::Weekly(r) => r.scheduled_at = scheduled_at,
+            Self::Cron(r) => r.scheduled_at = scheduled_at,
+            Self::RRule(r) => r.scheduled_at = scheduled_at,
+        }
+    }
+
+    /// 替换描述字段（编辑保留分支用）。
+    pub fn set_title_prompt(&mut self, title: impl Into<String>, prompt: impl Into<String>) {
+        match self {
+            Self::After(r) => {
+                r.title = title.into();
+                r.prompt = prompt.into();
+            }
+            Self::At(r) => {
+                r.title = title.into();
+                r.prompt = prompt.into();
+            }
+            Self::Every(r) => {
+                r.title = title.into();
+                r.prompt = prompt.into();
+            }
+            Self::Daily(r) => {
+                r.title = title.into();
+                r.prompt = prompt.into();
+            }
+            Self::Weekly(r) => {
+                r.title = title.into();
+                r.prompt = prompt.into();
+            }
+            Self::Cron(r) => {
+                r.title = title.into();
+                r.prompt = prompt.into();
+            }
+            Self::RRule(r) => {
+                r.title = title.into();
+                r.prompt = prompt.into();
+            }
+        }
     }
 }
 

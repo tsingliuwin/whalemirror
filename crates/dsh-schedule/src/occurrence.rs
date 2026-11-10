@@ -55,7 +55,7 @@ fn accepted_decision(selector: &str, accepted_at: i64) -> Result<i64, ScheduleLo
 }
 
 /// epoch → 该时区的本地日历日期（上游 `localDate`）。
-fn local_date(epoch_ms: i64, time_zone: &str) -> jiff::civil::Date {
+pub(crate) fn local_date(epoch_ms: i64, time_zone: &str) -> jiff::civil::Date {
     let timestamp =
         jiff::Timestamp::from_millisecond(epoch_ms).expect("调用方已限四位数年");
     let zone = jiff::tz::TimeZone::get(time_zone).expect("调用方已校验时区");

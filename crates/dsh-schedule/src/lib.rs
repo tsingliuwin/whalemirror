@@ -6,10 +6,13 @@
 //! 未来时刻校验。cron 与 rrule 的规则引擎（`dsh-util-time` 的 Cron/RRule）
 //! 在批② 落——本批只做记录形态与通用校验，不评估 occurrence。
 
+mod cron;
 mod occurrence;
 mod parse;
 mod record;
+mod recurrence;
 
+pub use cron::{Cron, CronFields, CRON_SEARCH_HORIZON_YEARS};
 pub use occurrence::{
     RecurringOccurrence, max_four_digit_year_ms, min_four_digit_year_ms, next_daily_target,
     next_weekly_target, resolve_daily_occurrence, resolve_every_occurrence,

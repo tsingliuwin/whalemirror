@@ -20,10 +20,11 @@ use std::sync::{Arc, Mutex};
 use dsh_llm::LlmFailure;
 
 use dsh_session::goal::{
-    GoalChange, GoalClear, GoalFoldState, GoalId, GoalSnapshot, GoalSnapshotChange,
-    apply_goal_change, apply_goal_event,
+    GoalClear, GoalFoldState, GoalId, apply_goal_change, apply_goal_event,
 };
-pub use dsh_session::goal::{GoalBlockReason, GoalPhase, GoalRef};
+pub use dsh_session::goal::{
+    GoalBlockReason, GoalChange, GoalPhase, GoalRef, GoalSnapshot, GoalSnapshotChange,
+};
 
 /// 目标域边界错误：稳定 code（上游 `GoalErrorCode`）+ 人类可读 message。
 #[derive(Clone, Debug, PartialEq, Eq)]

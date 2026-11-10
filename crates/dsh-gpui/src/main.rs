@@ -1956,6 +1956,9 @@ pub(crate) struct AppView {
     /// 文件观察策略（切会话时刷新属主；上游 fs-observation-policy）
     fs_observation: dsh_fs::observation::ObservationPolicy,
     todos: Vec<dsh_session::TodoEntry>,
+    /// 目标域 store（上游 GoalService 的单会话等价；`/goal` 命令与
+    /// goal 工具共用；耐久提交缝在 main 侧接 recorder）。
+    goal_store: Arc<dsh_goal::GoalStore>,
     /// 清单面板折叠态（上游 TodoPanel 默认折叠=true，只露标题行）
     todos_collapsed: bool,
     /// #5 真并发：非当前会话的运行时表（发送时按需 spawn、轮终 reap）。
@@ -2200,6 +2203,7 @@ impl AppView {
         queue_edit_input: Entity<InputState>,
         job_owner: dsh_jobs::OwnerCell,
         fs_observation: dsh_fs::observation::ObservationPolicy,
+        goal_store: Arc<dsh_goal::GoalStore>,
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
@@ -2323,6 +2327,7 @@ impl AppView {
         job_owner: job_owner.clone(),
         fs_observation,
         todos: Vec::new(),
+        goal_store: Arc::clone(&goal_store),
         todos_collapsed: true,
             plan_review_tx: None,
             session_runtimes: std::collections::HashMap::new(),
@@ -4504,6 +4509,18 @@ impl AppView {
 
     fn dispatch_user_text(&mut self, text: &str, queued_placement: bool, cx: &mut Context<Self>) {
         self.command_menu = false;
+        // /goal 命令（上游 command-goal：show/create/edit/pause/resume/clear，
+        // 其余输入按 objective 处理）。命令不走模型，直接驱动 goal 域。
+        if let Some(goal_input) = text.strip_prefix("/goal") {
+            // `/goal` 或 `/goal …`（strip_prefix 后首字符必须是空白或结尾）。
+            if goal_input.is_empty() || goal_input.starts_with(char::is_whitespace) {
+                let raw = goal_input.trim();
+                let notice = self.execute_goal_command(raw);
+                self.pending_toasts.push(notice);
+                cx.notify();
+                return;
+            }
+        }
         for (path, content) in self.resolve_file_references(text) {
             let name = std::path::Path::new(&path)
                 .file_name()
@@ -7666,7 +7683,7 @@ impl AppView {
     /// sectionRows 实值）：r20 菜单底 + elevation-prominent、p4、max-h 400；
     /// 行 40/r10/14-22、图标 16 三级、名称 + /别名 + 右对齐描述、段头
     /// 12-18 三级；过滤态平铺去段头、无匹配「无选项」。面内子集：
-    /// goal/plan/feedback/permission 无后端面不落行（偏差固化）。
+    /// goal 已接后端面（A1.3 批②③+宿主接线）；plan/feedback 无后端面不落行。
     fn command_menu_element(&self, this: &Entity<AppView>, query: Option<&str>) -> Div {
         let t = theme::t();
         struct CmdRow {
@@ -7678,6 +7695,7 @@ impl AppView {
         const ROWS: &[CmdRow] = &[
             CmdRow { section: "添加", name: "file", label: "文件", desc: None },
             CmdRow { section: "指令", name: "compact", label: "压缩", desc: Some("压缩以上对话内容") },
+            CmdRow { section: "指令", name: "goal", label: "目标", desc: Some("设置或查看长时任务的持续目标") },
             CmdRow { section: "指令", name: "plan", label: "计划模式", desc: Some("进入或离开计划模式（输入 off 离开）") },
             CmdRow { section: "指令", name: "permission", label: "权限", desc: Some("切换权限预设（沙箱模式与审批策略）") },
             CmdRow { section: "指令", name: "model", label: "模型", desc: Some("选择本会话使用的模型") },
@@ -7771,6 +7789,13 @@ impl AppView {
                             "compact" => t_row.update(cx, |v, cx| {
                                 v.command_menu = false;
                                 v.agent.compact_now();
+                                cx.notify();
+                            }),
+                            "goal" => t_row.update(cx, |v, cx| {
+                                v.command_menu = false;
+                                // 选中即查看当前目标（上游命令参考行为：show）。
+                                let notice = v.execute_goal_command("");
+                                v.pending_toasts.push(notice);
                                 cx.notify();
                             }),
                             "plan" => t_row.update(cx, |v, cx| {
@@ -7889,6 +7914,158 @@ impl AppView {
                     );
                 },
             )))
+    }
+
+    /// `/goal` 命令执行（上游 command-goal 的 executeGoalCommand 逐字文案；
+    /// 附件支路本宿主暂无 goal 附件面——附件不随 goal 提交，偏差登记）。
+    fn execute_goal_command(&self, raw: &str) -> String {
+        const USAGE: &str = "Usage: /goal [<objective>|clear|edit <objective>|pause|resume]";
+        let input = raw.trim();
+        // 解析（上游 parseGoalCommand：空=show；clear/pause/resume 闭集；
+        // edit 带参；其余=objective）。
+        enum GoalCommand {
+            Show,
+            Create(String),
+            Edit(String),
+            InvalidEdit,
+            Pause,
+            Resume,
+            Clear,
+        }
+        let command = if input.is_empty() {
+            GoalCommand::Show
+        } else {
+            let control = input.to_lowercase();
+            if control == "clear" {
+                GoalCommand::Clear
+            } else if control == "pause" {
+                GoalCommand::Pause
+            } else if control == "resume" {
+                GoalCommand::Resume
+            } else if control == "edit" {
+                GoalCommand::InvalidEdit
+            } else if let Some(objective) = input.strip_prefix("edit ") {
+                GoalCommand::Edit(objective.trim().to_string())
+            } else {
+                GoalCommand::Create(input.to_string())
+            }
+        };
+        let store = &self.goal_store;
+        let current = store.get().ok().flatten();
+        let phase_label = |phase: dsh_goal::store::GoalPhase| phase.as_str();
+        let goal_error = |action: &str| {
+            format!("No goal is currently set; /goal {action} requires one. {USAGE}")
+        };
+        let render = |title: &str, goal: &dsh_goal::store::GoalView| {
+            let mut lines = vec![
+                title.to_string(),
+                format!("Status: {}", phase_label(goal.phase)),
+            ];
+            if goal.phase == dsh_goal::store::GoalPhase::Blocked {
+                if let Some(reason) = &goal.blocked_reason {
+                    lines.push(format!("Blocker: {}: {}", reason.code, reason.message));
+                }
+            }
+            lines.push(format!("Objective: {}", goal.objective));
+            lines.push(format!("Rounds: {}/{}", goal.rounds_started, goal.max_goal_rounds));
+            lines.push(format!("Activation: {}", goal.activation.as_str()));
+            lines.push(String::new());
+            let hint = if goal.phase == dsh_goal::store::GoalPhase::Active {
+                if goal.activation == dsh_goal::store::GoalActivation::Armed {
+                    "/goal edit <objective>, /goal pause, /goal clear"
+                } else {
+                    "/goal edit <objective>, /goal resume, /goal clear"
+                }
+            } else if goal.phase == dsh_goal::store::GoalPhase::Complete {
+                "/goal <objective>, /goal clear"
+            } else {
+                "/goal edit <objective>, /goal resume, /goal clear"
+            };
+            lines.push(format!("Commands: {hint}"));
+            lines.join("\n")
+        };
+        let reference = |goal: &dsh_goal::store::GoalView| dsh_goal::store::GoalRef {
+            id: goal.id.clone(),
+            revision: goal.revision,
+        };
+        match command {
+            GoalCommand::Show => match &current {
+                None => format!("No goal is currently set.\n{USAGE}"),
+                Some(goal) => render("Goal", goal),
+            },
+            GoalCommand::InvalidEdit => {
+                format!("Goal editing requires a replacement objective.\n{USAGE}")
+            }
+            GoalCommand::Create(objective) => {
+                if let Some(goal) = &current
+                    && goal.phase != dsh_goal::store::GoalPhase::Complete
+                {
+                    return format!(
+                        "A goal is already {}. Use /goal edit <objective> to change it or /goal clear before replacing it.",
+                        phase_label(goal.phase)
+                    );
+                }
+                match store.create(
+                    dsh_goal::store::CreateGoalRequest {
+                        objective,
+                        max_goal_rounds: None,
+                    },
+                    256,
+                ) {
+                    Ok(goal) => render("Goal created", &goal),
+                    Err(_) => "The goal command is not valid for the current state. Run /goal to view available commands.".into(),
+                }
+            }
+            GoalCommand::Edit(objective) => match &current {
+                None => goal_error("edit"),
+                Some(goal) if goal.phase == dsh_goal::store::GoalPhase::Complete => {
+                    match store.create(
+                        dsh_goal::store::CreateGoalRequest {
+                            objective,
+                            max_goal_rounds: None,
+                        },
+                        256,
+                    ) {
+                        Ok(goal) => render("Goal created", &goal),
+                        Err(_) => "The goal command is not valid for the current state. Run /goal to view available commands.".into(),
+                    }
+                }
+                Some(goal) => {
+                    match store.edit(
+                        &reference(goal),
+                        dsh_goal::store::EditGoalRequest {
+                            objective: Some(objective),
+                            max_goal_rounds: None,
+                        },
+                    ) {
+                        Ok(goal) => render("Goal updated", &goal),
+                        Err(_) => "The goal command is not valid for the current state. Run /goal to view available commands.".into(),
+                    }
+                }
+            },
+            GoalCommand::Pause => match &current {
+                None => goal_error("pause"),
+                Some(goal) => match store.pause(&reference(goal)) {
+                    Ok(goal) => render("Goal paused", &goal),
+                    Err(_) => "The goal command is not valid for the current state. Run /goal to view available commands.".into(),
+                },
+            },
+            GoalCommand::Resume => match &current {
+                None => goal_error("resume"),
+                Some(goal) => match store.resume(&reference(goal)) {
+                    Ok(goal) => render("Goal resumed", &goal),
+                    // goal/changed → requestDrive（上游）：create/resume 后驱动。
+                    Err(_) => "The goal command is not valid for the current state. Run /goal to view available commands.".into(),
+                },
+            },
+            GoalCommand::Clear => match &current {
+                None => "No goal to clear.".into(),
+                Some(goal) => match store.clear(&reference(goal)) {
+                    Ok(_) => "Goal cleared.".into(),
+                    Err(_) => "The goal command is not valid for the current state. Run /goal to view available commands.".into(),
+                },
+            },
+        }
     }
 
     /// 输入卡（web InputBar .card）：r22、白 6% 描边、850 表面、
@@ -9311,6 +9488,27 @@ fn main() {
     let _skill = tools.register_when(skill_tool.clone(), preset_gate("skill")).unwrap();
     let todo_tool = Arc::new(dsh_tools::TodoTool::new(false));
     let _todo = tools.register_when(todo_tool.clone(), preset_gate("todo_write")).unwrap();
+    // goal（上游 goal/tool-goal + goal-round-driver）：目标域三工具 + 轮驱动。
+    // store 的耐久提交缝在事件 sink 侧（agent 就绪后接线）；probe/defer 缝
+    // 由 main 侧注入（打开轮次消息快照 / wrapup 上下文）。
+    let goal_store = Arc::new(dsh_goal::GoalStore::new());
+    let goal_tools = Arc::new(dsh_goal::GoalTools::new(Arc::clone(&goal_store)));
+    let goal_driver = Arc::new(dsh_goal::GoalRoundDriver::new(Arc::clone(&goal_store)));
+    for tool in dsh_goal::tools::register_goal_tools(&tools, Arc::clone(&goal_tools))
+        .expect("register goal tools")
+    {
+        std::mem::forget(tool);
+    }
+    // goal 驱动器挂 agent 事件总线（status/inbox×3/pre-step waterfall）。
+    {
+        let disposers = dsh_goal::driver::attach_goal_round_driver(
+            Arc::clone(&goal_driver),
+            &events,
+        );
+        for disposer in disposers {
+            std::mem::forget(disposer);
+        }
+    }
     // 清单 UI 推送（工具线程 → UI 泵；单一来源仍是会话日志）
     let (todo_tx, todo_rx) = std::sync::mpsc::channel::<Vec<dsh_session::TodoEntry>>();
     // exit_plan_mode（上游 plan-mode 包同名工具最小等价）：模型提交计划，
@@ -9331,6 +9529,12 @@ fn main() {
         )
         .unwrap();
     let prompt = Arc::new(SystemPrompt::new());
+    // tool:goal section（上游 tool-goal 的 guidance：文案逐字 + 阈值插值）。
+    let _goal_section = prompt.add_section(dsh_system_prompt::PromptSection {
+        name: "tool:goal".into(),
+        order: prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolGoal),
+        text: goal_tools.guidance(),
+    });
     // tool:edit section（上游 applyEditTool 同文）：read-before-edit 引导；
     // 偏差：上游默认 fs-observation-policy 硬门未实装，仅提示词引导
     let _edit_section = prompt.add_section(dsh_system_prompt::PromptSection {
@@ -9649,15 +9853,108 @@ fn main() {
 
     // 持久化：每个追加的会话事件写入 web 布局（cwd 由 AppView 维护）
     let recorder_sink = Arc::clone(&recorder);
-    let agent_sink = Arc::clone(&agent);
     let cwd_slot = Arc::new(std::sync::Mutex::new(initial_cwd.clone()));
     let cwd_slot_for_view = Arc::clone(&cwd_slot);
     let cwd_slot_sink = Arc::clone(&cwd_slot);
+    // goal 面（上游 goal-round-driver 的 session/event 分支）：
+    // - `goal/change` → GoalStore 的耐久提交缝在 sink 之前已把变更送进来
+    //   （store.commit 先于本钩子），这里只做日志落盘（goal_tools 的
+    //   CommitSink 直接 append，不走本分支——见下方 set_sink 接线）；
+    // - goal round 的 `user/message` 落盘 → 驱动器承认轮（roundsStarted 推进）；
+    // - `turn/end` → 驱动器的轮末分支（max-tokens 解除武装 / aborted 标记）。
+    let goal_driver_sink = Arc::clone(&goal_driver);
+    let goal_agent_sink = Arc::clone(&agent);
     agent.set_event_sink(move |event| {
-        let id = agent_sink.session().lock().unwrap().id.clone();
+        let id = goal_agent_sink.session().lock().unwrap().id.clone();
         let cwd = cwd_slot_sink.lock().unwrap().clone();
         let _ = recorder_sink.append(&id, &cwd, &event);
+        match &event {
+            SessionEvent::UserMessage(message) => {
+                if matches!(&message.source, dsh_llm::MessageSource::Goal { .. }) {
+                    goal_driver_sink.on_message_admitted(message);
+                }
+            }
+            SessionEvent::TurnEnd { reason, .. } => {
+                if goal_driver_sink.on_turn_end(reason) {
+                    // 上游 goal/changed → requestDrive：轮末后立即驱动
+                    // （drive_pass 自带 armed/active/静默前置检查）。
+                    goal_driver_sink.pump();
+                }
+            }
+            _ => {}
+        }
     });
+    // GoalStore 的耐久提交缝：goal/change 直接落会话日志（todo/write 同款
+    // 位置——不经事件 sink，因为 store 在 agent 之外）。
+    {
+        let recorder_goal = Arc::clone(&recorder);
+        let agent_goal = Arc::clone(&agent);
+        let cwd_goal = Arc::clone(&cwd_slot);
+        goal_store.set_sink(Arc::new(move |change: &dsh_goal::store::GoalChange| {
+            let id = agent_goal.session().lock().unwrap().id.clone();
+            let cwd = cwd_goal.lock().unwrap().clone();
+            let _ = recorder_goal.append(&id, &cwd, &SessionEvent::GoalChange(change.clone()));
+        }));
+    }
+    // goal 驱动器的 followup/remove 缝接 agent（预留轮注入与撤回）。
+    {
+        let driver_followup_agent = Arc::clone(&agent);
+        goal_driver.set_followup(Arc::new(move |message: &dsh_llm::Message| {
+            driver_followup_agent.send(message.clone(), InboxTarget::NextTurn)
+        }));
+        let driver_remove_agent = Arc::clone(&agent);
+        goal_driver.set_remove(Arc::new(move |message_id: &str| {
+            driver_remove_agent.remove_queued(message_id)
+        }));
+    }
+    // goal 工具的权限探针：打开轮次内的消息快照（根会话——主 agent）。
+    {
+        let probe_agent = Arc::clone(&agent);
+        goal_tools.set_probe(Arc::new(move || {
+            let mut messages = Vec::new();
+            {
+                let session = probe_agent.session();
+                let session = session.lock().unwrap();
+                let entries = session.entries();
+                // 打开轮次边界：最后一个 turn/start 之后（无打开轮次 = 空）。
+                let open_start = entries
+                    .iter()
+                    .rev()
+                    .find_map(|e| matches!(&e.event, SessionEvent::TurnStart { .. }).then_some(e.seq))
+                    .and_then(|seq| {
+                        let has_end = entries.iter().any(|e| {
+                            matches!(&e.event, SessionEvent::TurnEnd { .. }) && e.seq > seq
+                        });
+                        has_end.then_some(seq)
+                    });
+                if let Some(start) = open_start {
+                    for entry in entries.iter().filter(|e| e.seq > start) {
+                        if let SessionEvent::UserMessage(message) = &entry.event {
+                            messages.push(message.clone());
+                        }
+                    }
+                }
+            }
+            dsh_goal::AuthorityProbe { open_turn_messages: messages, is_root_session: true }
+        }));
+    }
+    // goal 工具的 wrapup 回注缝：自主轮终局的收尾指令注入下一步。
+    {
+        let defer_agent = Arc::clone(&agent);
+        goal_tools.set_defer_context(Arc::new(move |text: String| {
+            let mut message = dsh_llm::Message::user(vec![dsh_llm::ContentBlock::text(text)]);
+            message.source = dsh_llm::MessageSource::Context {
+                context_kind: "tool-goal".into(),
+                plugin: Some("tool-goal".into()),
+                form: Some("notice".into()),
+                summary: None,
+                changes_paths: Vec::new(),
+                reference_labels: Vec::new(),
+                name: None,
+            };
+            defer_agent.inject(message);
+        }));
+    }
 
     // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有
     // 目录就不重复落）。必须放在事件 sink 之后——否则这条 durable 事件只进
@@ -10155,6 +10452,7 @@ fn main() {
                         queue_edit_input.clone(),
                         job_owner.clone(),
                         fs_observation.clone(),
+                        Arc::clone(&goal_store),
                         cx,
                     )
                 });

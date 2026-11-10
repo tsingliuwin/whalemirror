@@ -32,6 +32,7 @@ dsh-spill = { path = "../dsh-spill" }
 dsh-skill = { path = "../dsh-skill" }
 dsh-mcp = { path = "../dsh-mcp" }
 dsh-lsp = { path = "../dsh-lsp" }
+dsh-goal = { path = "../dsh-goal" }
 dsh-subprocess = { path = "../dsh-subprocess" }
 tokio.workspace = true
 futures.workspace = true

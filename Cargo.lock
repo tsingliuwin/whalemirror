@@ -1360,6 +1360,7 @@ dependencies = [
  "dsh-compaction",
  "dsh-cordis",
  "dsh-fs",
+ "dsh-goal",
  "dsh-jobs",
  "dsh-llm",
  "dsh-llm-deepseek",

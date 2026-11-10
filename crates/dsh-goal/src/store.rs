@@ -151,6 +151,27 @@ impl GoalStore {
         *self.sink.lock().unwrap() = Some(sink);
     }
 
+    /// 承认一轮（`user/message` 落 goal 源消息时的推进路径）。
+    ///
+    /// 上游走 `applyGoalEvent` 的 user/message 分支推进 `roundsStarted`；
+    /// rustdsh 宿主在消息落盘钩子里调这里。严格校验（恰为下一轮、不超
+    /// 预算、目标 active）与回放同一条路径。
+    pub fn admit_round(&self, goal_id: &str, revision: u64, round: u64) -> Result<(), GoalError> {
+        if let Some(failure) = self.failure.lock().unwrap().clone() {
+            return Err(GoalError::new(codes::NOT_FOUND, failure));
+        }
+        let payload = serde_json::json!({
+            "source": { "kind": "goal", "goalId": goal_id, "revision": revision, "round": round },
+        });
+        let mut inner = self.inner.lock().unwrap();
+        let mut scratch = inner.clone();
+        if let Err(message) = apply_goal_event(&mut scratch, "user/message", &payload, 0) {
+            return Err(GoalError::new(codes::INVALID_TRANSITION, message));
+        }
+        *inner = scratch;
+        Ok(())
+    }
+
     /// 从耐久流回放（启动/重载时重建内存态）。
     ///
     /// 严格 fold：任何 goal 相关事件非法都记录 failure 并拒绝后续访问

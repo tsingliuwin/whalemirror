@@ -10,6 +10,8 @@
 //! - `packages/goal/goal-round-driver` + `command-goal` → 后续批（宿主接线）。
 
 pub mod authority;
+pub mod driver;
+pub mod prompt;
 pub mod store;
 pub mod tools;
 pub mod wrapup;
@@ -18,9 +20,11 @@ pub use authority::{
     CompletionAuthority, AuthorityProbe, completion_authority, is_matching_goal_round,
     require_direct_human,
 };
+pub use driver::{GoalChanged, GoalChangedEvent, GoalRoundDriver, attach_goal_round_driver};
+pub use prompt::render_goal_round_prompt;
 pub use store::{
-    CommitSink, CreateGoalRequest, EditGoalRequest, GoalActivation, GoalChanged, GoalError,
-    GoalStore, GoalView, codes,
+    CommitSink, CreateGoalRequest, EditGoalRequest, GoalActivation, GoalChanged as StoreGoalChanged,
+    GoalError, GoalStore, GoalView, codes,
 };
 pub use tools::{DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS, GoalTools};
 pub use wrapup::render_wrapup_context;

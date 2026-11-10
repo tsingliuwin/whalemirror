@@ -9,6 +9,8 @@ description.workspace = true
 dsh-session = { path = "../dsh-session" }
 dsh-llm = { path = "../dsh-llm" }
 dsh-tools = { path = "../dsh-tools" }
+dsh-agent = { path = "../dsh-agent" }
+dsh-cordis = { path = "../cordis" }
 serde_json.workspace = true
 async-trait.workspace = true
 uuid.workspace = true

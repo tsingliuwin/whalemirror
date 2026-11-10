@@ -626,7 +626,7 @@ pub fn normalize_rrule(value: &str) -> Result<String, ScheduleInputError> {
 
 /// 冻结一个 scheduledAt 为 prepared 规则严格晚于 now 的首个 occurrence
 /// 的 rrule 记录（上游 `firstRecord`）。
-fn first_rrule_record(
+pub(crate) fn first_rrule_record(
     id: &str,
     title: String,
     prompt: String,

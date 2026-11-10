@@ -12,9 +12,24 @@ mod parse;
 mod record;
 mod recurrence;
 mod rrule;
+mod store;
+mod task;
+mod update;
 
 pub use cron::{Cron, CronFields, CRON_SEARCH_HORIZON_YEARS};
 pub use rrule::{RRule, MAX_PERIOD_CANDIDATES, MAX_RRULE_COUNT, MAX_SET_POSITIONS, MIN_RRULE_YEAR};
+pub use store::{
+    ScheduleListing, ScheduleStore, ScheduleStoreError, SCHEDULE_COMPATIBLE_VERSIONS,
+    SCHEDULE_DOMAIN_VERSION,
+};
+pub use task::{
+    decode_schedule_task, default_session_id, CreateSpec, DeliveryHistory, DeliveryHistoryRecord,
+    DeliveryReceipt, PendingDelivery, ScheduleTarget, ScheduleTask, ScheduleTaskStatus,
+};
+pub use update::{
+    create_schedule_record, normalized_timing, timing_of, update_schedule_record, validate_timing,
+    SchedulePatch, ScheduleTiming,
+};
 pub use occurrence::{
     RecurringOccurrence, max_four_digit_year_ms, min_four_digit_year_ms, next_daily_target,
     next_weekly_target, resolve_daily_occurrence, resolve_every_occurrence,

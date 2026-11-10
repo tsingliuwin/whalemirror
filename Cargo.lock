@@ -1335,6 +1335,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-goal"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dsh-llm",
+ "dsh-session",
+ "dsh-tools",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "dsh-gpui"
 version = "0.1.0"
 dependencies = [

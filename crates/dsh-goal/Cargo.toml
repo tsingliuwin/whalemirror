@@ -1,0 +1,17 @@
+[package]
+name = "dsh-goal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+dsh-session = { path = "../dsh-session" }
+dsh-llm = { path = "../dsh-llm" }
+dsh-tools = { path = "../dsh-tools" }
+serde_json.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

@@ -273,7 +273,7 @@ A4 ──→ A6 的 skill/team UI
 |---|---|---|---|---|
 | A1.1 | `todo_write` + 计划常显 + 重启恢复 | 无 | 2-3 天 | ✅ **已落 11-09**（backlog #106）：工具 + 整表 `todo/write` 事件 + composer 上方面板（聚焦/折叠/进度摘要）+ turn/start 清空 + 重载 fold；端到端 2 条 + 单测 3 条 + persist 往返 1 条 |
 | A1.2 | `jobs`：后台执行 / 读 / 等 / 取消 / 完成回注 + 会话头 roster | 工具层钩子 | 3-5 天 | ✅ **数据+工具面已落 11-09**（backlog #107）：`dsh-jobs` crate（输出环绝对偏移/淘汰、注册表 read/wait/kill/remove/subscribe、三工具逐字对齐、完成通知）+ bash `run_in_background` + `job/*` 审计事件 + prompt section；剩 UI roster（A6） |
-| A1.3 | `goal`：投影 + 工具 + `/goal` + round driver + turn-trigger 行 | A1.1 | 5-7 天 | **批① 已落 11-10**（backlog #115）：`dsh-session::goal` 纯面（快照/墓碑类型、严格解码器逐字文案、状态机校验、承认轮折叠、`to_wire` 互逆）+ `SessionEvent::GoalChange` + `MessageSource::Goal`；13 条单测。**批② 待做**：GoalService 等价面（CAS 变更/disarm）、`tool-goal` 四工具 + authority、round driver、`/goal` 命令 |
+| A1.3 | `goal`：投影 + 工具 + `/goal` + round driver + turn-trigger 行 | A1.1 | 5-7 天 | **批① 已落 11-10**（backlog #119）：`dsh-session::goal` 纯面 + `SessionEvent::GoalChange` + `MessageSource::Goal`。**批② 已落 11-10**（backlog #119）：新 crate `dsh-goal`——`GoalStore`（七操作 CAS/activation 流转/耐久提交缝/回放）、`authority`（直接人类轮 vs 目标承认轮的纯函数判定）、`tools`（get/create/update 三工具 + guidance + wrapup 注入缝）、`wrapup`（终局收尾指令逐字）；24 条测试。**批③ 待做**：round driver（轮末注入续跑消息）+ `/goal` 命令 + 宿主接线 + persist 读写臂 |
 | A1.4 | `schedule`：任务存储 + 到期投递 + 侧栏自动化页 + 工具 | A1.3 的 follow-up 缝 | 5-7 天 | 每分钟任务到点在自己的会话收到 follow-up |
 | A1.5 | `team`：任务板 + `tool-agent-team` + `ui-agent-team` | B1 / A1.2 | 1-2 周 | 两个子代理共享任务板、不重复劳动 |
 | A2.1 | `spill` + `tool-result-pruner` | 无 | 2-3 天 | ✅ **已落 11-09**（backlog #108）：`dsh-spill` crate（本机后端/保留策略/剪枝）+ 宿主 `maxInlineTokens=12500` + 压缩触发后先剪枝；剩 shadow 价事件与 spill 清理 |

@@ -15,7 +15,9 @@
 
 pub mod client;
 pub mod framing;
+pub mod host;
 pub mod render;
+pub mod translate;
 pub mod types;
 
 use std::collections::{HashMap, HashSet};
@@ -23,6 +25,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 pub use client::{ConnectionSpec, LspConnection, ServerRequestHandler};
+pub use host::{canonicalize_workspace, read_source, HostSource, HostWorkspace};
 pub use types::{
     LspHover, LspLocation, LspOperation, LspPosition, LspProvider, LspProviderQuery,
     LspQueryRequest, LspQueryResult, LspRange,

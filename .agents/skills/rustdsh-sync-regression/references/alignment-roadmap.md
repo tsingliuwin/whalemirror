@@ -296,7 +296,7 @@ A4 ──→ A6 的 skill/team UI
 | ② | 连接层：`dsh-lsp::client`（Content-Length 分帧端点、id 关联、出站请求/通知、入站服务端→客户端请求应答与 -32601 兜底、`$/cancelRequest`、stderr 有界尾部与退出文案、解码失败判死并终止受管范围、关闭后请求立即失败） | **已落 11-10**（backlog #114），8 条假服务端联调 |
 | ③ | 翻译层 + 宿主层：`translate`（能力判定、`utf-16` 协商、`Location`/`LocationLink`/`Hover` 归一与逐字错误文案）与 `host`（工作区规范化 + `file:` URI、源文件包含校验、字节上限读取） | **已落 11-10**（backlog #114），18 条单测 |
 | ④ | instance + provider：`LspInstance`（握手后台化、串行队列、瞬态文档生命周期、取消竞速 + `$/cancelRequest` 宽限 + 升级拆卸、优雅 shutdown/exit → 强杀升级、拆卸事务 watch 化）与 `StdioProvider`（按规范化 workspace 池化、队列内读源、死实例透明换新重试一次、dispose 后拒绝查询） | **已落 11-10**（backlog #114），12 条假服务端联调；取消信号经缝的 `LspQueryRequest.signal` 通道 |
-| ⑤ | `lsp` 工具（`LSP_PROMPT_TEXT`、一基↔零基换算、60s 预算）+ `settings.yaml servers` 表 + `dsh-gpui` 宿主接线 | 待做 |
+| ⑤ | `lsp` 工具（`LSP_PROMPT_TEXT`、一基↔零基换算、60s 预算、maxLocations=100/maxResultChars=16000）+ `settings.yaml lsp.servers` 表（id/command/args/env/extensionToLanguage/enabled/initializationOptions/configuration）+ `dsh-gpui` 宿主接线（加载期解析可执行文件、provider 注册进缝、工具按会话工作区注册） | **已落 11-10**（backlog #114），5 条工具联调；批② 至此收口 |
 
 ### 7.3 轨 B 批次（平台地基）
 

@@ -20,6 +20,7 @@ pub mod host;
 pub mod instance;
 pub mod provider;
 pub mod render;
+pub mod tool;
 pub mod translate;
 pub mod types;
 
@@ -32,6 +33,7 @@ pub use client::{ConnectionSpec, LspConnection, ServerRequestHandler};
 pub use host::{canonicalize_workspace, read_source, HostSource, HostWorkspace};
 pub use instance::{InstanceSpec, LspInstance};
 pub use provider::{StdioProvider, StdioProviderConfig};
+pub use tool::{LspTool, LspToolConfig, DEFAULT_LSP_TOOL_TIMEOUT_MS, LSP_PROMPT_TEXT};
 pub use types::{
     LspHover, LspLocation, LspOperation, LspPosition, LspProvider, LspProviderQuery,
     LspQueryRequest, LspQueryResult, LspRange,

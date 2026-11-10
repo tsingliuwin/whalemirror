@@ -1,4 +1,4 @@
-﻿//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
+//! dsh-gpui — 原生 GPUI 客户端，1:1 对齐参考 dsh Web UI。
 //!
 //! 布局契约（`packages/client/ui-layout`）：左 sidebar（280px，可折叠成 56px
 //! 图标栏）· 中会话区（≥640px，内容列 748px）· 右 details
@@ -365,6 +365,47 @@ pub(crate) struct AppSettings {
     /// 设置驱动集群的 rustdsh 等价面）。
     #[serde(default)]
     pub(crate) mcp: McpSettings,
+    /// LSP 服务端清单（settings.yaml `lsp.servers`；上游 lsp-stdio 的
+    /// `servers` 表：provider id → 本地语言服务器）。
+    #[serde(default)]
+    pub(crate) lsp: LspSettings,
+}
+
+/// LSP 设置（上游 `lsp-stdio` 的 Config：一组本地语言服务器）。
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LspSettings {
+    /// 服务端清单（每项一个 provider；id 是注册键）。
+    #[serde(default)]
+    pub(crate) servers: Vec<LspServerConfig>,
+}
+
+/// 一个本地语言服务器的声明（上游 `LspLocalServerConfig` 的字段面）。
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LspServerConfig {
+    /// provider id（稳定注册键；空 = 忽略该条目）。
+    #[serde(default)]
+    pub(crate) id: String,
+    /// 可执行文件。
+    #[serde(default)]
+    pub(crate) command: String,
+    /// 传给可执行文件的参数。
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
+    /// 额外环境变量（`KEY=VALUE` 形）。
+    #[serde(default)]
+    pub(crate) env: Vec<String>,
+    /// 小写带点扩展名 → LSP 语言 id（如 `{ ".ts": "typescript" }`）。
+    #[serde(default)]
+    pub(crate) extension_to_language: std::collections::HashMap<String, String>,
+    /// 是否启用（默认关：加进来不等于跑起来）。
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// 静态 `initialize` 选项（可省略）。
+    #[serde(default)]
+    pub(crate) initialization_options: Option<serde_json::Value>,
+    /// `workspace/configuration` 的静态应答（可省略）。
+    #[serde(default)]
+    pub(crate) configuration: Option<serde_json::Value>,
 }
 
 /// MCP 设置（上游 `mcp-manager`：一组 stdio 服务端 + 启停）。
@@ -433,6 +474,7 @@ impl Default for AppSettings {
             plugins_enabled: Vec::new(),
             agent_preset: dsh_gpui::agent_presets::DEFAULT_PRESET.to_string(),
             mcp: McpSettings::default(),
+            lsp: LspSettings::default(),
         }
     }
 }
@@ -9717,6 +9759,111 @@ fn main() {
             }
             // 保住客户端与 disposer：进程活多久工具就在多久
             std::mem::forget(started_out);
+        });
+    }
+    // LSP（上游 lsp-stdio + tool-lsp 的本地子集）：按 settings.yaml
+    // `lsp.servers` 注册 provider（上游在加载期解析每个可执行文件，解析失败
+    // 整表拒绝——rustdsh 同语义：失败只记日志、该条目跳过）与 `lsp` 工具。
+    // 服务器进程是惰性的：首个匹配查询才拉起。
+    {
+        let lsp_servers = user_settings.lsp.servers.clone();
+        let registry_lsp = Arc::new(dsh_lsp::LspRegistry::new());
+        let tools_lsp = Arc::clone(&tools_for_mcp);
+        let prompt_lsp = Arc::clone(&prompt);
+        let rt_lsp = tokio::runtime::Handle::current();
+        let providers: Arc<std::sync::Mutex<Vec<Arc<dyn dsh_lsp::LspProvider>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let providers_out = Arc::clone(&providers);
+        std::thread::spawn(move || {
+            let mut registered = 0usize;
+            for server in lsp_servers
+                .iter()
+                .filter(|s| s.enabled && !s.command.trim().is_empty() && !s.id.trim().is_empty())
+            {
+                // 加载期解析可执行文件（上游 resolveExecutable；失败该条目不发布）。
+                let resolved = dsh_subprocess::resolve_executable(&server.command);
+                let Ok(executable) = resolved else {
+                    let error = resolved.unwrap_err();
+                    eprintln!("lsp: server {} failed: {error}", server.id);
+                    continue;
+                };
+                let env: Vec<(String, String)> = server
+                    .env
+                    .iter()
+                    .filter_map(|entry| {
+                        let (key, value) = entry.split_once('=')?;
+                        Some((key.trim().to_string(), value.trim().to_string()))
+                    })
+                    .collect();
+                let provider: Arc<dyn dsh_lsp::LspProvider> = Arc::new(dsh_lsp::StdioProvider::new(
+                    server.id.clone(),
+                    server.extension_to_language.clone(),
+                    dsh_lsp::StdioProviderConfig {
+                        executable: executable.display().to_string(),
+                        args: server.args.clone(),
+                        env,
+                        initialization_options: server
+                            .initialization_options
+                            .clone()
+                            .unwrap_or(serde_json::Value::Null),
+                        configuration: server
+                            .configuration
+                            .clone()
+                            .unwrap_or(serde_json::Value::Null),
+                        max_message_bytes: 16_000_000,
+                        max_stderr_bytes: 1_000_000,
+                        max_document_bytes: 4_000_000,
+                        shutdown_timeout_ms: 5_000,
+                        kill_grace_ms: 2_000,
+                    },
+                ));
+                // 注册进缝（冲突/非法整表拒绝；失败记日志不炸宿主）。
+                match registry_lsp.register_provider(Arc::clone(&provider)) {
+                    Ok(_registration) => {
+                        // 保住 provider 与注册句柄：宿主活多久路由就在多久。
+                        providers_out.lock().unwrap().push(provider);
+                        // 上游 dispose 不做（effect 生命周期由宿主进程兜底）。
+                        std::mem::forget(_registration);
+                        registered += 1;
+                        eprintln!(
+                            "lsp: {} registered ({} extensions)",
+                            server.id,
+                            server.extension_to_language.len()
+                        );
+                    }
+                    Err(error) => eprintln!("lsp: server {} failed: {error}", server.id),
+                }
+            }
+            if registered > 0 {
+                // `lsp` 工具（上游 tool-lsp）：注册表 + 会话工作区。
+                let workspace = {
+                    // 会话工作区 = 初始 cwd（本宿主单会话；上游 workingDirectory.ensure）。
+                    std::env::current_dir().map(|p| p.display().to_string()).ok()
+                };
+                let tool = dsh_lsp::LspTool::new(
+                    Arc::clone(&registry_lsp),
+                    dsh_lsp::LspToolConfig::default(),
+                )
+                .with_workspace_root(workspace);
+                match tools_lsp.register(Arc::new(tool)) {
+                    Ok(_disposer) => {
+                        std::mem::forget(_disposer);
+                        // tool:lsp section（上游 tool-lsp 的 systemPrompt 节，文案逐字）：
+                        // LSP 是精确导航的辅助手段，不是普通浏览的替代。
+                        let _lsp_section = prompt_lsp.add_section(dsh_system_prompt::PromptSection {
+                            name: "tool:lsp".into(),
+                            order: prompt_lsp.get_section_order(
+                                dsh_system_prompt::PromptSectionOrderName::ToolLsp,
+                            ),
+                            text: dsh_lsp::LSP_PROMPT_TEXT.into(),
+                        });
+                        std::mem::forget(_lsp_section);
+                        eprintln!("lsp: tool registered");
+                    }
+                    Err(error) => eprintln!("lsp: tool registration failed: {error}"),
+                }
+            }
+            let _ = rt_lsp;
         });
     }
     // 用户显式技能调用缝（上游 tool-skill 的 `/name` 手势）：只有

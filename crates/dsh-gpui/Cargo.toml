@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "dsh-gpui"
 version.workspace = true
 edition.workspace = true
@@ -31,6 +31,8 @@ dsh-jobs = { path = "../dsh-jobs" }
 dsh-spill = { path = "../dsh-spill" }
 dsh-skill = { path = "../dsh-skill" }
 dsh-mcp = { path = "../dsh-mcp" }
+dsh-lsp = { path = "../dsh-lsp" }
+dsh-subprocess = { path = "../dsh-subprocess" }
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

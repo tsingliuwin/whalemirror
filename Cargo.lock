@@ -1348,6 +1348,7 @@ dependencies = [
  "dsh-jobs",
  "dsh-llm",
  "dsh-llm-deepseek",
+ "dsh-lsp",
  "dsh-mcp",
  "dsh-persist",
  "dsh-plugin",
@@ -1358,6 +1359,7 @@ dependencies = [
  "dsh-skill",
  "dsh-spill",
  "dsh-subagent",
+ "dsh-subprocess",
  "dsh-system-prompt",
  "dsh-tools",
  "dsh-web",
@@ -1426,7 +1428,9 @@ name = "dsh-lsp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dsh-llm",
  "dsh-subprocess",
+ "dsh-tools",
  "serde_json",
  "tokio",
  "url",

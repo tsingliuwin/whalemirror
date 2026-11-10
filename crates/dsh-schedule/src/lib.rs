@@ -7,11 +7,20 @@
 //! 在批② 落——本批只做记录形态与通用校验，不评估 occurrence。
 
 mod occurrence;
+mod parse;
+mod record;
 
 pub use occurrence::{
     RecurringOccurrence, max_four_digit_year_ms, min_four_digit_year_ms, next_daily_target,
     next_weekly_target, resolve_daily_occurrence, resolve_every_occurrence,
     resolve_weekly_occurrence,
+};
+pub use parse::{InstantRejection, LocalCalendarRejection, civil_to_epoch_ms, parse_local_calendar, parse_offset_instant};
+pub use record::{
+    create_after_schedule_record, create_at_schedule_record, create_daily_schedule_record,
+    create_every_schedule_record, create_weekly_schedule_record, decode_after_record,
+    decode_at_record, decode_daily_record, decode_every_record, decode_weekly_record,
+    parse_at_input, parse_daily_input, parse_weekly_input,
 };
 
 use serde::{Deserialize, Serialize};
@@ -293,14 +302,21 @@ pub fn decode_id(value: &str) -> Result<String, ScheduleLogError> {
 
 /// 解析并规范化一个 IANA 时区名（上游 `canonicalizeTimeZone`）。
 ///
-/// 返回 jiff 的规范名；`UTC` 恒合法。上游对形状前置（非 Area/Location）
-/// 的拒绝本面以 jiff 解析失败承载（文案逐字对齐）。
+/// 空、带空白边、非 `Area/Location` 形（缩写/数字偏移/单段名）前置拒绝；
+/// `UTC` 恒合法；别名返回 tzdb 规范拼写（上游 `Intl.resolvedOptions`
+/// 同语义——jiff `iana_name()` 给规范名）。
 pub fn canonicalize_time_zone(value: &str) -> Result<String, ScheduleInputError> {
-    if value.is_empty() {
+    if value.is_empty()
+        || value.trim() != value
+        || (value != "UTC" && !parse::iana_zone_shape(value))
+    {
         return Err(time_zone_error());
     }
     match jiff::tz::TimeZone::get(value) {
-        Ok(_) => Ok(value.to_string()),
+        Ok(zone) => Ok(zone
+            .iana_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| value.to_string())),
         Err(_) => Err(time_zone_error()),
     }
 }
@@ -314,19 +330,25 @@ fn time_zone_error() -> ScheduleInputError {
 }
 
 /// 解析 canonical RFC 3339 UTC 时刻（上游 `decodeInstant`——必须 Z 结尾、
-/// 四位数年、恒 3 位毫秒；jiff 解析后按 canonical 重格式化对比）。
+/// 四位数年、恒 3 位毫秒）。
+///
+/// 拒绝分支逐字：形不合法（含 0000 年）→ canonical 诊断；形过而日期
+/// 不存在（2 月 30）→ `not a real UTC calendar instant` 诊断。形与日期
+/// 都过但 jiff 不可表示（9999 尾段，登记偏差）→ canonical 诊断。
 pub fn decode_instant(value: &str) -> Result<String, ScheduleLogError> {
-    let non_canonical = || {
-        ScheduleLogError(
-            "scheduledAt must be a canonical four-digit-year RFC 3339 UTC instant".into(),
-        )
-    };
-    if value.starts_with("0000-") {
+    let non_canonical = || ScheduleLogError(record::NON_CANONICAL_INSTANT_MESSAGE.into());
+    if !parse::matches_utc_instant_shape(value) {
         return Err(non_canonical());
+    }
+    let year: i64 = value[0..4].parse().expect("形已校验数位");
+    let month: i64 = value[5..7].parse().expect("形已校验数位");
+    let day: i64 = value[8..10].parse().expect("形已校验数位");
+    if jiff::civil::Date::new(year as i16, month as i8, day as i8).is_err() {
+        return Err(ScheduleLogError("scheduledAt is not a real UTC calendar instant".into()));
     }
     let parsed: Result<jiff::Timestamp, _> = value.parse();
     let Ok(parsed) = parsed else { return Err(non_canonical()) };
-    // canonical 形 = 毫秒恒 3 位的 Z 形（`to_string` 省略零毫秒，不可对比）。
+    // canonical 形 = 毫秒恒 3 位的 Z 形（防御性重格式化对比）。
     if format_instant(parsed.as_millisecond()) != value {
         return Err(non_canonical());
     }
@@ -422,16 +444,23 @@ pub fn local_clock_time(value: &str, selector: &str) -> Result<String, ScheduleI
     Ok(format!("{hh}:{mm}:{seconds}.{millis}"))
 }
 
-/// 归一化周几集合（上游 `normalizeWeekdays` 逐字文案）。
-pub fn normalize_weekdays(weekdays: &[serde_json::Value]) -> Result<Vec<u8>, ScheduleInputError> {
-    if weekdays.is_empty() {
-        return Err(ScheduleInputError::new(
+/// 归一化周几集合（上游 `normalizeWeekdays` 逐字文案；收原始 JSON 值，
+/// 非数组与空数组同报非空数组诊断）。
+pub fn normalize_weekdays(weekdays: &serde_json::Value) -> Result<Vec<u8>, ScheduleInputError> {
+    let empty_error = || {
+        ScheduleInputError::new(
             ScheduleInputErrorCode::InvalidRule,
             "weekly.weekdays must be a non-empty array of ISO weekday numbers.",
-        ));
+        )
+    };
+    let Some(list) = weekdays.as_array() else {
+        return Err(empty_error());
+    };
+    if list.is_empty() {
+        return Err(empty_error());
     }
     let mut unique = std::collections::BTreeSet::new();
-    for weekday in weekdays {
+    for weekday in list {
         let Some(number) = weekday.as_u64() else {
             return Err(ScheduleInputError::new(
                 ScheduleInputErrorCode::InvalidRule,
@@ -584,20 +613,15 @@ mod tests {
 
     #[test]
     fn weekdays_normalize_unique_ascending() {
-        let values: Vec<serde_json::Value> = [3, 1, 5, 1]
-            .iter()
-            .map(|v| serde_json::json!(v))
-            .collect();
-        let error = normalize_weekdays(&values).unwrap_err();
+        let error = normalize_weekdays(&serde_json::json!([3, 1, 5, 1])).unwrap_err();
         assert_eq!(error.message, "weekly.weekdays must not repeat weekday 1.");
-        let values: Vec<serde_json::Value> =
-            [7, 1, 3].iter().map(|v| serde_json::json!(v)).collect();
-        assert_eq!(normalize_weekdays(&values).unwrap(), vec![1, 3, 7]);
+        assert_eq!(normalize_weekdays(&serde_json::json!([7, 1, 3])).unwrap(), vec![1, 3, 7]);
         // 0 与 8 拒绝。
-        let values: Vec<serde_json::Value> = vec![serde_json::json!(0)];
-        assert!(normalize_weekdays(&values).is_err());
-        // 空集拒绝。
-        assert!(normalize_weekdays(&[]).is_err());
+        assert!(normalize_weekdays(&serde_json::json!([0])).is_err());
+        assert!(normalize_weekdays(&serde_json::json!([8])).is_err());
+        // 空集与非数组同诊断。
+        assert!(normalize_weekdays(&serde_json::json!([])).is_err());
+        assert!(normalize_weekdays(&serde_json::json!("weekdays")).is_err());
     }
 
     #[test]

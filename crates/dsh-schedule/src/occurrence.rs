@@ -29,7 +29,10 @@ pub fn min_four_digit_year_ms() -> i64 {
 /// 实际上界 `9999-12-31T22:00:00Z`。**登记偏差**：年内最后 ~2h59m 的
 /// 目标在本面视为不可表示（上游可），后续以 jiff 能力观察面登记。
 pub fn max_four_digit_year_ms() -> i64 {
-    jiff::Timestamp::MAX.as_millisecond()
+    // `Timestamp::MAX` 自带纳秒尾量（ns=999_999_999），`as_millisecond`
+    // 截出的值喂不回 `from_millisecond`（毫秒闭界 = 整秒×1000）——取
+    // 整秒换算，即 `9999-12-31T22:00:00.000Z`。
+    jiff::Timestamp::MAX.as_second() * 1_000
 }
 
 /// 一次循环决策的结果（上游 `RecurringOccurrence`）。
@@ -75,7 +78,7 @@ fn parse_clock(time: &str) -> jiff::civil::Time {
 /// 把「日期 + 时刻」在该时区解析为 epoch 毫秒（上游 `resolveLocalInstant`）。
 ///
 /// 返回 `None` = 墙钟时刻不存在（DST gap）；overlap 取较早。
-fn resolve_local_instant(
+pub(crate) fn resolve_local_instant(
     date: jiff::civil::Date,
     time: jiff::civil::Time,
     time_zone: &str,
@@ -129,14 +132,18 @@ fn next_matching_target(
     after_date: Option<jiff::civil::Date>,
 ) -> Option<String> {
     let mut date = local_date(now_ms, time_zone);
-    // 循环上界直接用 civil 日期上界 9999-12-31（对它 +1 天不可能表示，
-    // jiff `Date::tomorrow()` 会报错）；上界日当天不可表示的目标走
-    // resolve_local_instant 的 None 路径自然跳过。
+    // 循环上界直接用 civil 日期上界 9999-12-31；上界日当天不可表示的
+    // 目标走 resolve_local_instant 的 None 路径自然跳过。
     let last_date = jiff::civil::Date::MAX;
     if let Some(after) = after_date
         && date <= after
     {
-        date = after.tomorrow().expect("四位数年内日期+1 恒可表示");
+        date = match after.tomorrow() {
+            Ok(next) => next,
+            // 已有 occurrence 落在年内最后一天：不存在更晚目标
+            //（上游 PlainDate.add 此处会 throw；本面回答耗尽）。
+            Err(_) => return None,
+        };
     }
     while date <= last_date {
         if matches.matches(date) {
@@ -149,7 +156,11 @@ fn next_matching_target(
                 }
             }
         }
-        date = date.tomorrow().expect("循环上限 last_date 内恒可 +1");
+        date = match date.tomorrow() {
+            Ok(next) => next,
+            // 9999-12-31 走完即耗尽（上游同位会 throw；本面回答 None）。
+            Err(_) => break,
+        };
     }
     None
 }
@@ -340,7 +351,7 @@ mod tests {
     }
 
     /// 2026-01-10T00:00:00.000Z（周六）。
-    const SAT: i64 = 1_767_993_600_000;
+    const SAT: i64 = 1_768_003_200_000;
 
     #[test]
     fn daily_next_target_finds_tomorrow_when_today_passed() {

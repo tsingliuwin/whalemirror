@@ -531,6 +531,233 @@ pub fn decode_weekly_record(value: &Map<String, Value>) -> Result<WeeklySchedule
 }
 
 
+/// 映射共享循环词表的拒绝到 Schedule 公开错误码（上游 `readRecurrence`：
+/// syntax→invalid_rule、time_zone→invalid_time_zone、density→
+/// frequency_too_high，detail 逐字）。
+pub(crate) fn read_recurrence<T>(
+    result: Result<T, crate::recurrence::RecurrenceInputError>,
+) -> Result<T, ScheduleInputError> {
+    use crate::recurrence::{RecurrenceInputError, RecurrenceRejection};
+    result.map_err(|error: RecurrenceInputError| {
+        let code = match error.reason {
+            RecurrenceRejection::Syntax => ScheduleInputErrorCode::InvalidRule,
+            RecurrenceRejection::TimeZone => ScheduleInputErrorCode::InvalidTimeZone,
+            RecurrenceRejection::Density => ScheduleInputErrorCode::FrequencyTooHigh,
+        };
+        ScheduleInputError::new(code, error.message)
+    })
+}
+
+/// 规范化一个受支持五字段 Cron 表达式（上游 `canonicalizeCronExpression`）。
+pub fn canonicalize_cron_expression(expression: &str) -> Result<String, ScheduleInputError> {
+    read_recurrence(crate::Cron::parse(expression, "UTC")).map(|cron| cron.expression().to_string())
+}
+
+/// 归一 cron 选择器，不算新承诺目标（上游 `parseCronInput`）。
+pub fn parse_cron_input(cron: &Value) -> Result<(String, String), ScheduleInputError> {
+    let time_error = || {
+        ScheduleInputError::new(
+            ScheduleInputErrorCode::InvalidRule,
+            "cron must contain exactly expression and time_zone, with a five-field cron expression.",
+        )
+    };
+    let Some(object) = cron.as_object() else {
+        return Err(time_error());
+    };
+    if !has_exact_keys(object, &["expression", "time_zone"])
+        || !object.get("expression").is_some_and(Value::is_string)
+    {
+        return Err(time_error());
+    }
+    let Some(raw_zone) = object.get("time_zone").and_then(Value::as_str) else {
+        return Err(ScheduleInputError::new(
+            ScheduleInputErrorCode::InvalidTimeZone,
+            "time_zone must be a string.",
+        ));
+    };
+    let expression = object
+        .get("expression")
+        .and_then(Value::as_str)
+        .expect("上面已校验为串");
+    let expression = canonicalize_cron_expression(expression)?;
+    let time_zone = canonicalize_time_zone(raw_zone)?;
+    Ok((expression, time_zone))
+}
+
+/// cron 墙钟提醒（上游 `createCronScheduleRecord`）。
+pub fn create_cron_schedule_record(
+    id: &str,
+    prompt: &str,
+    cron: &Value,
+    now: i64,
+    title: &str,
+) -> Result<crate::CronScheduleRecord, ScheduleInputError> {
+    use crate::CronScheduleRecord;
+    let prompt = normalized_prompt(prompt)?;
+    let (expression, time_zone) = parse_cron_input(cron)?;
+    if !is_four_digit_year_instant(now) {
+        return Err(ScheduleInputError::new(
+            ScheduleInputErrorCode::TimeOutOfRange,
+            "Cron creation time must be a representable four-digit-year UTC instant.",
+        ));
+    }
+    let title = schedule_title(title)?;
+    let rule = read_recurrence(crate::Cron::parse(&expression, &time_zone))?;
+    let Some(scheduled_at) = rule.next(now) else {
+        return Err(ScheduleInputError::new(
+            ScheduleInputErrorCode::TimeOutOfRange,
+            "No future cron occurrence is representable as a four-digit-year UTC instant.",
+        ));
+    };
+    Ok(CronScheduleRecord {
+        id: id.into(),
+        title,
+        prompt,
+        expression,
+        time_zone,
+        scheduled_at,
+    })
+}
+
+/// 校验并归一受支持的 RFC 5545 循环内容（上游 `normalizeRRule`）。
+pub fn normalize_rrule(value: &str) -> Result<String, ScheduleInputError> {
+    read_recurrence(crate::RRule::parse(value, false)).map(|rule| rule.expression().to_string())
+}
+
+/// 冻结一个 scheduledAt 为 prepared 规则严格晚于 now 的首个 occurrence
+/// 的 rrule 记录（上游 `firstRecord`）。
+fn first_rrule_record(
+    id: &str,
+    title: String,
+    prompt: String,
+    prepared: &crate::RRule,
+    now: i64,
+) -> Result<crate::RRuleScheduleRecord, ScheduleInputError> {
+    use crate::RRuleScheduleRecord;
+    if !is_four_digit_year_instant(now) {
+        return Err(ScheduleInputError::new(
+            ScheduleInputErrorCode::TimeOutOfRange,
+            "The recurrence reference time is outside the supported range.",
+        ));
+    }
+    let Some(scheduled_at) = prepared.next(now) else {
+        return Err(ScheduleInputError::new(
+            ScheduleInputErrorCode::NotFuture,
+            "rrule must contain an occurrence strictly in the future.",
+        ));
+    };
+    Ok(RRuleScheduleRecord {
+        id: id.into(),
+        title,
+        prompt,
+        rrule: prepared.expression().to_string(),
+        scheduled_at,
+    })
+}
+
+/// 创建一条带首个已承诺 occurrence 的 Host 任务记录（上游
+/// `createRRuleScheduleRecord`：title 先于 prompt 校验）。
+pub fn create_rrule_schedule_record(
+    id: &str,
+    title: &str,
+    prompt: &str,
+    rrule: &str,
+    now: i64,
+) -> Result<crate::RRuleScheduleRecord, ScheduleInputError> {
+    let title = schedule_title(title)?;
+    let prompt = normalized_prompt(prompt)?;
+    let prepared = read_recurrence(crate::RRule::parse(rrule, true))?;
+    first_rrule_record(id, title, prompt, &prepared, now)
+}
+
+/// 解码 cron 耐久规则，不重解已承诺目标（上游 `decodeCronRecord`）。
+pub fn decode_cron_record(
+    value: &Map<String, Value>,
+) -> Result<crate::CronScheduleRecord, ScheduleLogError> {
+    use crate::CronScheduleRecord;
+    let title = decode_record_title(
+        value,
+        &["id", "kind", "title", "prompt", "expression", "timeZone", "scheduledAt"],
+        "cron schedule must contain exactly id, kind, title, prompt, expression, timeZone, and scheduledAt",
+    )?;
+    let prompt = decode_prompt_field(value, "cron")?;
+    let Some(expression) = value.get("expression").and_then(Value::as_str) else {
+        return Err(ScheduleLogError("cron expression and timeZone must be strings".into()));
+    };
+    let Some(time_zone) = value.get("timeZone").and_then(Value::as_str) else {
+        return Err(ScheduleLogError("cron expression and timeZone must be strings".into()));
+    };
+    canonicalize_time_zone(time_zone).map_err(|error| ScheduleLogError(error.to_string()))?;
+    let canonical = canonicalize_cron_expression(expression)
+        .map_err(|error| ScheduleLogError(error.to_string()))?;
+    if expression != canonical {
+        return Err(ScheduleLogError("cron expression must be canonical".into()));
+    }
+    Ok(CronScheduleRecord {
+        id: decode_id_field(value)?,
+        title,
+        prompt,
+        expression: canonical,
+        time_zone: time_zone.into(),
+        scheduled_at: decode_scheduled_at_field(value)?,
+    })
+}
+
+/// 解码一个当前 Host 任务记录（上游 `decodeScheduleRecord`：七形态
+/// 闭集，kind 分派逐字诊断）。
+pub fn decode_schedule_record(value: &Value) -> Result<crate::ScheduleRecord, ScheduleLogError> {
+    let Some(map) = value.as_object() else {
+        return Err(ScheduleLogError("schedule record must be an object".into()));
+    };
+    match map.get("kind").and_then(Value::as_str) {
+        Some("after") => Ok(crate::ScheduleRecord::After(decode_after_record(map)?)),
+        Some("at") => Ok(crate::ScheduleRecord::At(decode_at_record(map)?)),
+        Some("every") => Ok(crate::ScheduleRecord::Every(decode_every_record(map)?)),
+        Some("daily") => Ok(crate::ScheduleRecord::Daily(decode_daily_record(map)?)),
+        Some("weekly") => Ok(crate::ScheduleRecord::Weekly(decode_weekly_record(map)?)),
+        Some("cron") => Ok(crate::ScheduleRecord::Cron(decode_cron_record(map)?)),
+        Some("rrule") => Ok(crate::ScheduleRecord::RRule(decode_rrule_record(map)?)),
+        _ => Err(ScheduleLogError(
+            "schedule kind must be \"after\", \"at\", \"every\", \"daily\", \"weekly\", \"cron\", or \"rrule\""
+                .into(),
+        )),
+    }
+}
+
+/// 解码 rrule 耐久记录（上游 `decodeRRuleScheduleRecord`：键闭集先行、
+/// prompt 文案为 schedule 前缀、归一失败包装 invalid 前缀）。
+pub fn decode_rrule_record(
+    value: &Map<String, Value>,
+) -> Result<crate::RRuleScheduleRecord, ScheduleLogError> {
+    use crate::RRuleScheduleRecord;
+    if !has_exact_keys(value, &["id", "kind", "title", "prompt", "rrule", "scheduledAt"]) {
+        return Err(ScheduleLogError(
+            "rrule schedule must contain exactly id, kind, title, prompt, rrule, and scheduledAt"
+                .into(),
+        ));
+    }
+    let title = match value.get("title").and_then(Value::as_str) {
+        Some(title) => decode_stored_title(title)?,
+        None => return Err(ScheduleLogError(crate::REQUIRED_TITLE_MESSAGE.into())),
+    };
+    let prompt = decode_prompt_field(value, "schedule")?;
+    let Some(rrule) = value.get("rrule").and_then(Value::as_str) else {
+        return Err(ScheduleLogError("schedule rrule must be a string".into()));
+    };
+    let normalized = normalize_rrule(rrule)
+        .map_err(|error| ScheduleLogError(format!("invalid schedule rrule: {error}")))?;
+    if normalized != rrule {
+        return Err(ScheduleLogError("schedule rrule must be normalized".into()));
+    }
+    Ok(RRuleScheduleRecord {
+        id: decode_id_field(value)?,
+        title,
+        prompt,
+        rrule: rrule.to_string(),
+        scheduled_at: decode_scheduled_at_field(value)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,5 +1028,141 @@ mod tests {
         assert_eq!(crate::canonicalize_time_zone("asia/kolkata").unwrap(), "Asia/Kolkata");
         assert_eq!(crate::canonicalize_time_zone("Asia/Calcutta").unwrap(), "Asia/Calcutta");
         assert_eq!(crate::canonicalize_time_zone("UTC").unwrap(), "UTC");
+    }
+
+    #[test]
+    fn cron_record_create_decode_round_trip() {
+        let record = create_cron_schedule_record(
+            "t1",
+            "p",
+            &json!({"expression": "*/15 * * * *", "time_zone": "UTC"}),
+            NOW,
+            "t",
+        )
+        .unwrap();
+        // 首个匹配：决策周六 08:00 → 08:15。
+        assert_eq!(record.scheduled_at, "2026-01-10T08:15:00.000Z");
+        let value = serde_json::to_value(crate::ScheduleRecord::Cron(record)).unwrap();
+        let decoded = decode_schedule_record(&value).unwrap();
+        assert_eq!(decoded.id(), "t1");
+        // 非 canonical 表达式拒。
+        let mut raw = value;
+        raw.as_object_mut()
+            .unwrap()
+            .insert("expression".into(), json!("0-59/15 * * * *"));
+        let error = decode_schedule_record(&raw).unwrap_err();
+        assert_eq!(error.0, "cron expression must be canonical");
+        // 坏时区（构造端读映射码）。
+        let error = create_cron_schedule_record(
+            "t1",
+            "p",
+            &json!({"expression": "*/15 * * * *", "time_zone": "Mars/Olympus"}),
+            NOW,
+            "t",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ScheduleInputErrorCode::InvalidTimeZone);
+    }
+
+    #[test]
+    fn rrule_record_create_decode_round_trip() {
+        let record = create_rrule_schedule_record(
+            "t1",
+            "t",
+            "p",
+            "DTSTART:20260110T090000Z\nRRULE:FREQ=DAILY",
+            NOW,
+        )
+        .unwrap();
+        // 首个 occurrence：决策 08:00 → 09:00。
+        assert_eq!(record.scheduled_at, "2026-01-10T09:00:00.000Z");
+        let value = serde_json::to_value(crate::ScheduleRecord::RRule(record)).unwrap();
+        let decoded = decode_schedule_record(&value).unwrap();
+        assert_eq!(decoded.id(), "t1");
+        // 未归一（带 CRLF）拒。
+        let mut raw = value;
+        raw.as_object_mut().unwrap().insert(
+            "rrule".into(),
+            json!("DTSTART:20260110T090000Z\r\nRRULE:FREQ=DAILY"),
+        );
+        let error = decode_schedule_record(&raw).unwrap_err();
+        assert_eq!(error.0, "schedule rrule must be normalized");
+        // 无未来 occurrence（UNTIL 已过）→ not_future。
+        let error = create_rrule_schedule_record(
+            "t1",
+            "t",
+            "p",
+            "DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;UNTIL=20260102T090000Z",
+            NOW,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ScheduleInputErrorCode::NotFuture);
+        assert_eq!(error.message, "rrule must contain an occurrence strictly in the future.");
+    }
+
+    #[test]
+    fn decode_schedule_record_closed_kind_set() {
+        // 非对象。
+        let error = decode_schedule_record(&json!("x")).unwrap_err();
+        assert_eq!(error.0, "schedule record must be an object");
+        // 未知 kind。
+        let error = decode_schedule_record(&json!({"kind": "hourly"})).unwrap_err();
+        assert_eq!(
+            error.0,
+            "schedule kind must be \"after\", \"at\", \"every\", \"daily\", \"weekly\", \"cron\", or \"rrule\""
+        );
+        // 七形态各一条 round trip。
+        let records = vec![
+            crate::ScheduleRecord::After(create_after_schedule_record("t1", "p", 90, NOW, "t").unwrap()),
+            crate::ScheduleRecord::At(
+                create_at_schedule_record("t1", "p", &json!("2026-01-10T09:00:00Z"), NOW, "t").unwrap(),
+            ),
+            crate::ScheduleRecord::Every(create_every_schedule_record("t1", "p", 120, NOW, "t").unwrap()),
+            crate::ScheduleRecord::Daily(
+                create_daily_schedule_record(
+                    "t1",
+                    "p",
+                    &json!({"time": "09:30:00", "time_zone": "UTC"}),
+                    NOW,
+                    "t",
+                )
+                .unwrap(),
+            ),
+            crate::ScheduleRecord::Weekly(
+                create_weekly_schedule_record(
+                    "t1",
+                    "p",
+                    &json!({"time": "09:30:00", "time_zone": "UTC", "weekdays": [1, 3]}),
+                    NOW,
+                    "t",
+                )
+                .unwrap(),
+            ),
+            crate::ScheduleRecord::Cron(
+                create_cron_schedule_record(
+                    "t1",
+                    "p",
+                    &json!({"expression": "*/15 * * * *", "time_zone": "UTC"}),
+                    NOW,
+                    "t",
+                )
+                .unwrap(),
+            ),
+            crate::ScheduleRecord::RRule(
+                create_rrule_schedule_record(
+                    "t1",
+                    "t",
+                    "p",
+                    "DTSTART:20260110T090000Z\nRRULE:FREQ=DAILY",
+                    NOW,
+                )
+                .unwrap(),
+            ),
+        ];
+        for record in records {
+            let value = serde_json::to_value(&record).unwrap();
+            let decoded = decode_schedule_record(&value).unwrap();
+            assert_eq!(decoded, record);
+        }
     }
 }

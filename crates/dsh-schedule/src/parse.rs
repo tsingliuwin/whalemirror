@@ -131,7 +131,7 @@ pub fn parse_local_calendar(
 
 /// civil 字段 → epoch 毫秒（Hinnant days_from_civil 算术；不经 jiff
 /// `Timestamp`，9999 年尾段也可精确计算——表示范围检查留在调用方）。
-pub fn civil_to_epoch_ms(
+pub const fn civil_to_epoch_ms(
     year: i64,
     month: i64,
     day: i64,
@@ -140,7 +140,7 @@ pub fn civil_to_epoch_ms(
     second: i64,
     millisecond: i64,
 ) -> i64 {
-    fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
         let y = if m <= 2 { y - 1 } else { y };
         let era = if y >= 0 { y } else { y - 399 } / 400;
         let yoe = y - era * 400;

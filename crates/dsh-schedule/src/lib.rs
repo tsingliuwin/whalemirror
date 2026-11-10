@@ -11,8 +11,10 @@ mod occurrence;
 mod parse;
 mod record;
 mod recurrence;
+mod rrule;
 
 pub use cron::{Cron, CronFields, CRON_SEARCH_HORIZON_YEARS};
+pub use rrule::{RRule, MAX_PERIOD_CANDIDATES, MAX_RRULE_COUNT, MAX_SET_POSITIONS, MIN_RRULE_YEAR};
 pub use occurrence::{
     RecurringOccurrence, max_four_digit_year_ms, min_four_digit_year_ms, next_daily_target,
     next_weekly_target, resolve_daily_occurrence, resolve_every_occurrence,
@@ -20,10 +22,12 @@ pub use occurrence::{
 };
 pub use parse::{InstantRejection, LocalCalendarRejection, civil_to_epoch_ms, parse_local_calendar, parse_offset_instant};
 pub use record::{
-    create_after_schedule_record, create_at_schedule_record, create_daily_schedule_record,
-    create_every_schedule_record, create_weekly_schedule_record, decode_after_record,
-    decode_at_record, decode_daily_record, decode_every_record, decode_weekly_record,
-    parse_at_input, parse_daily_input, parse_weekly_input,
+    canonicalize_cron_expression, create_after_schedule_record, create_at_schedule_record,
+    create_cron_schedule_record, create_daily_schedule_record, create_every_schedule_record,
+    create_rrule_schedule_record, create_weekly_schedule_record, decode_after_record,
+    decode_at_record, decode_cron_record, decode_daily_record, decode_every_record,
+    decode_rrule_record, decode_schedule_record, decode_weekly_record, normalize_rrule,
+    parse_at_input, parse_cron_input, parse_daily_input, parse_weekly_input,
 };
 
 use serde::{Deserialize, Serialize};
@@ -189,7 +193,7 @@ pub struct RRuleScheduleRecord {
 
 /// 七种 timing 记录闭集（上游 `ScheduleRecord`）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ScheduleRecord {
     After(AfterScheduleRecord),
     At(AtScheduleRecord),

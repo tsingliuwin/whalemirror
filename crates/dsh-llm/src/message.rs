@@ -53,6 +53,15 @@ pub enum MessageSource {
         #[serde(rename = "callId")]
         call_id: CallId,
     },
+    /// 目标续跑轮次（上游 `goal: { kind: 'goal'; goalId; revision; round }`）：
+    /// 承认轮消息的归属——round driver 在目标 armed 且预算有余时注入。
+    Goal {
+        #[serde(rename = "goalId")]
+        goal_id: String,
+        revision: u64,
+        /// 正整数承认轮次。
+        round: u64,
+    },
     /// Producer-injected context (web merge-extensible open vocabulary:
     /// agent-instructions / skill-catalog / session-reference / …; kind is
     /// the web source.kind verbatim). The UI renders this as a context

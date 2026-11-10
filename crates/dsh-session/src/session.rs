@@ -291,6 +291,11 @@ pub enum SessionEvent {
     /// 每次调用整表替换，回放 last-write-wins；下一个 turn/start 清空
     /// （上游 todos 投影语义——轮末保留已完成清单可见）。
     TodoWrite { todos: Vec<TodoEntry> },
+    /// 目标变更（web `goal/change`，上游 GoalChangeMeta 闭集：整快照变更或
+    /// clear 墓碑）。严格解码器与状态机校验见 `goal.rs` 的
+    /// `decode_goal_change`/`apply_goal_change`；`user/message` 事件带
+    /// goal 消息源时按 `apply_goal_event` 承认轮次。
+    GoalChange(crate::goal::GoalChange),
     /// 后台作业注册（log-only：web `job/registered`，
     /// data = {jobId, owner, kind, label, startedAt, toolCall?}）。
     JobRegistered(JobRecord),

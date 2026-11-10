@@ -13,6 +13,7 @@
 //! provider reserves a branded id and an exclusive set of file extensions atomically, and
 //! selection routes a query by the file's final extension — never by registration order.
 
+pub mod client;
 pub mod framing;
 pub mod render;
 pub mod types;
@@ -21,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+pub use client::{ConnectionSpec, LspConnection, ServerRequestHandler};
 pub use types::{
     LspHover, LspLocation, LspOperation, LspPosition, LspProvider, LspProviderQuery,
     LspQueryRequest, LspQueryResult, LspRange,

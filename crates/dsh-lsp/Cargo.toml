@@ -6,9 +6,11 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
+dsh-subprocess = { path = "../dsh-subprocess" }
 serde_json.workspace = true
 async-trait.workspace = true
 url = "2"
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util", "sync"] }

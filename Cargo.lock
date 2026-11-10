@@ -1426,6 +1426,7 @@ name = "dsh-lsp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dsh-subprocess",
  "serde_json",
  "tokio",
  "url",

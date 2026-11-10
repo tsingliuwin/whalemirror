@@ -293,8 +293,9 @@ A4 ──→ A6 的 skill/team UI
 | 小批 | 内容 | 状态 |
 |---|---|---|
 | ① | 缝 + 帧协议 + 渲染纯面：`dsh-lsp`（四操作闭集、`final_extension`、全有或全无注册、错误码文案）、Content-Length 帧（64KiB 头上限、五类失败文案）、渲染（一基↔零基 UTF-16、`path:line:character`、两类截断标记、`file:` URI 相对化、present 卡） | **已落 11-09**（6618693，backlog #114），30 条测试 |
-| ② | stdio client（`spawn` → `initialize` → 瞬态文档 `didOpen/didChange/didClose` → 四类语义请求 → `shutdown`/`exit` 升级）+ provider（按 `workspaceRoot` 实例缓存、读源文件、URI 规范化）+ `lsp` 工具（`LSP_PROMPT_TEXT`、60s 预算）+ `settings.yaml servers` 表 + 宿主接线 | 待做 |
-| ③ | provider 查询的取消信号转发（上游 AbortSignal）与并发查询下的实例复用 | 待做（随 ②） |
+| ② | 连接层：`dsh-lsp::client`（Content-Length 分帧端点、id 关联、出站请求/通知、入站服务端→客户端请求应答与 -32601 兜底、`$/cancelRequest`、stderr 有界尾部与退出文案、解码失败判死并终止受管范围、关闭后请求立即失败） | **已落 11-10**（backlog #114），8 条假服务端联调 |
+| ③ | instance + provider：`initialize`/`initialized` 协商与能力判定、瞬态文档 `didOpen/didChange/didClose`、四类语义请求、`shutdown`/`exit` 升级；provider 按规范化 workspace 做实例缓存、读源文件（字节上限）、URI 规范化与取消信号转发 | 待做 |
+| ④ | `lsp` 工具（`LSP_PROMPT_TEXT`、一基↔零基换算、60s 预算）+ `settings.yaml servers` 表 + `dsh-gpui` 宿主接线 | 待做 |
 
 ### 7.3 轨 B 批次（平台地基）
 

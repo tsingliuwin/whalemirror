@@ -13,9 +13,12 @@
 //! provider reserves a branded id and an exclusive set of file extensions atomically, and
 //! selection routes a query by the file's final extension — never by registration order.
 
+pub mod cancel;
 pub mod client;
 pub mod framing;
 pub mod host;
+pub mod instance;
+pub mod provider;
 pub mod render;
 pub mod translate;
 pub mod types;
@@ -24,8 +27,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+pub use cancel::{abort_error, CancelToken};
 pub use client::{ConnectionSpec, LspConnection, ServerRequestHandler};
 pub use host::{canonicalize_workspace, read_source, HostSource, HostWorkspace};
+pub use instance::{InstanceSpec, LspInstance};
+pub use provider::{StdioProvider, StdioProviderConfig};
 pub use types::{
     LspHover, LspLocation, LspOperation, LspPosition, LspProvider, LspProviderQuery,
     LspQueryRequest, LspQueryResult, LspRange,

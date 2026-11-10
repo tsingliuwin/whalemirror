@@ -51,6 +51,7 @@ fn request(file_path: &str, operation: LspOperation) -> LspQueryRequest {
         file_path: file_path.to_string(),
         position: LspPosition { line: 0, character: 0 },
         workspace_root: "/ws".to_string(),
+        signal: None,
     }
 }
 

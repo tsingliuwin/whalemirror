@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+use crate::cancel::CancelToken;
 use crate::LspError;
 
 /// The four semantic queries the seam and model expose.
@@ -79,7 +80,9 @@ pub struct LspRange {
 /// A caller's normalized query.
 ///
 /// Every field is required: `workspace_root` is caller-supplied, `language_id` comes from
-/// the provider registration (not here), and consumers own timeouts and result limits.
+/// the provider registration (not here), and consumers own result limits. `signal` mirrors
+/// upstream's optional second `query()` argument: the caller's cancellation for this
+/// query's full lifecycle (`None` means uncancellable).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LspQueryRequest {
     /// Which semantic query to run.
@@ -90,6 +93,8 @@ pub struct LspQueryRequest {
     pub position: LspPosition,
     /// The workspace root the provider resolves against and indexes.
     pub workspace_root: String,
+    /// Cancellation for this query's full lifecycle; `None` to run uncancellable.
+    pub signal: Option<CancelToken>,
 }
 
 /// A request as a provider receives it: the caller's request plus the `language_id` the

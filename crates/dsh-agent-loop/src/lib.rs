@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Notify;
 
 pub mod policy;
+pub mod repeat_guard;
 pub mod retry;
 pub mod time_context;
 
@@ -262,6 +263,9 @@ pub struct ReactLoopAgent {
     /// 源；`set_session` 折叠恢复，宿主运行时切换显式更新——见
     /// [`policy::PolicyContext`]）。
     policy: policy::PolicyContext,
+    /// 连续重复调用提醒守卫（上游 `guard/repeat-tool-reminder`；部署组合
+    /// 默认配置——阈值 [3,5,8]、预览 500、无 include/exclude）。
+    repeat_guard: repeat_guard::RepeatChainGuard,
 }
 
 /// 一个会话的 prompt 接纳收据：已扫描到的日志长度 + 已接纳的消息 id。
@@ -317,6 +321,7 @@ impl ReactLoopAgent {
             prompt_receipts: Mutex::new(PromptReceipts::default()),
             agent_preset: Mutex::new(String::new()),
             policy: policy::PolicyContext::new(),
+            repeat_guard: repeat_guard::RepeatChainGuard::with_defaults(),
         })
     }
 
@@ -1066,6 +1071,13 @@ impl ReactLoopAgent {
                 PreStepDecision::Enter { messages } => messages,
             };
 
+            // repeat-tool-reminder 重置钩（上游 agent/pre-step 监听同位）：
+            // 本步输入含 user 源消息 → 连击链清零（用户插话改变语境，跨
+            // 插话的重复不是循环）
+            if messages.iter().any(|m| matches!(m.source, MessageSource::User)) {
+                self.repeat_guard.reset();
+            }
+
             if step > 1 && turn_ends.is_some() && messages.is_empty() {
                 break;
             }
@@ -1442,6 +1454,24 @@ impl ReactLoopAgent {
                 tool_call_id: id.clone(),
                 is_error: result.is_error,
             });
+
+            // repeat-tool-reminder（上游 tools/post-execute 面，先计数后看
+            // 结果——拒绝/未知的调用同样计数）：恰命中阈值注入提醒
+            // （user/plugin repeat-tool-reminder notice 耐久消息，下一步可见）
+            if let Some(reminder) = self.repeat_guard.observe(name, arguments) {
+                let message = Message::new(
+                    Role::User,
+                    vec![ContentBlock::text(reminder.text)],
+                    MessageSource::Plugin {
+                        plugin: "repeat-tool-reminder".into(),
+                        form: Some("notice".into()),
+                        summary: Some(reminder.summary),
+                        sections: None,
+                    },
+                );
+                self.append_event(SessionEvent::UserMessage(message.clone()));
+                self.emit_ui(AgentEvent::ContextMessage { message });
+            }
         }
         concluded
     }

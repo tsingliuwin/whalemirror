@@ -1378,6 +1378,7 @@ dependencies = [
  "dsh-mcp",
  "dsh-persist",
  "dsh-plugin",
+ "dsh-schedule",
  "dsh-search",
  "dsh-session",
  "dsh-session-projection",

@@ -18,6 +18,7 @@ pub mod title_marquee;
 pub mod turn_error;
 pub mod ui_metrics;
 pub mod agent_presets;
+pub mod schedule_host;
 pub use shell_exit::{parse_exit_status, shell_exit_failed, shell_exit_label, ShellExit};
 
 /// 工具调用块（web 版 ToolRow）。

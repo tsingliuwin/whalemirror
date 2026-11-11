@@ -33,6 +33,7 @@ dsh-skill = { path = "../dsh-skill" }
 dsh-mcp = { path = "../dsh-mcp" }
 dsh-lsp = { path = "../dsh-lsp" }
 dsh-goal = { path = "../dsh-goal" }
+dsh-schedule = { path = "../dsh-schedule" }
 dsh-subprocess = { path = "../dsh-subprocess" }
 tokio.workspace = true
 futures.workspace = true

@@ -1099,6 +1099,8 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .unwrap_or("user");
             msg.source = match kind {
                 "user" => MessageSource::User,
+                // 上游 `{ kind: 'schedule' }`（定时提醒/变更通知的裸形）。
+                "schedule" => MessageSource::Schedule,
                 "plugin" => MessageSource::Context {
                     context_kind: kind.to_string(),
                     plugin: src

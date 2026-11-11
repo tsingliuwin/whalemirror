@@ -472,6 +472,12 @@ pub fn is_four_digit_year_instant(epoch_ms: i64) -> bool {
     jiff::Timestamp::from_millisecond(epoch_ms).is_ok()
 }
 
+/// RFC 3339 串 → epoch 毫秒（上游 `Date.parse` 的 rustdsh 等价入口；
+/// 宿主面不直接依赖 jiff）。
+pub fn instant_epoch_ms(text: &str) -> Option<i64> {
+    text.parse::<jiff::Timestamp>().ok().map(|timestamp| timestamp.as_millisecond())
+}
+
 /// 校验一个严格未来的 UTC 目标（上游 `futureInstant` 逐字）。
 ///
 /// 返回 canonical 串；越界或过去都报错。
@@ -610,16 +616,18 @@ pub fn render_recurring_reminder_batch_framing(
     .join("\n")
 }
 
-/// 在记录的权威时区渲染时刻（上游 `formatScheduleLocalTime`：秒精度、
-/// 带数字偏移；rrule 的时区在批② 落引擎时随引擎解析，本批用 UTC）。
+/// 在记录的权威时区渲染时刻（上游 `formatScheduleLocalTime`：
+/// `toString({timeZoneName:'never', smallestUnit:'second'})`——秒精度、
+/// 数字偏移、无区域注记，如 `2026-01-10T17:00:00+08:00`）。
 pub fn format_schedule_local_time(time_zone: &str, instant: &str) -> String {
     let timestamp: jiff::Timestamp = instant.parse().unwrap_or_default();
-    match jiff::tz::TimeZone::get(time_zone) {
-        Ok(zone) => timestamp.to_zoned(zone).to_string(),
-        // 未知时区（含 rrule 未解析态）回退 UTC——上游会 throw；本批
-        // 以调用方已校验时区为前提，防御性回退。
-        Err(_) => timestamp.to_zoned(jiff::tz::TimeZone::UTC).to_string(),
-    }
+    let zoned = match jiff::tz::TimeZone::get(time_zone) {
+        Ok(zone) => timestamp.to_zoned(zone),
+        // 未知时区防御性回退 UTC（调用方已校验时区为前提）。
+        Err(_) => timestamp.to_zoned(jiff::tz::TimeZone::UTC),
+    };
+    jiff::fmt::strtime::format("%Y-%m-%dT%H:%M:%S%:z", &zoned)
+        .unwrap_or_else(|_| zoned.to_string())
 }
 
 #[cfg(test)]

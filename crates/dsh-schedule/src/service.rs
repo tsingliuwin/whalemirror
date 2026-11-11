@@ -592,7 +592,7 @@ pub fn resolve_recurring_occurrence(
 /// `deliverDue` 的 framing 选择）。
 pub fn render_delivery_text(
     batch: bool,
-    deliveries: &[(&ScheduleTask, crate::RecurringOccurrence)],
+    deliveries: &[(ScheduleTask, crate::RecurringOccurrence)],
 ) -> String {
     if batch {
         let reminders: Vec<(String, String, String)> = deliveries
@@ -785,9 +785,9 @@ mod tests {
             occurrence_at: "2026-01-10T09:30:00.000Z".into(),
             next_scheduled_at: None,
         };
-        let text = render_delivery_text(false, &[(&task, occurrence.clone())]);
+        let text = render_delivery_text(false, &[(task.clone(), occurrence.clone())]);
         assert!(text.starts_with("[SCHEDULE REMINDER]\n"));
-        let text = render_delivery_text(true, &[(&task, occurrence)]);
+        let text = render_delivery_text(true, &[(task, occurrence)]);
         assert!(text.starts_with("[SCHEDULE REMINDER BATCH]\n"));
     }
 

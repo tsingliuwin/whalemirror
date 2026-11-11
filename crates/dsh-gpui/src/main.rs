@@ -1959,6 +1959,8 @@ pub(crate) struct AppView {
     /// 目标域 store（上游 GoalService 的单会话等价；`/goal` 命令与
     /// goal 工具共用；耐久提交缝在 main 侧接 recorder）。
     goal_store: Arc<dsh_goal::GoalStore>,
+    /// schedule 域宿主态（A1.4 批②⑤）：store/limits/executing + 唤醒旗标
+    schedule: Arc<dsh_gpui::schedule_host::ScheduleState>,
     /// 清单面板折叠态（上游 TodoPanel 默认折叠=true，只露标题行）
     todos_collapsed: bool,
     /// #5 真并发：非当前会话的运行时表（发送时按需 spawn、轮终 reap）。
@@ -2204,6 +2206,7 @@ impl AppView {
         job_owner: dsh_jobs::OwnerCell,
         fs_observation: dsh_fs::observation::ObservationPolicy,
         goal_store: Arc<dsh_goal::GoalStore>,
+        schedule: Arc<dsh_gpui::schedule_host::ScheduleState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
@@ -2328,6 +2331,7 @@ impl AppView {
         fs_observation,
         todos: Vec::new(),
         goal_store: Arc::clone(&goal_store),
+        schedule: Arc::clone(&schedule),
         todos_collapsed: true,
             plan_review_tx: None,
             session_runtimes: std::collections::HashMap::new(),
@@ -3690,6 +3694,358 @@ impl AppView {
         self.full_access_confirm = false;
         self.refresh_sidebar(cx);
         cx.notify();
+    }
+
+    // ===== schedule 域（A1.4 批②⑤）：驱动循环与投递 =====
+    // 上游 ScheduleRuntime.drive/deliverDue 的 AppView 等价：1s 后台轮询
+    // + 管理写入 wake 旗标即时唤醒；到期任务按目的地分组投递（目的地为
+    // 会话的到期循环任务共用一条消息，批框架）。
+
+    /// 按会话取 live runtime：主 agent 代表的会话优先，其余查独立 runtime 表。
+    fn schedule_runtime_of(&self, session_id: &str) -> Option<Arc<ReactLoopAgent>> {
+        if self.agent.session().lock().unwrap().id.as_str() == session_id {
+            return Some(Arc::clone(&self.agent));
+        }
+        self.session_runtimes.get(session_id).cloned()
+    }
+
+    /// 为 schedule 投递构建（或复用）目标会话的 runtime。live 优先；
+    /// 未开会话走 headless 构造（recorder.load 恢复 + 事件 sink 落盘、
+    /// 无 UI 泵——上游 activate 的 rustdsh 等价）；新目的地会话建档。
+    fn schedule_ensure_runtime(
+        &mut self,
+        session_id: &str,
+        create: Option<&dsh_schedule::CreateSpec>,
+    ) -> Option<Arc<ReactLoopAgent>> {
+        if let Some(runtime) = self.schedule_runtime_of(session_id) {
+            return Some(runtime);
+        }
+        let sid = SessionId(session_id.to_string());
+        let cwd_hint = self
+            .sessions
+            .iter()
+            .find(|m| m.id.as_str() == session_id)
+            .and_then(|m| m.cwd.clone());
+        let (session, cwd) = self
+            .recorder
+            .load(&sid, cwd_hint.as_deref())
+            .unwrap_or_else(|_| (dsh_session::Session::new(sid.clone()), None));
+        let cwd = cwd.or_else(|| create.and_then(|spec| spec.cwd.clone()));
+        // 新目的地会话建档（schedule 会话无懒物化面——磁盘既有语义）。
+        if !self.sessions.iter().any(|m| m.id.as_str() == session_id) {
+            let preset = create
+                .and_then(|spec| spec.agent_preset.clone())
+                .unwrap_or_else(|| "standard".into());
+            let _ = self.recorder.create(&sid, cwd.as_deref().unwrap_or(""), &preset);
+        }
+        let agent_preset = dsh_gpui::agent_presets::normalize_preset(
+            self.recorder
+                .agent_preset_of(&sid, cwd.as_deref())
+                .as_deref(),
+        );
+        // 工具面（与真并发 runtime 同构：完整 toolkit + 全 section 集）。
+        let workdir = dsh_tools::Workdir::new();
+        if let Some(c) = &cwd {
+            workdir.set(c.clone());
+        }
+        let policy: Arc<dyn dsh_fs::FsPolicy> = self.fs_sandbox.clone();
+        let subagent_tool: Arc<dyn dsh_tools::Tool> = self.subagent.clone();
+        let search_key = if self.deepseek_key.is_empty() {
+            None
+        } else {
+            Some(self.deepseek_key.clone())
+        };
+        let toolkit = dsh_gpui::build_session_toolkit(
+            policy,
+            workdir.clone(),
+            subagent_tool,
+            dsh_persist::attachments_root_from_sessions_root(&sessions_dir()),
+            search_key,
+        );
+        {
+            let root = cwd.clone().unwrap_or_default();
+            let shell_text = shell_section_text(&root, self.fs_sandbox.mode());
+            let _ = toolkit.prompt.add_section(dsh_system_prompt::PromptSection {
+                name: "tool:bash".into(),
+                order: toolkit
+                    .prompt
+                    .get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolBash),
+                text: shell_text,
+            });
+        }
+        let _ = toolkit.prompt.add_section(dsh_system_prompt::PromptSection {
+            name: "tool:grep".into(),
+            order: toolkit.prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolGrep),
+            text: "Use the grep tool — not shell grep or rg — to search file contents. Read on a matched file when you need surrounding context.".into(),
+        });
+        let _ = toolkit.prompt.add_section(dsh_system_prompt::PromptSection {
+            name: "tool:glob".into(),
+            order: toolkit.prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolGlob),
+            text: "Use the glob tool — not shell find — to discover files by path pattern. A pattern with no \"/\" matches basenames at any depth, so \"*\" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, while a larger one keeps the modification-time-ordered head.".into(),
+        });
+        let (tools, prompt) = (toolkit.tools, toolkit.prompt);
+        let (provider, model) = (self.active_provider.clone(), self.desired_model.clone());
+        let runtime = ReactLoopAgent::new(
+            SessionId::new(session_id.to_string()),
+            AgentOptions {
+                provider,
+                model,
+                max_tokens: None,
+                system_prompt: Some(agent_persona(&agent_preset)),
+                compaction: dsh_compaction::CompactionConfig::default(),
+                workdir,
+                attachments_root: Some(dsh_persist::attachments_root_from_sessions_root(
+                    &sessions_dir(),
+                )),
+            },
+            Arc::clone(&self.llm),
+            tools,
+            prompt,
+            Arc::new(dsh_session_projection::SessionProjections::default()),
+            EventBus::new(),
+        );
+        runtime.set_agent_preset(agent_preset);
+        runtime.set_session(session);
+        // 事件 sink：投递与轮次事件同步落盘（= 上游 flush ack 等价）。
+        {
+            let sink_runtime = Arc::clone(&runtime);
+            let sink_recorder = Arc::clone(&self.recorder);
+            let sink_cwd = cwd.unwrap_or_default();
+            runtime.set_event_sink(move |event| {
+                let id = sink_runtime.session().lock().unwrap().id.clone();
+                let _ = sink_recorder.append(&id, &sink_cwd, &event);
+            });
+        }
+        runtime.spawn();
+        self.session_runtimes
+            .insert(session_id.to_string(), Arc::clone(&runtime));
+        Some(runtime)
+    }
+
+    /// 到期扫描与投递（上游 `drive`）：active、未持槽、已到期的任务按
+    /// 批次会话分组；每组的失败成员留在到期态等下一次驱动。
+    fn schedule_drive(&mut self, cx: &mut Context<Self>) {
+        let Ok(listing) = self.schedule.store.list() else {
+            return;
+        };
+        let scan_now = dsh_schedule::instant_epoch_ms(
+            &dsh_schedule::format_instant(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            ),
+        )
+        .unwrap_or(0);
+        let mut due: Vec<dsh_schedule::ScheduleTask> = listing
+            .tasks
+            .into_iter()
+            .filter(|task| {
+                task.status == dsh_schedule::ScheduleTaskStatus::Active
+                    && !self.schedule.is_execution_active(task.record.id())
+                    && dsh_schedule::instant_epoch_ms(task.record.scheduled_at())
+                        .is_some_and(|at| at <= scan_now)
+            })
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        due.sort_by(|a, b| {
+            a.record
+                .scheduled_at()
+                .cmp(b.record.scheduled_at())
+                .then_with(|| a.record.id().cmp(b.record.id()))
+        });
+        let mut handled: HashSet<String> = HashSet::new();
+        for task in due.clone() {
+            if handled.contains(task.record.id()) {
+                continue;
+            }
+            let batch_session = dsh_schedule::batch_session_of(&task).map(str::to_string);
+            let group: Vec<dsh_schedule::ScheduleTask> = match &batch_session {
+                Some(session) => due
+                    .iter()
+                    .filter(|candidate| {
+                        dsh_schedule::batch_session_of(candidate).map(str::to_string).as_deref()
+                            == Some(session.as_str())
+                    })
+                    .cloned()
+                    .collect(),
+                None => vec![task.clone()],
+            };
+            for member in &group {
+                handled.insert(member.record.id().to_string());
+            }
+            let batch = batch_session.is_some();
+            self.schedule_deliver_group(group, batch, cx);
+        }
+    }
+
+    /// 投递一个到期组并推进每个已提交成员（上游 `deliverDue`）。
+    fn schedule_deliver_group(
+        &mut self,
+        group: Vec<dsh_schedule::ScheduleTask>,
+        batch: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let now = dsh_schedule::instant_epoch_ms(
+            &dsh_schedule::format_instant(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            ),
+        )
+        .unwrap_or(0);
+        // 投递地板过滤（上游 nextAdmissionAt 先于目标解析）。
+        let candidates: Vec<dsh_schedule::ScheduleTask> = group
+            .into_iter()
+            .filter(|task| {
+                dsh_schedule::next_admission_at(task, &self.schedule.limits) <= now
+            })
+            .collect();
+        let admitted: Vec<dsh_schedule::ScheduleTask> = candidates
+            .into_iter()
+            .filter(|task| {
+                dsh_schedule::instant_epoch_ms(task.record.scheduled_at())
+                    .is_some_and(|at| at <= now)
+            })
+            .collect();
+        let Some(first) = admitted.first().cloned() else {
+            return;
+        };
+        // 目的地解析（会话/新_once 保留/新 保留——上游 resolveTarget 同序）。
+        let (target_session_id, create_spec) = match &first.target {
+            dsh_schedule::ScheduleTarget::Session { session_id } => {
+                (session_id.clone(), None)
+            }
+            dsh_schedule::ScheduleTarget::NewOnce { session_id, create } => (
+                session_id
+                    .clone()
+                    .unwrap_or_else(dsh_schedule::new_reserved_session_id),
+                create.as_ref(),
+            ),
+            dsh_schedule::ScheduleTarget::New { create } => {
+                // 保留身份在任务上（失败重试同一会话，不另开）。
+                let reserved = first
+                    .pending_delivery
+                    .as_ref()
+                    .map(|pending| pending.target_session_id.clone())
+                    .unwrap_or_else(dsh_schedule::new_reserved_session_id);
+                if first.pending_delivery.is_none() {
+                    let mut reserved_task = first.clone();
+                    reserved_task.pending_delivery =
+                        Some(dsh_schedule::PendingDelivery {
+                            target_session_id: reserved.clone(),
+                        });
+                    let _ = self.schedule.store.put(&reserved_task);
+                }
+                (reserved, create.as_ref())
+            }
+        };
+        let Some(runtime) = self.schedule_ensure_runtime(&target_session_id, create_spec) else {
+            return;
+        };
+        // 会话恢复可跨时钟回拨：投递前重采样（上游 deliverDue 同款）。
+        let now = dsh_schedule::instant_epoch_ms(
+            &dsh_schedule::format_instant(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            ),
+        )
+        .unwrap_or(now);
+        let admitted: Vec<dsh_schedule::ScheduleTask> = admitted
+            .into_iter()
+            .filter(|task| {
+                dsh_schedule::instant_epoch_ms(task.record.scheduled_at())
+                    .is_some_and(|at| at <= now)
+            })
+            .collect();
+        let mut deliveries: Vec<(dsh_schedule::ScheduleTask, dsh_schedule::RecurringOccurrence)> =
+            Vec::new();
+        for task in &admitted {
+            let occurrence = if task.record.is_recurring() {
+                dsh_schedule::resolve_recurring_occurrence(&task.record, now).unwrap_or(
+                    dsh_schedule::RecurringOccurrence {
+                        occurrence_at: task.record.scheduled_at().to_string(),
+                        next_scheduled_at: None,
+                    },
+                )
+            } else {
+                dsh_schedule::RecurringOccurrence {
+                    occurrence_at: task.record.scheduled_at().to_string(),
+                    next_scheduled_at: None,
+                }
+            };
+            deliveries.push((task.clone(), occurrence));
+        }
+        if deliveries.is_empty() {
+            return;
+        }
+        let text = dsh_schedule::render_delivery_text(batch, &deliveries);
+        let message = dsh_llm::Message::new(
+            dsh_llm::Role::User,
+            vec![dsh_llm::ContentBlock::text(text)],
+            dsh_llm::MessageSource::Schedule,
+        );
+        let message_id = message.id.0.clone();
+        let running = runtime.status() == dsh_agent_loop::AgentStatus::Running;
+        if running {
+            runtime.inject(message);
+        } else {
+            runtime.send(message, dsh_agent_loop::InboxTarget::NextTurn);
+        }
+        let delivered_at = dsh_schedule::format_instant(now);
+        // 执行看护：非 new 目的地持槽至整 agent idle（上游 send/settle）。
+        let held: Vec<String> = deliveries
+            .iter()
+            .filter(|(task, _)| !matches!(task.target, dsh_schedule::ScheduleTarget::New { .. }))
+            .map(|(task, _)| task.record.id().to_string())
+            .collect();
+        for id in &held {
+            self.schedule.executing.lock().unwrap().insert(id.clone());
+        }
+        let mut committed: Vec<String> = Vec::new();
+        for (task, occurrence) in &deliveries {
+            let receipt = dsh_schedule::DeliveryReceipt {
+                scheduled_at: occurrence.occurrence_at.clone(),
+                delivered_at: delivered_at.clone(),
+                message_id: message_id.clone(),
+                target_session_id: Some(target_session_id.clone()),
+            };
+            let committed_task = if task.record.is_recurring() {
+                dsh_schedule::advanced(task, occurrence.clone(), receipt, &dsh_schedule::DeliveryRetentionBounds::default())
+            } else {
+                dsh_schedule::delivered(task, receipt, &dsh_schedule::DeliveryRetentionBounds::default())
+            };
+            let _ = self.schedule.store.put(&committed_task);
+            committed.push(task.record.id().to_string());
+        }
+        // 上游 settle/watchExecution：已提交的持槽看护至整 agent idle，
+        // 到点释放并重新驱动（未提交的随下一次驱动自然重投）。
+        {
+            let executing_state = Arc::clone(&self.schedule);
+            let watch_runtime = Arc::clone(&runtime);
+            let watch_committed = committed.clone();
+            let view = cx.entity();
+            cx.spawn(async move |this, cx| {
+                let _ = watch_runtime.when_idle().await;
+                {
+                    let mut slots = executing_state.executing.lock().unwrap();
+                    for id in &watch_committed {
+                        slots.remove(id);
+                    }
+                }
+                executing_state.request_drive();
+                let mut cx = cx.clone();
+                let _ = this.update(&mut cx, |v: &mut AppView, cx: &mut Context<AppView>| {
+                    v.schedule_drive(cx);
+                });
+            })
+            .detach();
+        }
     }
 
     fn switch_session(&mut self, id: SessionId, cx: &mut Context<Self>) {
@@ -9635,6 +9991,12 @@ fn main() {
 
     // --- 会话持久化：与 web 完全共享（--key--/sid/session.jsonl.zstd）---
     let recorder = Arc::new(SessionRecorder::new(sessions_dir()));
+    // schedule 域宿主态（A1.4 批②⑤）：~/.dsh/schedule 域根
+    let schedule_state = Arc::new(dsh_gpui::schedule_host::ScheduleState::new(
+        dsh_schedule::ScheduleStore::new(dsh_home().join("schedule")),
+        Arc::clone(&recorder),
+        dsh_gpui::schedule_host::ScheduleConfig::default(),
+    ));
     let entries = recorder.list().unwrap_or_default();
     let web_titles: std::collections::HashMap<String, String> =
         load_web_session_metas().into_iter().collect();
@@ -9954,6 +10316,45 @@ fn main() {
             };
             defer_agent.inject(message);
         }));
+    }
+
+    // schedule 四工具 + tool:schedule 提示词节（A1.4 批②⑤；上游
+    // tool-schedule 文案逐字。actor 探针读 live agent 会话头/cwd/预设）。
+    {
+        let tools_for_schedule = Arc::clone(&tools_for_mcp);
+        let probe_agent = Arc::clone(&agent);
+        let probe_cwd = Arc::clone(&cwd_slot);
+        let probe_recorder = Arc::clone(&recorder);
+        let probe: Arc<dyn Fn() -> Option<dsh_gpui::schedule_host::ActorInfo> + Send + Sync> =
+            Arc::new(move || {
+                let session_id = probe_agent.session().lock().unwrap().id.as_str().to_string();
+                let cwd = probe_cwd.lock().unwrap().clone();
+                let preset = dsh_gpui::agent_presets::normalize_preset(
+                    probe_recorder
+                        .agent_preset_of(&SessionId(session_id.clone()), Some(&cwd))
+                        .as_deref(),
+                );
+                Some(dsh_gpui::schedule_host::ActorInfo {
+                    session_id,
+                    cwd: Some(cwd),
+                    agent_preset: Some(preset.to_string()),
+                })
+            });
+        for kind in [
+            dsh_gpui::schedule_host::ScheduleToolKind::Create,
+            dsh_gpui::schedule_host::ScheduleToolKind::List,
+            dsh_gpui::schedule_host::ScheduleToolKind::View,
+            dsh_gpui::schedule_host::ScheduleToolKind::Edit,
+        ] {
+            let tool = dsh_gpui::schedule_host::ScheduleTool::new(kind, Arc::clone(&schedule_state));
+            tool.set_actor_probe(Arc::clone(&probe));
+            let _registered = tools_for_schedule.register(Arc::new(tool)).unwrap();
+        }
+        let _schedule_section = prompt.add_section(dsh_system_prompt::PromptSection {
+            name: "tool:schedule".into(),
+            order: prompt.get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolSchedule),
+            text: dsh_gpui::schedule_host::MANAGEMENT_AUTHORIZATION.into(),
+        });
     }
 
     // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有
@@ -10453,6 +10854,7 @@ fn main() {
                         job_owner.clone(),
                         fs_observation.clone(),
                         Arc::clone(&goal_store),
+                        Arc::clone(&schedule_state),
                         cx,
                     )
                 });
@@ -10479,6 +10881,54 @@ fn main() {
                                 );
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    })
+                    .detach();
+                }
+                // schedule 驱动循环（A1.4 批②⑤）：1s 轮询（到期扫描）+
+                // 唤醒旗标即时短路——管理写入 request_drive 置位后下一拍
+                // 立即驱动（上游 requestDrive 精确 timer 的轮询等价，登记
+                // 偏差：投递抖动 ≤1s）。
+                {
+                    let schedule_pump_view = app.clone();
+                    let schedule_state_for_pump = Arc::clone(&schedule_state);
+                    cx.spawn(async move |cx| {
+                        let mut cx = cx.clone();
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                            let wake = schedule_state_for_pump
+                                .wake
+                                .swap(false, std::sync::atomic::Ordering::SeqCst);
+                            // 到期与否在 drive 内判定；唤醒旗标只是提前量。
+                            let due_soon = wake
+                                || schedule_state_for_pump
+                                    .store
+                                    .list()
+                                    .map(|listing| {
+                                        listing.tasks.iter().any(|task| {
+                                            task.status
+                                                == dsh_schedule::ScheduleTaskStatus::Active
+                                                && dsh_schedule::instant_epoch_ms(
+                                                    task.record.scheduled_at(),
+                                                )
+                                                .is_some_and(|at| {
+                                                    at <= std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .map(|d| d.as_millis() as i64)
+                                                        .unwrap_or(0)
+                                                })
+                                        })
+                                    })
+                                    .unwrap_or(false);
+                            if !due_soon {
+                                continue;
+                            }
+                            let _ = cx.update_entity(
+                                &schedule_pump_view,
+                                |v: &mut AppView, cx: &mut Context<AppView>| {
+                                    v.schedule_drive(cx);
+                                },
+                            );
                         }
                     })
                     .detach();

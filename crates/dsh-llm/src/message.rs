@@ -62,6 +62,10 @@ pub enum MessageSource {
         /// 正整数承认轮次。
         round: u64,
     },
+    /// 定时任务提醒（上游 `schedule: { kind: 'schedule' } & ContextFormed`，
+    /// wire 即裸 `kind: "schedule"` 无载荷——到期投递与 `schedule/changed`
+    /// 通知的归属）。
+    Schedule,
     /// Producer-injected context (web merge-extensible open vocabulary:
     /// agent-instructions / skill-catalog / session-reference / …; kind is
     /// the web source.kind verbatim). The UI renders this as a context

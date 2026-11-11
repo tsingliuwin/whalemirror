@@ -1548,6 +1548,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-session-query"
+version = "0.1.0"
+dependencies = [
+ "dsh-llm",
+ "dsh-schedule",
+ "dsh-session",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
 name = "dsh-shell"
 version = "0.1.0"
 dependencies = [

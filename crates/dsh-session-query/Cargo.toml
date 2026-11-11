@@ -1,0 +1,11 @@
+[package]
+name = "dsh-session-query"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dsh-llm = { path = "../dsh-llm" }
+dsh-session = { path = "../dsh-session" }
+dsh-schedule = { path = "../dsh-schedule" }
+regex.workspace = true
+serde_json.workspace = true

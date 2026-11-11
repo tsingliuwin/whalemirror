@@ -1948,6 +1948,16 @@ pub(crate) struct AppView {
     pending_approval: Option<PendingApproval>,
     /// 审批应答通道（面板按钮 → 阻塞中的工具线程）
     approval_answer_tx: Option<std::sync::mpsc::Sender<dsh_tools::ApprovalOutcome>>,
+    /// 待答提问卡（A5.1 通用提问通道：上游 QuestionComposer 单进程版——
+    /// 分页单题 + 选项单/多选 + 自定义答案 + 跳过）
+    pending_question: Option<dsh_gpui::question_card::QuestionCardState>,
+    /// 提问卡答案通道（Submit=提交批 / Cancel=放弃；hook 轮询收）
+    question_answer_tx:
+        Option<std::sync::mpsc::Sender<dsh_gpui::question_card::QuestionUiAnswer>>,
+    /// 提问卡自定义答案输入（分页单题，每题复用同一实体）
+    question_custom: Entity<InputState>,
+    /// 提问卡输入框待应用值（渲染期 set_value——泵无 window）
+    pending_question_input: Option<String>,
     /// 审批策略闸（`ask` 才弹卡；`never` 确定性拒绝——上游 user-approval 语义）
     approval_ask: Arc<std::sync::atomic::AtomicBool>,
     /// 后台作业属主槽（切会话即更新；job 工具与 bash 后台在调用时读取）
@@ -2174,6 +2184,7 @@ impl AppView {
         persist_cwd: Arc<std::sync::Mutex<String>>,
         sessions: Vec<SessionMeta>,
         plan_feedback: Entity<InputState>,
+        question_custom: Entity<InputState>,
         input: Entity<TextareaState>,
         #[allow(dead_code)] // 被 DeepSeek 卡引用
     api_input: Entity<InputState>,
@@ -2327,6 +2338,10 @@ impl AppView {
         pending_approval: None,
         approval_answer_tx: None,
         approval_ask: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        pending_question: None,
+        question_answer_tx: None,
+        question_custom: question_custom.clone(),
+        pending_question_input: None,
         job_owner: job_owner.clone(),
         fs_observation,
         todos: Vec::new(),
@@ -4548,6 +4563,15 @@ impl AppView {
         } else if let Some(a) = self.session_runtimes.get(&viewed_key) {
             a.cancel();
         }
+        // 待答提问随轮次中止一起放弃（上游 exec.signal abort → ASK_ABORTED
+        // 同语义；视图切换会话不弃卡——卡是全局遮罩，答案归属发起轮）
+        if self.pending_question.is_some() {
+            if let Some(tx) = &self.question_answer_tx {
+                let _ = tx.send(dsh_gpui::question_card::QuestionUiAnswer::Cancel);
+            }
+            self.pending_question = None;
+            self.pending_question_input = Some(String::new());
+        }
     }
 
     /// composer 草稿随会话换入换出（上游 input/hub.ts：每个 retained
@@ -5125,6 +5149,53 @@ impl AppView {
         if let Some(tx) = &self.approval_answer_tx {
             let _ = tx.send(outcome);
         }
+    }
+
+    /// 提问卡翻页（上游 Next/Prev：先缓存当前输入值再换页，换页后恢复
+    /// 该页自定义答案——渲染期 set_value，泵与点击都无 window 直用）。
+    fn question_flip(&mut self, next: bool, cx: &mut Context<Self>) {
+        let Some(card) = self.pending_question.as_mut() else { return };
+        let value = self.question_custom.read_with(cx, |s, _| s.value().to_string());
+        card.cache_custom(value);
+        let moved = if next { card.page_next() } else { card.page_prev() };
+        if moved {
+            self.pending_question_input = Some(card.current_custom().to_string());
+        }
+        cx.notify();
+    }
+
+    /// 提问卡提交（上游 submitDrafts：全题已答或已跳过才成批；未完成
+    /// 置 error.incomplete 不关卡）。
+    fn question_submit(&mut self, cx: &mut Context<Self>) {
+        let Some(card) = self.pending_question.as_mut() else { return };
+        let value = self.question_custom.read_with(cx, |s, _| s.value().to_string());
+        card.cache_custom(value);
+        match card.build_answers() {
+            Some(answers) => {
+                self.pending_question = None;
+                if let Some(tx) = &self.question_answer_tx {
+                    let _ = tx.send(dsh_gpui::question_card::QuestionUiAnswer::Submit(answers));
+                }
+                self.pending_question_input = Some(String::new());
+            }
+            None => {
+                card.error = Some(dsh_gpui::question_card::ERROR_INCOMPLETE_LABEL.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// 提问卡放弃（X 钮/轮次中止共用：hook 回 Cancelled——工具结果按
+    /// ASK_ABORTED 文案回模型。偏差登记：上游对 callId 键卡是 hide 可
+    /// 重开（工具行按钮随批③），rustdsh 先走取消避免不可达悬置态）。
+    fn question_cancel(&mut self, cx: &mut Context<Self>) {
+        if self.pending_question.take().is_some() {
+            if let Some(tx) = &self.question_answer_tx {
+                let _ = tx.send(dsh_gpui::question_card::QuestionUiAnswer::Cancel);
+            }
+            self.pending_question_input = Some(String::new());
+        }
+        cx.notify();
     }
 
     /// 审批策略闸同步（`approval/policy` 的消费面：`ask` 才弹卡，
@@ -6156,6 +6227,11 @@ impl Render for AppView {
             // 会话草稿换入的输入值（set_value 需 window——渲染期应用）
             self.input.update(cx, |state, cx| state.set_value(text, window, cx));
         }
+        if let Some(text) = self.pending_question_input.take() {
+            // 提问卡自定义答案输入的翻页恢复/关卡清空（同上渲染期应用）
+            self.question_custom
+                .update(cx, |state, cx| state.set_value(text, window, cx));
+        }
         if self.pending_clear {
             self.pending_clear = false;
             self.input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -6776,6 +6852,285 @@ impl Render for AppView {
                                                 });
                                             })
                                             .child("允许一次"),
+                                    ),
+                            ),
+                    ),
+            );
+        }
+        // 提问卡（A5.1：上游 ui-user-questions QuestionComposer 单进程版）。
+        // 分页单题（‹ n / total ›）+ 选项单/多选行 + 自定义答案 + 跳过 +
+        // 推荐徽标（parseRecommendedLabel 剥标）；X = 放弃整组（hook 回
+        // Cancelled → ASK_ABORTED 文案回模型）。
+        if let Some(card) = self.pending_question.clone() {
+            let q = card.questions.get(card.index).cloned();
+            let multi = q.as_ref().and_then(|q| q.multi_select).unwrap_or(false);
+            let selected: Vec<usize> = card.current_selected().to_vec();
+            let options = card.current_options();
+            let skipped = card.current_skipped();
+            let on_last = card.on_last_page();
+            let (t_opt, t_skip, t_prev, t_next, t_cancel) =
+                (this.clone(), this.clone(), this.clone(), this.clone(), this.clone());
+            root = root.child(
+                div()
+                    .id("question-mask")
+                    .absolute()
+                    .size_full()
+                    .top_0()
+                    .left_0()
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::hsla(0.0, 0.0, 0.0, 0.5))
+                    .child(
+                        div()
+                            .id("question-card")
+                            .w(px(520.0))
+                            .v_flex()
+                            .gap(px(12.0))
+                            .p(px(20.0))
+                            .rounded(px(16.0))
+                            .bg(theme::t().surface)
+                            .shadow(theme::elevation_prominent())
+                            // 头行：eyebrow（question.header 或「提问」）+ 等待态 + X
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(widgets::state_dot(theme::t().warn_label))
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::FONT_TAB))
+                                            .line_height(px(theme::FONT_ROW_LEADING))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().text_2)
+                                            .child(
+                                                q.as_ref()
+                                                    .and_then(|q| q.header.clone())
+                                                    .filter(|h| !h.trim().is_empty())
+                                                    .unwrap_or_else(|| "提问".into()),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .line_height(px(18.0))
+                                            .text_color(theme::t().text_3)
+                                            .ml_auto()
+                                            .mr(px(8.0))
+                                            .child(dsh_gpui::question_card::WAIT_HELD_LABEL),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("question-cancel")
+                                            .px(px(6.0))
+                                            .text_size(px(theme::FONT_ROW))
+                                            .text_color(theme::t().text_3)
+                                            .cursor_pointer()
+                                            .hover(|st| st.text_color(theme::t().text))
+                                            .on_click(move |_, _, cx| {
+                                                t_cancel.update(cx, |v, cx| v.question_cancel(cx));
+                                            })
+                                            .child(dsh_gpui::question_card::NAV_CANCEL_LABEL),
+                                    ),
+                            )
+                            // 题面
+                            .children(q.map(|q| {
+                                div()
+                                    .v_flex()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(16.0))
+                                            .line_height(px(22.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().text)
+                                            .child(q.question.clone()),
+                                    )
+                            }))
+                            // 选项行（全宽；单选序号 / 多选方框；选中 = 描边）
+                            .children(options.into_iter().enumerate().map(move |(oi, (label, description, recommended))| {
+                                let t_row = t_opt.clone();
+                                let chosen = selected.contains(&oi);
+                                div()
+                                    .id(SharedString::from(format!("question-option-{oi}")))
+                                    .w_full()
+                                    .v_flex()
+                                    .gap(px(2.0))
+                                    .px(px(12.0))
+                                    .py(px(8.0))
+                                    .rounded(px(10.0))
+                                    .border(px(0.5))
+                                    .border_color(if chosen { theme::t().border_l2 } else { theme::t().border_l3 })
+                                    .bg(if chosen { theme::t().hover } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) })
+                                    .cursor_pointer()
+                                    .hover(|st| st.bg(theme::t().hover))
+                                    .on_click(move |_, _, cx| {
+                                        t_row.update(cx, |v, cx| {
+                                            if let Some(c) = v.pending_question.as_mut() {
+                                                c.toggle_option(oi);
+                                            }
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .size(px(18.0))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded(if multi { px(4.0) } else { px(9.0) })
+                                                    .border(px(0.5))
+                                                    .border_color(if chosen { theme::t().border_l2 } else { theme::t().border_l3 })
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme::t().text)
+                                                    .child(if chosen {
+                                                        "✓".to_string()
+                                                    } else if multi {
+                                                        String::new()
+                                                    } else {
+                                                        (oi + 1).to_string()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(theme::FONT_ROW))
+                                                    .line_height(px(22.0))
+                                                    .text_color(theme::t().text)
+                                                    .child(label),
+                                            )
+                                            .when(recommended, |d| {
+                                                d.child(
+                                                    div()
+                                                        .px(px(6.0))
+                                                        .text_size(px(11.0))
+                                                        .line_height(px(16.0))
+                                                        .rounded(px(8.0))
+                                                        .bg(theme::t().hover)
+                                                        .text_color(theme::t().text_2)
+                                                        .child(dsh_gpui::question_card::OPTION_RECOMMENDED_LABEL),
+                                                )
+                                            }),
+                                    )
+                                    .children(description.map(|dsc| {
+                                        div()
+                                            .text_size(px(12.0))
+                                            .line_height(px(18.0))
+                                            .text_color(theme::t().text_3)
+                                            .child(dsc)
+                                    }))
+                            }))
+                            // 跳过态说明（跳过后选项置灰语义的文本形）
+                            .when(skipped, |d| {
+                                d.child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
+                                        .text_color(theme::t().text_3)
+                                        .child("本题将按「跳过」提交（空选、无自定义）。"),
+                                )
+                            })
+                            // 自定义答案（分页单题复用同一输入实体）
+                            .when(!skipped, |d| {
+                                d.child(Input::new(&self.question_custom).w_full())
+                            })
+                            // 错误行（error.incomplete）
+                            .children(card.error.clone().map(|message| {
+                                div()
+                                    .text_size(px(12.0))
+                                    .line_height(px(18.0))
+                                    .text_color(theme::t().error)
+                                    .child(message)
+                            }))
+                            // 页脚：页码 + 跳过 + 上一题/下一题|提交
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(theme::t().text_3)
+                                            .child(format!("{} / {}", card.index + 1, card.total())),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("question-skip")
+                                            .h(px(32.0))
+                                            .px(px(12.0))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(16.0))
+                                            .border(px(0.5))
+                                            .border_color(theme::t().border_l3)
+                                            .text_size(px(13.0))
+                                            .text_color(theme::t().text)
+                                            .cursor_pointer()
+                                            .hover(|st| st.bg(theme::t().hover))
+                                            .on_click(move |_, _, cx| {
+                                                t_skip.update(cx, |v, cx| {
+                                                    if let Some(c) = v.pending_question.as_mut() {
+                                                        c.toggle_skip();
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(dsh_gpui::question_card::ACTION_SKIP_LABEL),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("question-prev")
+                                            .h(px(32.0))
+                                            .px(px(12.0))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(16.0))
+                                            .text_size(px(13.0))
+                                            .text_color(if card.index > 0 { theme::t().text } else { theme::t().text_3 })
+                                            .cursor_pointer()
+                                            .hover(|st| st.bg(theme::t().hover))
+                                            .on_click(move |_, _, cx| {
+                                                t_prev.update(cx, |v, cx| v.question_flip(false, cx));
+                                            })
+                                            .child("上一题"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("question-next")
+                                            .h(px(32.0))
+                                            .px(px(14.0))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(16.0))
+                                            .bg(theme::t().text)
+                                            .text_size(px(13.0))
+                                            .line_height(px(20.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().bg_base)
+                                            .cursor_pointer()
+                                            .hover(|st| st.opacity(0.9))
+                                            .on_click(move |_, _, cx| {
+                                                t_next.update(cx, |v, cx| {
+                                                    if v.pending_question.as_ref().is_some_and(|c| c.on_last_page()) {
+                                                        v.question_submit(cx);
+                                                    } else {
+                                                        v.question_flip(true, cx);
+                                                    }
+                                                });
+                                            })
+                                            .child(if on_last {
+                                                "提交".to_string()
+                                            } else {
+                                                dsh_gpui::question_card::ACTION_NEXT_LABEL.to_string()
+                                            }),
                                     ),
                             ),
                     ),
@@ -10374,6 +10729,22 @@ fn main() {
         });
     }
 
+    // ask_user_question（A5.1 通用提问通道；上游 tool-ask-user legacy 阻塞
+    // 形）。槽后置接线（UI 就绪后 set——见下方提问 hook 块）；根探针读
+    // live agent 会话 id（子代理拒答 = DELEGATED_CALLER 文案）。
+    let ask_user_slot = dsh_tools::AskUserSlot::new();
+    {
+        let tools_for_ask = Arc::clone(&tools_for_mcp);
+        let ask_tool = Arc::new(dsh_tools::AskUserTool::new(ask_user_slot.clone()));
+        let probe_agent = Arc::clone(&agent);
+        ask_tool.set_root_probe(Arc::new(move || {
+            probe_agent.session().lock().unwrap().id.as_str().starts_with("session-")
+        }));
+        let _ask = tools_for_ask
+            .register_when(ask_tool as Arc<dyn dsh_tools::Tool>, preset_gate("ask_user_question"))
+            .unwrap();
+    }
+
     // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有
     // 目录就不重复落）。必须放在事件 sink 之后——否则这条 durable 事件只进
     // 内存、不进日志。
@@ -10744,6 +11115,12 @@ fn main() {
                 let input_feedback = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("给模型的修改反馈（可选）")
                 });
+                // 提问卡自定义答案输入（分页单题复用；placeholder 上游
+                // custom.placeholder 逐字）
+                let question_custom = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx)
+                        .placeholder(dsh_gpui::question_card::CUSTOM_PLACEHOLDER_LABEL)
+                });
                 let input = cx.new(|cx: &mut Context<TextareaState>| {
                     TextareaState::new(window, cx)
                         .placeholder("给智能体发消息")
@@ -10840,6 +11217,7 @@ fn main() {
                         cwd_slot_for_view,
                         sessions_meta.clone(),
                         input_feedback,
+                        question_custom.clone(),
                         input.clone(),
                         api_input,
                         desired_model,
@@ -11094,6 +11472,67 @@ fn main() {
                                 Err(_) => {}
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        }
+                    })
+                    .detach();
+                }
+
+                // A5.1 提问缝（单进程 userQuestions.ask 的通用通道）：
+                // hook（工具线程）投卡态 → async 泵开提问卡；UI 提交/放弃
+                // 走 answer 通道（AppView 字段）→ hook 轮询收。legacy 阻塞
+                // 无截止（上游无限等答案）；通道断（宿主落）= 取消。
+                {
+                    let (open_tx, open_rx) =
+                        std::sync::mpsc::channel::<dsh_gpui::question_card::QuestionCardState>();
+                    let (answer_tx, answer_rx) =
+                        std::sync::mpsc::channel::<dsh_gpui::question_card::QuestionUiAnswer>();
+                    let answer_rx = std::sync::Mutex::new(answer_rx);
+                    let ask_hook: dsh_tools::AskUserHook = std::sync::Arc::new(
+                        move |req: &dsh_tools::AskUserRequest| {
+                            let _ = open_tx.send(dsh_gpui::question_card::QuestionCardState::new(
+                                req.call_id.clone(),
+                                req.questions.clone(),
+                            ));
+                            loop {
+                                match answer_rx.lock().unwrap().try_recv() {
+                                    Ok(dsh_gpui::question_card::QuestionUiAnswer::Submit(items)) => {
+                                        return dsh_tools::AskUserResolution::Answered(items);
+                                    }
+                                    Ok(dsh_gpui::question_card::QuestionUiAnswer::Cancel) => {
+                                        return dsh_tools::AskUserResolution::Cancelled;
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                        std::thread::sleep(std::time::Duration::from_millis(250));
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                        return dsh_tools::AskUserResolution::Cancelled;
+                                    }
+                                }
+                            }
+                        },
+                    );
+                    ask_user_slot.set(ask_hook);
+                    {
+                        let answer_tx = answer_tx;
+                        app.update(cx, |v: &mut AppView, _| {
+                            v.question_answer_tx = Some(answer_tx);
+                        });
+                    }
+                    // async 泵：开提问卡（无答案职责）
+                    let ask_pump_view = app.clone();
+                    cx.spawn(async move |cx| {
+                        let mut cx = cx.clone();
+                        loop {
+                            if let Ok(state) = open_rx.try_recv() {
+                                let _ = cx.update_entity(
+                                    &ask_pump_view,
+                                    |v: &mut AppView, cx: &mut Context<AppView>| {
+                                        v.pending_question = Some(state);
+                                        cx.notify();
+                                    },
+                                );
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     })
                     .detach();

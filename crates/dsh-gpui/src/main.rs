@@ -3876,6 +3876,12 @@ impl AppView {
                 .then_with(|| a.record.id().cmp(b.record.id()))
         });
         let mut handled: HashSet<String> = HashSet::new();
+        // 恢复面（上游 recoverOutstandingExecution）：收据行在日志但轮未
+        // 完成 → 同 id 重排队 + 持槽，从到期集剔除（不重复投递）。
+        self.schedule_recover_outstanding(&mut due, cx);
+        if due.is_empty() {
+            return;
+        }
         for task in due.clone() {
             if handled.contains(task.record.id()) {
                 continue;
@@ -3897,6 +3903,164 @@ impl AppView {
             }
             let batch = batch_session.is_some();
             self.schedule_deliver_group(group, batch, cx);
+        }
+    }
+
+    /// 变更通知派发（上游 `notify`）：involved 的 live runtime 各注入一条
+    /// `[SCHEDULE CHANGE]`（上游文案逐字）；actor 除外；存储会话不激活
+    /// ——下次 list 自读任务态（上游同语义）。
+    /// 偏差：rustdsh inject 对空闲会话不落耐久（认领时才落盘；上游 idle
+    /// 有 flush 承认）——重启丢通知，影响面小。
+    fn schedule_dispatch_notice(
+        &mut self,
+        notice: dsh_gpui::schedule_host::ScheduleNotice,
+        cx: &mut Context<Self>,
+    ) {
+        let text = dsh_gpui::schedule_host::schedule_change_notice_text(
+            notice.change,
+            &notice.id,
+            &notice.title,
+        );
+        for session_id in &notice.involved {
+            if Some(session_id.as_str()) == notice.actor.as_deref() {
+                continue;
+            }
+            let Some(runtime) = self.schedule_runtime_of(session_id) else {
+                continue;
+            };
+            runtime.inject(dsh_llm::Message::new(
+                dsh_llm::Role::User,
+                vec![dsh_llm::ContentBlock::text(text.clone())],
+                dsh_llm::MessageSource::Schedule,
+            ));
+        }
+        cx.notify();
+    }
+
+    /// 重启恢复面（上游 `runtime.recoverOutstandingExecution` 的宿主等价）：
+    /// 按 (收据 message_id, 目标会话) 分组——组内收据行存在于会话日志且其
+    /// 后无 turn/end（轮未完成：重启掐死的认领轮/中途轮）→ 整组视作未
+    /// 消费：空闲目的地同 id 消息重排队开轮（上游 followup；不产生第二次
+    /// 逻辑投递/会话），运行中只持槽看护；全组从到期集剔除。
+    /// 偏差：rustdsh 收件箱易失——崩溃前未认领的消息不在日志（收据无行
+    /// 可寻）→ 随下一轮驱动自然重投（上游经耐久收件箱重排队同 id）；
+    /// 死轮恢复会在日志出现同 id 第二行（认领时落盘）。
+    fn schedule_recover_outstanding(
+        &mut self,
+        due: &mut Vec<dsh_schedule::ScheduleTask>,
+        cx: &mut Context<Self>,
+    ) {
+        // 组键 (message_id, target_session_id) → 成员下标
+        let mut groups: std::collections::HashMap<(String, String), Vec<usize>> =
+            std::collections::HashMap::new();
+        for (ix, task) in due.iter().enumerate() {
+            let Some(receipt) = task.last_delivery.as_ref() else {
+                continue;
+            };
+            let Some(target) = receipt.target_session_id.as_deref() else {
+                continue;
+            };
+            groups
+                .entry((receipt.message_id.clone(), target.to_string()))
+                .or_default()
+                .push(ix);
+        }
+        let mut recovered: Vec<usize> = Vec::new();
+        for ((_message_id, target), members) in groups {
+            let Some(receipt) = members
+                .first()
+                .and_then(|ix| due.get(*ix))
+                .and_then(|task| task.last_delivery.clone())
+            else {
+                continue;
+            };
+            // 归档/已删会话不可恢复（上游 archived 门）：load 失败整组放行
+            let Ok((session, _)) = self.recorder.load(&SessionId(target.clone()), None) else {
+                continue;
+            };
+            // 收据行定位 + 其后是否有 turn/end（有 = 已消费完成）
+            let mut receipt_seq: Option<u64> = None;
+            let mut finished = false;
+            for e in session.entries() {
+                match &e.event {
+                    SessionEvent::UserMessage(m) if m.id.0 == receipt.message_id => {
+                        receipt_seq = Some(e.seq);
+                    }
+                    SessionEvent::TurnEnd { .. }
+                        if receipt_seq.is_some_and(|seq| e.seq > seq) =>
+                    {
+                        finished = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let Some(seq) = receipt_seq else {
+                continue;
+            };
+            if finished {
+                continue;
+            }
+            // 目的地 runtime（恢复不带创建规格——不建新会话）
+            let Some(runtime) = self.schedule_ensure_runtime(&target, None) else {
+                continue;
+            };
+            // 原正文从收据行取（收据不含正文）
+            let text = session
+                .entries()
+                .iter()
+                .find(|e| e.seq == seq)
+                .and_then(|e| match &e.event {
+                    SessionEvent::UserMessage(m) => m.content.first().and_then(|b| match b {
+                        dsh_llm::ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let mut message = dsh_llm::Message::new(
+                dsh_llm::Role::User,
+                vec![dsh_llm::ContentBlock::text(text)],
+                dsh_llm::MessageSource::Schedule,
+            );
+            message.id = dsh_llm::MessageId(receipt.message_id.clone());
+            let held: Vec<String> = members
+                .iter()
+                .filter_map(|ix| due.get(*ix))
+                .map(|task| task.record.id().to_string())
+                .collect();
+            for id in &held {
+                self.schedule.executing.lock().unwrap().insert(id.clone());
+            }
+            // 空闲：同 id 重排队开轮（上游 followup）；运行中：轮在飞，
+            // 只看护不重排队（上游 running 分支同语义）
+            if runtime.status() != dsh_agent_loop::AgentStatus::Running {
+                runtime.send(message, dsh_agent_loop::InboxTarget::NextTurn);
+            }
+            // 看护至 idle（上游 watchExecution）
+            let executing_state = Arc::clone(&self.schedule);
+            let watch_runtime = Arc::clone(&runtime);
+            let watch_held = held.clone();
+            cx.spawn(async move |this, cx| {
+                let _ = watch_runtime.when_idle().await;
+                {
+                    let mut slots = executing_state.executing.lock().unwrap();
+                    for id in &watch_held {
+                        slots.remove(id);
+                    }
+                }
+                executing_state.request_drive();
+                let mut cx = cx.clone();
+                let _ = this.update(&mut cx, |v: &mut AppView, cx: &mut Context<AppView>| {
+                    v.schedule_drive(cx);
+                });
+            })
+            .detach();
+            recovered.extend(members);
+        }
+        recovered.sort_unstable();
+        for ix in recovered.iter().rev() {
+            due.swap_remove(*ix);
         }
     }
 
@@ -11328,6 +11492,33 @@ fn main() {
                                     v.schedule_drive(cx);
                                 },
                             );
+                        }
+                    })
+                    .detach();
+                }
+                // 变更通知泵（上游 queueNotification→notify 的宿主面）：
+                // 工具线程投 notice → 泵派发到 involved 的 live runtime
+                //（inject [SCHEDULE CHANGE]——加入下一模型步，不自开轮）。
+                {
+                    let (notice_tx, notice_rx) = std::sync::mpsc::channel::<
+                        dsh_gpui::schedule_host::ScheduleNotice,
+                    >();
+                    schedule_state.set_notify_sink(Arc::new(move |notice| {
+                        let _ = notice_tx.send(notice);
+                    }));
+                    let notice_pump_view = app.clone();
+                    cx.spawn(async move |cx| {
+                        let mut cx = cx.clone();
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            while let Ok(notice) = notice_rx.try_recv() {
+                                let _ = cx.update_entity(
+                                    &notice_pump_view,
+                                    |v: &mut AppView, cx: &mut Context<AppView>| {
+                                        v.schedule_dispatch_notice(notice, cx);
+                                    },
+                                );
+                            }
                         }
                     })
                     .detach();

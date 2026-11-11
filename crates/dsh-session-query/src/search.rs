@@ -24,6 +24,7 @@ pub struct SessionHit {
     pub session_id: String,
     pub cwd: Option<String>,
     pub title: Option<String>,
+    pub parent_id: Option<String>,
     pub created_at_ms: Option<i64>,
     pub best: EventHit,
 }
@@ -110,6 +111,7 @@ pub fn search_sessions(
             session_id: session.id.clone(),
             cwd: session.cwd.clone(),
             title: session.title.clone(),
+            parent_id: session.parent_id.clone(),
             created_at_ms: session.created_at_ms,
             best: event_hit(&session.id, best_doc, best_count, &matcher),
         });

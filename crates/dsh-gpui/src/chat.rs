@@ -780,6 +780,7 @@ impl ChatView {
                     // 入列；回放此前只有用户气泡、轮次看起来凭空蒸发）
                     self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
                         step: None,
                         step_duration_ms: None,
                         role: Role::Error,
@@ -798,6 +799,7 @@ impl ChatView {
                     unfinished = false;
                     self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
                         step: None,
                         step_duration_ms: None,
                         role: Role::Notice,
@@ -859,6 +861,7 @@ impl ChatView {
                         // （计时字段日志无承载，留 0 → 时长列按缺省 — 渲染）
                         self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
                             step: None,
                             step_duration_ms: None,
                             role: Role::Assistant,
@@ -915,6 +918,7 @@ impl ChatView {
                     }
                     self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
                         step: None,
                         step_duration_ms: None,
                         role: Role::Context,
@@ -975,6 +979,7 @@ impl ChatView {
                     if let Some((info, text)) = context_entry_from(m) {
                         self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
                             step: None,
                             step_duration_ms: None,
                             role: Role::Context,
@@ -993,6 +998,7 @@ impl ChatView {
                     }
                     self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
                         step: None,
                         step_duration_ms: None,
                         role: Role::User,
@@ -1023,6 +1029,8 @@ impl ChatView {
                             })
                             .collect();
                         attach_tool_result(self.entries.last_mut(), &tool_call_id.0, &result_text, is_error.unwrap_or(false), presentation.clone());
+                        // A5.1 已回答批次气泡（回放与实时同形）
+                        self.attach_question_reply(&tool_call_id.0, cur_turn);
                         // 时间列工具行：调用所在 message → 本 result 的窗
                         if let (Some(t), Some(owner)) = (time_ms, last_msg_time) {
                             if let Some(e) = self.entries.last_mut() {
@@ -1051,6 +1059,7 @@ impl ChatView {
                     };
                     self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
 step: None,
 step_duration_ms: None, role: Role::Notice, blocks: vec![], done: true, elapsed: None, usage: None, ended_at_ms: None, turn: cur_turn,
 context: Some(crate::ContextInfo {
@@ -1116,11 +1125,50 @@ open: false,
         self.heights_dirty.set(false);
     }
 
+    /// A5.1 已回答批次气泡：ask_user_question 的答案批结果 → 合成 user
+    /// 条目（上游 answeredQuestionDefinition 的 question-reply 节点——
+    /// 工具结果 JSON 配对入参题面，右对齐呈现；缺答案项按跳过）。
+    fn attach_question_reply(&mut self, call_id: &str, turn: u64) {
+        let found = self.entries.iter().rev().find_map(|e| {
+            e.blocks.iter().rev().find_map(|b| match b {
+                MsgBlock::Tool(t) if t.id == call_id => {
+                    Some((t.name.clone(), t.arguments.clone(), t.result.clone()))
+                }
+                _ => None,
+            })
+        });
+        let Some((name, arguments, Some(result))) = found else {
+            return;
+        };
+        if name != "ask_user_question" {
+            return;
+        }
+        let Some(lines) = dsh_gpui::question_reply::reply_lines(&arguments, &result) else {
+            return;
+        };
+        self.entries.push(ChatEntry {
+            role: Role::User,
+            blocks: vec![],
+            done: true,
+            elapsed: None,
+            usage: None,
+            ended_at_ms: None,
+            turn,
+            context: None,
+            open: false,
+            step: None,
+            step_duration_ms: None,
+            echo_id: None,
+            question_reply: Some(lines),
+        });
+    }
+
     fn last_assistant(&mut self) -> &mut ChatEntry {
         let new = !matches!(self.entries.last(), Some(e) if e.role == Role::Assistant && !e.done);
         if new {
             self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
                 step: None,
                 step_duration_ms: None,
                 role: Role::Assistant,
@@ -1271,6 +1319,7 @@ open: false,
         }
         self.entries.push(ChatEntry {
             echo_id: message_id,
+            question_reply: None,
             step: None,
             step_duration_ms: None,
             role: Role::User,
@@ -1288,6 +1337,7 @@ open: false,
     pub(crate) fn push_context_entry(&mut self, info: ContextInfo, text: String) {
         self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
             step: None,
             step_duration_ms: None,
             role: Role::Context,
@@ -1400,6 +1450,9 @@ open: false,
                 let (result, presentation) = self.latest_tool_result(&tool_call_id.0);
                 let last = self.entries.last_mut();
                 attach_tool_result(last, &tool_call_id.0, result.0.as_str(), is_error, presentation);
+                // A5.1 已回答批次气泡（实时：结果回读成功后配对）
+                let turn = self.turn_open.unwrap_or(0);
+                self.attach_question_reply(&tool_call_id.0, turn);
             }
             AgentEvent::AssistantMessage { usage, .. } => {
                 self.stats_steps += 1;
@@ -1535,6 +1588,7 @@ open: false,
                 if max_tokens_end {
                     self.entries.push(ChatEntry {
                         echo_id: None,
+                    question_reply: None,
                         step: None,
                         step_duration_ms: None,
                         role: Role::Notice,
@@ -1564,6 +1618,7 @@ open: false,
                 }
                 self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
                     step: None,
                     step_duration_ms: None,
                     role: Role::Error,
@@ -1580,6 +1635,7 @@ open: false,
             AgentEvent::Compacted { .. } => {
                 self.entries.push(ChatEntry {
             echo_id: None,
+                    question_reply: None,
 step: None,
 step_duration_ms: None, role: Role::Notice, blocks: vec![], done: true, elapsed: None, usage: None, ended_at_ms: None, turn: self.ui_turn, context: None,
 open: false,
@@ -1841,6 +1897,34 @@ open: false,
                 let open = tool.open;
                 let (_, icon) = widgets::tool_display(&tool.name);
                 let (title, summary, file_path) = widgets::tool_row_texts(&tool.name, &tool.arguments);
+                // A5.1 ask_user_question 行形（上游 AskQuestionRow）：标题
+                // 「提问」，摘要按状态——运行中「等待回答」/ 成功答案批
+                // 「n/m 已回答」/ 中止「已中断」/ 取消「已取消」
+                let ask_summary = if tool.name == "ask_user_question" {
+                    match (tool.result.as_deref(), tool.error) {
+                        (None, _) => Some(dsh_gpui::question_reply::ASK_WAITING_LABEL.to_string()),
+                        (Some(result), false) => {
+                            dsh_gpui::question_reply::row_summary(&tool.arguments, result)
+                        }
+                        (Some(result), true) => {
+                            let text = result;
+                            if text.contains("aborted before the user answered") {
+                                Some(dsh_gpui::question_reply::ASK_INTERRUPTED_LABEL.to_string())
+                            } else if text.contains("the user cancelled ask_user_question") {
+                                Some(dsh_gpui::question_reply::ASK_CANCELLED_LABEL.to_string())
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
+                let title = if tool.name == "ask_user_question" {
+                    dsh_gpui::question_reply::ASK_ROW_TITLE.to_string()
+                } else {
+                    title
+                };
                 // #35① shell 退出标记解析（上游 terminal-card-model 语义）：
                 // 胶囊文案 + 剥标记后的卡体共用一次 parse
                 let shell_parsed = if matches!(tool.name.as_str(), "shell" | "bash") {
@@ -1859,12 +1943,14 @@ open: false,
                 } else {
                     None
                 };
-                let summary_text = failure.clone().unwrap_or_else(|| {
-                    // 有链接的 read/write 摘要 = 相对化后的 path；
-                    // list/exists 等无链接 op 的摘要同样剥工作区根/~ 前缀
-                    // （web relativizeToCwd 作用于全部文件工具摘要）
-                    let raw = file_path.as_deref().unwrap_or(summary.as_str());
-                    widgets::display_path(raw, &self.cwd)
+                let summary_text = ask_summary.unwrap_or_else(|| {
+                    failure.clone().unwrap_or_else(|| {
+                        // 有链接的 read/write 摘要 = 相对化后的 path；
+                        // list/exists 等无链接 op 的摘要同样剥工作区根/~ 前缀
+                        // （web relativizeToCwd 作用于全部文件工具摘要）
+                        let raw = file_path.as_deref().unwrap_or(summary.as_str());
+                        widgets::display_path(raw, &self.cwd)
+                    })
                 });
                 let t = this.clone();
                 let running = tool.result.is_none();
@@ -2084,6 +2170,67 @@ open: false,
                         .and_then(|v| serde_json::to_string_pretty(&v).ok())
                         .unwrap_or_else(|| tool.arguments.clone());
                     let element = match tool.name.as_str() {
+                        // A5.1 ask_user_question 展开体（上游 AskQuestionCard）：
+                        // 每题 header + 题面在上、答案值 join ", " 或「未回答」
+                        // 在下；错误/中断行附裁决文案
+                        "ask_user_question" => {
+                            let lines = dsh_gpui::question_reply::reply_lines(
+                                &tool.arguments,
+                                tool.result.as_deref().unwrap_or(""),
+                            );
+                            let mut card = div().w_full().v_flex().gap(px(10.0));
+                            match lines {
+                                Some(lines) => {
+                                    for line in lines {
+                                        let mut item = div().v_flex().gap(px(2.0));
+                                        if let Some(header) = line.header.filter(|h| !h.trim().is_empty()) {
+                                            item = item.child(
+                                                div()
+                                                    .text_size(px(13.0))
+                                                    .line_height(px(18.0))
+                                                    .text_color(theme::t().text_3)
+                                                    .child(header),
+                                            );
+                                        }
+                                        item = item.child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .line_height(px(20.0))
+                                                .text_color(theme::t().text_2)
+                                                .child(line.question),
+                                        );
+                                        item = item.child(
+                                            div()
+                                                .text_size(px(theme::FONT_ROW))
+                                                .line_height(px(22.0))
+                                                .text_color(theme::t().text)
+                                                .child(if line.skipped {
+                                                    dsh_gpui::question_reply::ASK_SKIPPED_LABEL.to_string()
+                                                } else {
+                                                    line.answers.join(", ")
+                                                }),
+                                        );
+                                        card = card.child(item);
+                                    }
+                                }
+                                None => {
+                                    // 运行中/错误形：回退逐字 IO 卡语义之外的
+                                    // 轻量体——只有标题行（等待中无体）
+                                }
+                            }
+                            if tool.error {
+                                if let Some(result) = tool.result.as_deref() {
+                                    card = card.child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .line_height(px(18.0))
+                                            .text_color(theme::t().text_3)
+                                            .child(widgets::first_line(result)),
+                                    );
+                                }
+                            }
+                            card.into_any_element()
+                        }
                         // bash（上游 tool-bash 名）+ 旧名 shell（历史日志回放）
                         "shell" | "bash" => {
                             let t_fold = this.clone();
@@ -2544,6 +2691,56 @@ open: false,
                     })
                     .unwrap_or_default();
                 let t = this.clone();
+                // A5.1 已回答批次气泡（上游 QuestionReplyBubble）：右对齐
+                // dl——每题 header + 题面（13px 次级）在上，答案值 join ", "
+                // 或「已跳过」在下；行集已由 attach_question_reply 配好
+                if let Some(lines) = &entry.question_reply {
+                    let bubble = div()
+                        .max_w(px(layout::user_bubble_max(content_w)))
+                        .rounded(px(dsh_gpui::ui_metrics::USER_BUBBLE_RADIUS_PX))
+                        .bg(theme::t().bubble)
+                        .px(px(dsh_gpui::ui_metrics::USER_BUBBLE_PAD_X_PX))
+                        .py(px(dsh_gpui::ui_metrics::USER_BUBBLE_PAD_Y_PX))
+                        .v_flex()
+                        .gap(px(6.0))
+                        .children(lines.iter().map(|line| {
+                            let mut item = div().v_flex().gap(px(2.0));
+                            if let Some(header) = line.header.clone().filter(|h| !h.trim().is_empty()) {
+                                item = item.child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .line_height(px(18.0))
+                                        .text_color(theme::t().text_3)
+                                        .child(header),
+                                );
+                            }
+                            item = item.child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .line_height(px(20.0))
+                                    .text_color(theme::t().text_2)
+                                    .child(line.question.clone()),
+                            );
+                            item = item.child(
+                                div()
+                                    .text_size(px(theme::FONT_ROW))
+                                    .line_height(px(22.0))
+                                    .text_color(theme::t().text)
+                                    .child(if line.skipped {
+                                        dsh_gpui::question_reply::REPLY_SKIPPED_LABEL.to_string()
+                                    } else {
+                                        line.answers.join(", ")
+                                    }),
+                            );
+                            item
+                        }));
+                    return div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .child(bubble);
+                }
                 // #32 凭据掩码（上游 ui-secret-mask 语义）：命中已发布格式
                 // 则气泡显示掩码串，存储/发送原文不变（复制钮与编辑仍取
                 // entry 原文，智能体可用真值）；气泡本就纯文本渲染，`*`

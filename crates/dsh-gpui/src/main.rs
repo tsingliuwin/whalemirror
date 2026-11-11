@@ -207,6 +207,10 @@ struct ChatEntry {
     /// 未出现在日志 = 未认领 → 退役移除，上游 809e0942b9 retire echoes
     /// 的单进程 analogue——取消时排队 steer 不留幽灵气泡）。
     echo_id: Option<String>,
+    /// 已回答批次气泡行（A5.1：ask_user_question 的 tool/result 配对产物；
+    /// 上游 answeredQuestionDefinition → question-reply 节点——右对齐
+    /// 问题与回答气泡，user 条目特形）
+    question_reply: Option<Vec<dsh_gpui::question_reply::QuestionReplyLine>>,
 }
 
 /// One session shown in the sidebar list.

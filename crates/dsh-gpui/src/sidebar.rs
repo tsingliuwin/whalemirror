@@ -97,8 +97,20 @@ impl SidebarView {
                         if stale {
                             return;
                         }
-                        let (recorder, cwd) =
-                            app.read_with(cx, |v, _| (Arc::clone(&v.recorder), v.current_cwd.clone()));
+                        let (recorder, cwd) = app.read_with(cx, |v, _| {
+                            // 启动恢复会话不经 switch 流程：current_cwd 可能为
+                            // 空——回退当前会话 meta 的 cwd（桶即真相）
+                            let cwd = if v.current_cwd.is_empty() {
+                                let current = v.current_session_id();
+                                v.sessions
+                                    .iter()
+                                    .find(|m| &m.id == &current)
+                                    .and_then(|m| m.cwd.clone())
+                            } else {
+                                Some(v.current_cwd.clone())
+                            };
+                            (Arc::clone(&v.recorder), cwd.unwrap_or_default())
+                        });
                         let query_for_scan = query.clone();
                         let scan = cx.background_spawn(async move {
                             dsh_gpui::session_query_host::sidebar_content_scan(
@@ -526,9 +538,11 @@ impl Render for SidebarView {
                     row_index += 1;
                 }
             }
+            // 搜索命中：不发工作区树（会话已平铺为结果行——上游 searchTree
+            // 整树替换语义；历史注释说了跳过但代码从未落实，本批修正）
             for w in &self.workspaces {
                 if search_active && !self.group_flat {
-                    // 搜索命中：不发工作区行（会话已平铺）
+                    continue;
                 }
                 let wid = w.id.clone();
                 let wtitle = w.title.clone();

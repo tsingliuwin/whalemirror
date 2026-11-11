@@ -1382,6 +1382,7 @@ dependencies = [
  "dsh-search",
  "dsh-session",
  "dsh-session-projection",
+ "dsh-session-query",
  "dsh-shell",
  "dsh-skill",
  "dsh-spill",

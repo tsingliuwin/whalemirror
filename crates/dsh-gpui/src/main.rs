@@ -10913,6 +10913,70 @@ fn main() {
             .unwrap();
     }
 
+    // session_query 五工具 + tool:session-query 提示词节（A4.4 批②；上游
+    // tool-session-query 文案逐字。actor 探针读 live agent 会话 id/cwd/
+    // 当前步起点 + live 语料克隆——corpus 的 live-wins 覆盖源）。
+    {
+        let tools_for_query = Arc::clone(&tools_for_mcp);
+        let query_state = Arc::new(dsh_gpui::session_query_host::QueryState::new(Arc::clone(
+            &recorder,
+        )));
+        let probe_agent = Arc::clone(&agent);
+        let probe_cwd = Arc::clone(&cwd_slot);
+        query_state.set_actor_probe(Arc::new(move || {
+            let session = probe_agent.session();
+            let s = session.lock().unwrap();
+            let session_id = s.id.as_str().to_string();
+            let cwd = probe_cwd.lock().unwrap().clone();
+            let step_start_seq = s.entries().iter().rev().find_map(|e| match &e.event {
+                SessionEvent::StepStart { .. } => Some(e.seq),
+                _ => None,
+            });
+            let live = dsh_gpui::session_query_host::materialize(
+                &session_id,
+                Some(cwd.clone()),
+                &s,
+                std::time::SystemTime::now(),
+            );
+            Some(dsh_gpui::session_query_host::QueryActor {
+                session_id,
+                cwd: Some(cwd),
+                step_start_seq,
+                live: Some(live),
+            })
+        }));
+        macro_rules! register_query_tool {
+            ($ty:path, $gate:literal) => {
+                let _registered = tools_for_query
+                    .register_when(
+                        Arc::new(<$ty>::new(Arc::clone(&query_state))) as Arc<dyn dsh_tools::Tool>,
+                        preset_gate($gate),
+                    )
+                    .unwrap();
+            };
+        }
+        register_query_tool!(dsh_gpui::session_query_host::SessionSearchTool, "session_search");
+        register_query_tool!(
+            dsh_gpui::session_query_host::SessionEventSearchTool,
+            "session_event_search"
+        );
+        register_query_tool!(dsh_gpui::session_query_host::SessionTraceTool, "session_trace");
+        register_query_tool!(
+            dsh_gpui::session_query_host::SessionEventTraceTool,
+            "session_event_trace"
+        );
+        register_query_tool!(
+            dsh_gpui::session_query_host::SessionEventReadTool,
+            "session_event_read"
+        );
+        let _query_section = prompt.add_section(dsh_system_prompt::PromptSection {
+            name: "tool:session-query".into(),
+            order: prompt
+                .get_section_order(dsh_system_prompt::PromptSectionOrderName::ToolSessionQuery),
+            text: dsh_gpui::session_query_host::SESSION_QUERY_PROMPT_TEXT.into(),
+        });
+    }
+
     // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有
     // 目录就不重复落）。必须放在事件 sink 之后——否则这条 durable 事件只进
     // 内存、不进日志。

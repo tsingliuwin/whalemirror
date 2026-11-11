@@ -37,7 +37,7 @@ pub fn compile_text_filter(text: &str) -> Result<Regex, QueryError> {
 }
 
 /// 会话维度过滤闭集（上游 SessionResultFilter 的工具面子集；None = 不过滤）。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SessionFilters {
     pub session_ids: Vec<String>,
     pub cwds: Vec<String>,
@@ -45,6 +45,22 @@ pub struct SessionFilters {
     /// 创建时间下/上界（含端；unix ms）。
     pub created_from_ms: Option<i64>,
     pub created_to_ms: Option<i64>,
+    /// parent 过滤在场时是否放行无父会话（上游 includeRootSessions，
+    /// 默认 true）。
+    pub include_root_sessions: bool,
+}
+
+impl Default for SessionFilters {
+    fn default() -> Self {
+        Self {
+            session_ids: Vec::new(),
+            cwds: Vec::new(),
+            parent_session_ids: Vec::new(),
+            created_from_ms: None,
+            created_to_ms: None,
+            include_root_sessions: true,
+        }
+    }
 }
 
 impl SessionFilters {
@@ -67,13 +83,15 @@ impl SessionFilters {
         {
             return false;
         }
-        if !self.parent_session_ids.is_empty()
-            && !self
+        if !self.parent_session_ids.is_empty() {
+            let matched = self
                 .parent_session_ids
                 .iter()
-                .any(|p| Some(p.as_str()) == parent_id)
-        {
-            return false;
+                .any(|p| Some(p.as_str()) == parent_id);
+            let root_ok = self.include_root_sessions && parent_id.is_none();
+            if !matched && !root_ok {
+                return false;
+            }
         }
         if let Some(from) = self.created_from_ms {
             if created_at_ms.is_none_or(|t| t < from) {
@@ -180,5 +198,23 @@ mod tests {
         assert!(filters.admits("a", Some("/ws"), None, None));
         assert!(!filters.admits("c", Some("/ws"), None, None), "id 子句 OR 外即拒");
         assert!(!filters.admits("a", Some("/other"), None, None), "子句间 AND");
+    }
+
+    #[test]
+    fn parent_filter_honors_include_root() {
+        // parent 过滤在场：命中父链或（默认）root 都放行
+        let filters = SessionFilters {
+            parent_session_ids: vec!["p1".into()],
+            ..Default::default()
+        };
+        assert!(filters.admits("a", None, Some("p1"), None));
+        assert!(filters.admits("root-session", None, None, None), "默认含 root");
+        let no_root = SessionFilters {
+            parent_session_ids: vec!["p1".into()],
+            include_root_sessions: false,
+            ..Default::default()
+        };
+        assert!(!no_root.admits("root-session", None, None, None));
+        assert!(no_root.admits("a", None, Some("p1"), None));
     }
 }

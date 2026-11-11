@@ -10977,6 +10977,36 @@ fn main() {
         });
     }
 
+    // create_worktree（A4.4 批④；上游 experimental/tool-worktree 文案逐字。
+    // 探针读 live agent 会话 id/cwd + 共享 workdir 句柄——建树后 set 进树，
+    // 工具面与下一请求组装同步跟随）。
+    {
+        let tools_for_wt = Arc::clone(&tools_for_mcp);
+        let wt_state = Arc::new(dsh_gpui::worktree_host::WorktreeState::new());
+        let probe_agent = Arc::clone(&agent);
+        let probe_cwd = Arc::clone(&cwd_slot);
+        wt_state.set_probe(Arc::new(move || {
+            let session = probe_agent.session();
+            let s = session.lock().unwrap();
+            let session_id = s.id.as_str().to_string();
+            if !session_id.starts_with("session-") {
+                return None;
+            }
+            Some(dsh_gpui::worktree_host::WorktreeActor {
+                session_id,
+                cwd: probe_cwd.lock().unwrap().clone(),
+                workdir: probe_agent.workdir(),
+            })
+        }));
+        let _wt = tools_for_wt
+            .register_when(
+                Arc::new(dsh_gpui::worktree_host::CreateWorktreeTool::new(wt_state))
+                    as Arc<dyn dsh_tools::Tool>,
+                preset_gate("create_worktree"),
+            )
+            .unwrap();
+    }
+
     // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有
     // 目录就不重复落）。必须放在事件 sink 之后——否则这条 durable 事件只进
     // 内存、不进日志。

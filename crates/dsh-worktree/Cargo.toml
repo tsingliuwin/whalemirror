@@ -1,0 +1,8 @@
+[package]
+name = "dsh-worktree"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dsh-subprocess = { path = "../dsh-subprocess" }
+tokio.workspace = true

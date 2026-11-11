@@ -341,6 +341,12 @@ impl ReactLoopAgent {
         &self.policy
     }
 
+    /// 会话工作目录句柄（共享——宿主切工作区/建树进入都经 `set` 更新，
+    /// 工具面与下一次请求组装的 sandbox 语境同步跟随）。
+    pub fn workdir(&self) -> dsh_tools::Workdir {
+        self.options.read().unwrap().workdir.clone()
+    }
+
     /// 运行期热更新模型路由（设置面板保存时调用）。
     pub fn set_provider_and_model(&self, provider: impl Into<String>, model: impl Into<String>) {
         let mut o = self.options.write().unwrap();

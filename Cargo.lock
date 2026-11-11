@@ -1391,6 +1391,7 @@ dependencies = [
  "dsh-system-prompt",
  "dsh-tools",
  "dsh-web",
+ "dsh-worktree",
  "futures",
  "gpui-base",
  "gpui-component",
@@ -1653,6 +1654,14 @@ dependencies = [
  "dsh-tools",
  "reqwest",
  "serde_json",
+]
+
+[[package]]
+name = "dsh-worktree"
+version = "0.1.0"
+dependencies = [
+ "dsh-subprocess",
+ "tokio",
 ]
 
 [[package]]

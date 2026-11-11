@@ -346,8 +346,21 @@ pub struct Completed {
 ///
 /// 只适用于 `Ignore` / `Inherit` / `Collect`；要自己读写分帧（MCP / LSP）用
 /// [`spawn_piped`]。
+/// run() 的 Pipe 兜底收集上限（1 MiB——批式面的输出量级）。
+const RUN_PIPE_CAP_BYTES: usize = 1024 * 1024;
+
 pub async fn run(spec: &SpawnSpec) -> Result<Completed, String> {
-    let mut process = spawn(spec)?;
+    // Pipe 在批式收口下等价有界 Collect（1 MiB）——此前 Pipe 的句柄随
+    // ManagedProcess 被 take 后无人读，stdout/stderr 恒空（git 序列实测
+    // 抓到：rev-parse 输出为空 → 后续步 cwd 空 → CreateProcess 123）
+    let mut spec = spec.clone();
+    if spec.stdout == Stdio::Pipe {
+        spec.stdout = Stdio::Collect { max_bytes: RUN_PIPE_CAP_BYTES, spill: None };
+    }
+    if spec.stderr == Stdio::Pipe {
+        spec.stderr = Stdio::Collect { max_bytes: RUN_PIPE_CAP_BYTES, spill: None };
+    }
+    let mut process = spawn(&spec)?;
     let exit_code = process.wait_for_exit().await?;
     let signal = process.signal.clone();
     let stdout = process.stdout().map(Collected::bytes).unwrap_or_default();

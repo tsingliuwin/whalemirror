@@ -27,6 +27,7 @@ dsh-subagent = { path = "../dsh-subagent" }
 dsh-persist = { path = "../dsh-persist" }
 dsh-session = { path = "../dsh-session" }
 dsh-session-query = { path = "../dsh-session-query" } 
+dsh-worktree = { path = "../dsh-worktree" }
 dsh-plugin = { path = "../dsh-plugin" }
 dsh-jobs = { path = "../dsh-jobs" }
 dsh-spill = { path = "../dsh-spill" }

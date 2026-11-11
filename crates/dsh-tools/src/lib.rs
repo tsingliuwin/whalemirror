@@ -6,9 +6,9 @@
 
 use async_trait::async_trait;
 use dsh_llm::{CallId, ContentBlock, Disposer, ToolSchema};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// One tool invocation ready to execute.
 #[derive(Clone, Debug)]
@@ -181,6 +181,259 @@ impl ApprovalSlot {
         match hook {
             Some(hook) => hook(req),
             None => ApprovalOutcome::Unavailable,
+        }
+    }
+}
+
+// ---- ask_user_question（上游 `interaction/tool-ask-user` legacy 阻塞形 +
+// `interaction/user-questions` 服务词表的 rustdsh 等价）----
+
+/// 一次提问里给用户的选择项（上游 `AskUserQuestionOption`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskUserOption {
+    pub label: String,
+    pub description: Option<String>,
+}
+
+/// 一次提问的单个问题（上游 `AskUserQuestionItem` 的模型面：`multi_select`
+/// 蛇形——服务词表的 multiSelect 驼峰只在 timed 变体出现，rustdsh 走 legacy）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskUserQuestion {
+    pub id: String,
+    pub question: String,
+    pub header: Option<String>,
+    pub options: Option<Vec<AskUserOption>>,
+    pub multi_select: Option<bool>,
+}
+
+/// 单题答案（上游 `AskUserQuestionAnswerItem`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskUserAnswerItem {
+    pub id: String,
+    pub selected: Vec<String>,
+    pub custom: Option<String>,
+}
+
+/// 一次提问请求（工具线程借出，宿主 UI 读）。
+#[derive(Clone, Debug)]
+pub struct AskUserRequest {
+    pub call_id: String,
+    pub questions: Vec<AskUserQuestion>,
+}
+
+/// 一次提问的归宿（上游 ask() 结果闭集的 rustdsh 阻塞面子集；timed 的
+/// pending/late-reply 半随后续批）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskUserResolution {
+    /// 用户提交了完整答案批（每题恰一项）。
+    Answered(Vec<AskUserAnswerItem>),
+    /// 请求被撤回（轮次中止）——上游 `ASK_ABORTED`。
+    Cancelled,
+    /// 无可用答案通道（fail-closed）——上游 `NO_PROVIDER`。
+    Unavailable,
+}
+
+/// 提问回调：宿主注入（弹提问卡、等用户提交），阻塞到有答案为止。
+/// 工具执行线程内调用——宿主用独立通道 + 轮询承载（审批槽同形）。
+pub type AskUserHook = Arc<dyn Fn(&AskUserRequest) -> AskUserResolution + Send + Sync>;
+
+/// 可后置注入的提问槽：工具构造时先持槽，宿主 UI 就绪后 `set`。
+/// 未接线时 `request` 返回 `Unavailable`（上游 NO_PROVIDER fail-closed 同语义）。
+#[derive(Clone, Default)]
+pub struct AskUserSlot(Arc<RwLock<Option<AskUserHook>>>);
+
+impl AskUserSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 宿主接线（UI 就绪后调用；重复调用以后者为准）。
+    pub fn set(&self, hook: AskUserHook) {
+        *self.0.write().unwrap() = Some(hook);
+    }
+
+    /// 断开接线（宿主退出 / 会话销毁）。
+    pub fn clear(&self) {
+        *self.0.write().unwrap() = None;
+    }
+
+    /// 是否已接线。
+    pub fn is_set(&self) -> bool {
+        self.0.read().unwrap().is_some()
+    }
+
+    /// 请求一次提问；未接线 = `Unavailable`（fail-closed）。
+    pub fn request(&self, req: &AskUserRequest) -> AskUserResolution {
+        let hook = self.0.read().unwrap().clone();
+        match hook {
+            Some(hook) => hook(req),
+            None => AskUserResolution::Unavailable,
+        }
+    }
+}
+
+/// 跳答语义说明（上游 `skippedAnswerGuidance`，逐字；legacy 与 timed 描述共享）。
+pub const SKIPPED_ANSWER_GUIDANCE: &str = "An answer item with empty selected and no custom means the user skipped that question: continue without it, do not ask it again, and do not treat the skip as permission.";
+
+/// legacy 工具描述（上游 tool-ask-user `description`，逐字拼接）。
+pub fn ask_user_tool_description() -> String {
+    format!(
+        "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. {SKIPPED_ANSWER_GUIDANCE}"
+    )
+}
+
+/// 上游错误/状态文案（`user-questions` 服务词表，逐字）。
+pub const ASK_USER_ABORTED_MESSAGE: &str = "ask_user_question was aborted before the user answered";
+pub const ASK_USER_EMPTY_QUESTIONS_MESSAGE: &str = "ask_user_question requires at least one question";
+pub const ASK_USER_NO_PROVIDER_MESSAGE: &str = "no user-questions answerer accepted the request";
+pub const ASK_USER_DELEGATED_CALLER_MESSAGE: &str = "human interaction is unavailable while the calling agent is owned by another live agent; include the unresolved question or decision in the child agent's final result";
+
+/// 通用提问工具（legacy 阻塞形）：execute 阻塞到宿主 UI 给出答案批，
+/// 答案批作为普通工具结果回流模型（上游 execute 同语义）。
+pub struct AskUserTool {
+    slot: AskUserSlot,
+    /// 子代理拒答探针（本仓约定：子会话 id 无 `session-` 前缀；上游
+    /// `assertLiveRoot` 的 DELEGATED_CALLER 同语义）。None = 不检查。
+    root_probe: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
+}
+
+impl AskUserTool {
+    pub fn new(slot: AskUserSlot) -> Self {
+        Self { slot, root_probe: Mutex::new(None) }
+    }
+
+    /// 宿主接线根会话探针（构造后调用；接线即启用 DELEGATED_CALLER 检查）。
+    pub fn set_root_probe(&self, probe: Arc<dyn Fn() -> bool + Send + Sync>) {
+        *self.root_probe.lock().unwrap() = Some(probe);
+    }
+
+    pub fn slot(&self) -> &AskUserSlot {
+        &self.slot
+    }
+
+    /// 从模型入参解析问题批（上游 schemastery required 面的 rustdsh 等价：
+    /// 形不合法报 invalid arguments）。
+    fn parse_questions(arguments: &Value) -> Result<Vec<AskUserQuestion>, String> {
+        let Some(items) = arguments.get("questions").and_then(|q| q.as_array()) else {
+            return Err("invalid arguments: questions is required".into());
+        };
+        items
+            .iter()
+            .map(|item| {
+                let id = item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("invalid arguments: questions[].id is required")?;
+                let question = item
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .ok_or("invalid arguments: questions[].question is required")?;
+                let header = item.get("header").and_then(|v| v.as_str()).map(str::to_string);
+                let options = item.get("options").and_then(|v| v.as_array()).map(|opts| {
+                    opts.iter()
+                        .map(|o| AskUserOption {
+                            label: o.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                            description: o.get("description").and_then(|v| v.as_str()).map(str::to_string),
+                        })
+                        .collect()
+                });
+                let multi_select = item.get("multi_select").and_then(|v| v.as_bool());
+                Ok(AskUserQuestion {
+                    id: id.to_string(),
+                    question: question.to_string(),
+                    header,
+                    options,
+                    multi_select,
+                })
+            })
+            .collect()
+    }
+
+    /// 答案批的模型面 JSON（上游 `answerResult`：custom 缺省省略）。
+    pub fn answer_result_json(items: &[AskUserAnswerItem]) -> Value {
+        let answers: Vec<Value> = items
+            .iter()
+            .map(|a| {
+                let mut o = serde_json::Map::new();
+                o.insert("id".into(), json!(a.id));
+                o.insert("selected".into(), json!(a.selected));
+                if let Some(custom) = &a.custom {
+                    o.insert("custom".into(), json!(custom));
+                }
+                Value::Object(o)
+            })
+            .collect();
+        json!({ "answers": answers })
+    }
+}
+
+#[async_trait]
+impl Tool for AskUserTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "ask_user_question".into(),
+            description: ask_user_tool_description(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "description": "Questions to ask the user before continuing.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Stable id for this question; echoed in the answer." },
+                                "question": { "type": "string", "description": "The specific question to ask the user." },
+                                "header": { "type": "string", "description": "Optional short heading for the question, such as \"Confirm\" or \"Choose Mode\"." },
+                                "options": {
+                                    "type": "array",
+                                    "description": "Optional choices to show the user. If you recommend one, put it first and append \"(Recommended)\" to that label.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string", "description": "Short user-facing option label." },
+                                            "description": { "type": "string", "description": "One sentence explaining the tradeoff or impact." }
+                                        }
+                                    }
+                                },
+                                "multi_select": { "type": "boolean", "description": "Whether the user may select more than one option. Defaults to false." }
+                            }
+                        }
+                    }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &ToolExecutionInput) -> ToolExecutionResult {
+        let questions = match Self::parse_questions(&input.arguments) {
+            Ok(q) => q,
+            Err(message) => return ToolExecutionResult::error(message),
+        };
+        if questions.is_empty() {
+            return ToolExecutionResult::error(ASK_USER_EMPTY_QUESTIONS_MESSAGE);
+        }
+        // 子代理拒答（上游 assertLiveRoot 的 DELEGATED_CALLER；探针缺省不查）
+        {
+            let probe = self.root_probe.lock().unwrap().clone();
+            if let Some(probe) = probe {
+                if !probe() {
+                    return ToolExecutionResult::error(ASK_USER_DELEGATED_CALLER_MESSAGE);
+                }
+            }
+        }
+        let request = AskUserRequest {
+            call_id: input.call_id.as_str().to_string(),
+            questions,
+        };
+        match self.slot.request(&request) {
+            AskUserResolution::Answered(items) => {
+                ToolExecutionResult::text(Self::answer_result_json(&items).to_string())
+            }
+            AskUserResolution::Cancelled => ToolExecutionResult::error(ASK_USER_ABORTED_MESSAGE),
+            AskUserResolution::Unavailable => {
+                ToolExecutionResult::error(ASK_USER_NO_PROVIDER_MESSAGE)
+            }
         }
     }
 }
@@ -928,6 +1181,138 @@ step", PlanReviewDecision::Dismissed);
         let text = text_of(&r);
         assert!(text.contains("dismissed the plan review"), "{text}");
         assert!(text.contains("plan mode remains active"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod ask_user_tests {
+    use super::*;
+
+    fn run_with(raw: &str, hook: Option<AskUserHook>, root_ok: bool) -> ToolExecutionResult {
+        let tool = AskUserTool::new(AskUserSlot::new());
+        if let Some(hook) = hook {
+            tool.slot().set(hook);
+        }
+        tool.set_root_probe(std::sync::Arc::new(move || root_ok));
+        let input = ToolExecutionInput::with_raw_arguments(
+            CallId("call_ask".to_string()),
+            "ask_user_question".to_string(),
+            raw.to_string(),
+        );
+        futures::executor::block_on(tool.execute(&input))
+    }
+
+    fn text_of(r: &ToolExecutionResult) -> String {
+        r.content
+            .iter()
+            .find_map(|b| match b {
+                dsh_llm::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    const QUESTION_ARGS: &str = r#"{"questions":[{"id":"q1","question":"用哪个方案？","header":"选择","options":[{"label":"方案 A","description":"快"},{"label":"方案 B"}],"multi_select":false}]}"#;
+
+    #[test]
+    fn description_carries_skipped_answer_guidance_verbatim() {
+        let tool = AskUserTool::new(AskUserSlot::new());
+        assert_eq!(
+            tool.definition().description,
+            "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. \
+             An answer item with empty selected and no custom means the user skipped that question: \
+             continue without it, do not ask it again, and do not treat the skip as permission."
+        );
+    }
+
+    #[test]
+    fn unwired_slot_fails_closed_with_no_provider_message() {
+        let r = run_with(QUESTION_ARGS, None, true);
+        assert!(r.is_error);
+        assert_eq!(text_of(&r), "no user-questions answerer accepted the request");
+    }
+
+    #[test]
+    fn empty_questions_rejected_verbatim() {
+        let r = run_with(r#"{"questions":[]}"#, None, true);
+        assert!(r.is_error);
+        assert_eq!(text_of(&r), "ask_user_question requires at least one question");
+    }
+
+    #[test]
+    fn missing_questions_rejected_as_invalid_arguments() {
+        let r = run_with("{}", None, true);
+        assert!(r.is_error);
+        assert!(text_of(&r).starts_with("invalid arguments: questions is required"));
+    }
+
+    #[test]
+    fn delegated_caller_refused_verbatim() {
+        let r = run_with(QUESTION_ARGS, None, false);
+        assert!(r.is_error);
+        assert!(text_of(&r).starts_with("human interaction is unavailable while the calling agent is owned by another live agent"));
+    }
+
+    #[test]
+    fn answered_batch_flows_back_as_result_json() {
+        let tool = AskUserTool::new(AskUserSlot::new());
+        tool.slot().set(std::sync::Arc::new(|req: &AskUserRequest| {
+            // 请求形断言：call id + 问题字段原样借出
+            assert_eq!(req.call_id, "call_ask");
+            assert_eq!(req.questions.len(), 1);
+            let q = &req.questions[0];
+            assert_eq!(q.id, "q1");
+            assert_eq!(q.question, "用哪个方案？");
+            assert_eq!(q.header.as_deref(), Some("选择"));
+            assert_eq!(q.multi_select, Some(false));
+            let opts = q.options.as_ref().unwrap();
+            assert_eq!(opts[0].label, "方案 A");
+            assert_eq!(opts[0].description.as_deref(), Some("快"));
+            assert_eq!(opts[1].label, "方案 B");
+            assert_eq!(opts[1].description, None);
+            AskUserResolution::Answered(vec![
+                AskUserAnswerItem { id: "q1".into(), selected: vec!["方案 A".into()], custom: None },
+            ])
+        }));
+        let input = ToolExecutionInput::with_raw_arguments(
+            CallId("call_ask".to_string()),
+            "ask_user_question".to_string(),
+            QUESTION_ARGS.to_string(),
+        );
+        let r = futures::executor::block_on(tool.execute(&input));
+        assert!(!r.is_error);
+        assert_eq!(
+            text_of(&r),
+            r#"{"answers":[{"id":"q1","selected":["方案 A"]}]}"#
+        );
+    }
+
+    #[test]
+    fn cancelled_resolution_maps_to_aborted_message() {
+        let tool = AskUserTool::new(AskUserSlot::new());
+        tool.slot()
+            .set(std::sync::Arc::new(|_: &AskUserRequest| AskUserResolution::Cancelled));
+        let input = ToolExecutionInput::with_raw_arguments(
+            CallId("c".to_string()),
+            "ask_user_question".to_string(),
+            QUESTION_ARGS.to_string(),
+        );
+        let r = futures::executor::block_on(tool.execute(&input));
+        assert!(r.is_error);
+        assert_eq!(text_of(&r), "ask_user_question was aborted before the user answered");
+    }
+
+    #[test]
+    fn custom_answer_rides_the_batch() {
+        assert_eq!(
+            AskUserTool::answer_result_json(&[AskUserAnswerItem {
+                id: "q1".into(),
+                selected: vec![],
+                custom: Some("自己写".into()),
+            }])
+            .to_string(),
+            r#"{"answers":[{"id":"q1","selected":[],"custom":"自己写"}]}"#
+        );
     }
 }
 

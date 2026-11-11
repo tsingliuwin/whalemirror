@@ -12,7 +12,9 @@
 
 use crate::layout::{self, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED};
 use crate::theme;
+use crate::state_dot;
 use crate::widgets::{icon_btn, rail_icon, session_row, tip};
+use std::sync::Arc;
 use crate::{AppView, SessionMeta, WorkspaceInfo};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -55,6 +57,11 @@ pub(crate) struct SidebarView {
     search_open: bool,
     search_query: String,
     search_input: Entity<InputState>,
+    /// 内容检索结果（A4.4 批③：query 标签 + 命中行 + 是否超限；
+    /// Some 且标签与当前词条一致才渲染——后台扫描回来时词条可能已变）
+    content_results: Option<(String, Vec<dsh_gpui::session_query_host::ContentHit>, bool)>,
+    /// 后台扫描进行中（上游 search.pending 骨架）
+    searching: bool,
     /// 视图选项：单列表 / 按工作区；排序 手动 / 最近更新
     group_flat: bool,
     order_manual: bool,
@@ -69,11 +76,48 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> Self {
         // 搜索键入只打本视图：此前每个字符 notify 整个 AppView（聊天区可
-        // 见项随每键重建）
+        // 见项随每键重建）。词条非空时另起后台内容扫描（上游 host RPC
+        // session.search：250ms debounce、cwd 桶、current-surface
+        // user/assistant、limit 20）。
         let search_subscription = cx.subscribe(&search_input, |sb, st, event, cx| {
             if matches!(event, InputEvent::Change) {
                 let q = st.read_with(cx, |s, _| s.value().to_string());
                 sb.search_query = q.trim().to_string();
+                sb.content_results = None;
+                sb.searching = !sb.search_query.is_empty();
+                if sb.searching {
+                    let app = sb.app.clone();
+                    let query = sb.search_query.clone();
+                    cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                        // 上游 SEARCH_DEBOUNCE_MS = 250
+                        cx.background_executor().timer(Duration::from_millis(250)).await;
+                        let Some(view) = this.upgrade() else { return };
+                        // 词条已变：本轮作废（新一轮已另起）
+                        let stale = view.update(cx, |v, _| v.search_query != query);
+                        if stale {
+                            return;
+                        }
+                        let (recorder, cwd) =
+                            app.read_with(cx, |v, _| (Arc::clone(&v.recorder), v.current_cwd.clone()));
+                        let query_for_scan = query.clone();
+                        let scan = cx.background_spawn(async move {
+                            dsh_gpui::session_query_host::sidebar_content_scan(
+                                &recorder, &cwd, &query_for_scan,
+                            )
+                        });
+                        let out = scan.await;
+                        let query_result = query;
+                        let _ = view.update(cx, |v, cx| {
+                            let still_current = v.search_query == query_result;
+                            if still_current {
+                                v.content_results = Some((query_result, out.0, out.1));
+                            }
+                            v.searching = false;
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
                 cx.notify();
             }
         });
@@ -96,6 +140,8 @@ impl SidebarView {
             search_open: false,
             search_query: String::new(),
             search_input,
+            content_results: None,
+            searching: false,
             group_flat: false,
             order_manual: false,
             _search_subscription: search_subscription,
@@ -144,6 +190,101 @@ impl SidebarView {
 }
 
 impl SidebarView {
+}
+
+/// 搜索结果行（上游 Rows.tsx SearchResultItem：48 高两行——标题
+/// 14/20 单行省略 + meta 行（工作区 ≤40% 宽 tertiary + 摘录 flex
+/// secondary，均 12/17 省略）；标题前 16px 状态点槽）。
+fn search_result_row(
+    index: usize,
+    title: String,
+    workspace: Option<String>,
+    snippet: Option<String>,
+    active: bool,
+    running: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let id: SharedString = format!("search-{title}-{index}").into();
+    let group: SharedString = format!("search-row-{index}").into();
+    let mut meta = div().flex().min_w_0().gap(px(8.0));
+    if let Some(ws) = workspace {
+        meta = meta.child(
+            div()
+                .flex_none()
+                .max_w(gpui::relative(0.4))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(12.0))
+                .line_height(px(17.0))
+                .text_color(theme::t().text_3)
+                .child(ws),
+        );
+    }
+    if let Some(snippet) = snippet {
+        meta = meta.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(12.0))
+                .line_height(px(17.0))
+                .text_color(theme::t().text_2)
+                .child(snippet),
+        );
+    }
+    div()
+        .id(id)
+        .group(group)
+        // 上游 .searchResultRow：min-height 48、列向、圆角 R12（标准 cell 档）
+        .min_h(px(48.0))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .px_2()
+        .py(px(4.0))
+        .gap(px(2.0))
+        .rounded(px(12.0))
+        .cursor_pointer()
+        .bg(if active { theme::t().hover } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) })
+        .hover(|s| s.bg(theme::t().hover))
+        .on_click(on_click)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                // 16px 状态点槽恒占位（上游 leading 槽；running 显点）
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(if running {
+                            state_dot(theme::t().accent)
+                        } else {
+                            div().w(px(4.0)).h(px(4.0)).rounded_full()
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(14.0))
+                        .line_height(px(20.0))
+                        .text_color(theme::t().text)
+                        .child(title),
+                )
+        )
+        .child(meta)
 }
 
 impl Render for SidebarView {
@@ -237,39 +378,150 @@ impl Render for SidebarView {
             };
             let search_active = !self.search_query.is_empty();
             if search_active {
-                // web searchTree：匹配会话平铺（工作区行常规渲染跳过）
+                // web searchTree：匹配会话平铺（工作区行常规渲染跳过）。
+                // 本地标题命中在前（newest-first），后台内容命中按序续后
+                // （上游 deriveSearchResults：local lead + backend order，
+                // 同 id 去重保留内容摘录）；行形走 searchResultRow 两行。
                 let needle = self.search_query.to_lowercase();
+                let content = self
+                    .content_results
+                    .clone()
+                    .filter(|(q, _, _)| q == &self.search_query);
+                // 骨架（上游 search.pending）
+                if self.searching && content.is_none() {
+                    all_rows.push(anchored_row(
+                        format!("sbrow-{row_index}"),
+                        div()
+                            .min_h(px(28.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(theme::t().text_3)
+                            .child("正在搜索会话历史…").into_any_element(),
+                    ));
+                    row_index += 1;
+                }
+                let mut listed: HashSet<String> = HashSet::new();
+                let mut shown = 0usize;
+                let mut has_more = false;
+                // 本地标题命中（含会话 id 子串——上游 tree.ts 同语义）
                 for meta in &self.sessions {
+                    if shown >= 20 {
+                        has_more = true;
+                        break;
+                    }
                     if self.archived.contains(meta.id.as_str()) {
                         continue;
                     }
-                    if !meta.title.to_lowercase().contains(&needle) {
+                    let id_text = meta.id.as_str().to_lowercase();
+                    if !meta.title.to_lowercase().contains(&needle)
+                        && !id_text.contains(&needle)
+                    {
                         continue;
                     }
+                    listed.insert(meta.id.as_str().to_string());
                     let t_sw = this.clone();
                     let id = meta.id.clone();
-                    let t_m = sb.clone();
-                    let id_m = meta.id.as_str().to_string();
                     let key = format!("sbrow-{row_index}");
-                    let kb = key.clone();
-                    let slot = row_bounds.clone();
                     let active = meta.id == current_id;
+                    let ws_label = meta
+                        .cwd
+                        .clone()
+                        .and_then(|cwd| self.workspaces.iter().find(|w| w.id == cwd).map(|w| w.title.clone()));
                     all_rows.push(anchored_row(
                         key,
-                        session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_ids.contains(&meta.id), move |_, _, cx| {
-                            let id = id.clone();
-                            t_sw.update(cx, |v, cx| { v.switch_session(id, cx); });
-                        }, move |click, _, cx| {
-                            let id = id_m.clone();
-                            let y = slot.borrow().get(kb.as_str())
-                                .map(|b| f32::from(b.origin.y + b.size.height))
-                                .unwrap_or_else(|| crate::click_anchor_y(click));
-                            t_m.update(cx, |v, cx| {
-                                v.sidebar_menu = Some(("session".into(), id, y));
-                                cx.notify();
-                            });
-                        })
+                        search_result_row(
+                            row_index,
+                            meta.title.clone(),
+                            ws_label,
+                            None,
+                            active,
+                            self.running_ids.contains(&meta.id),
+                            move |_, _, cx| {
+                                let id = id.clone();
+                                t_sw.update(cx, |v, cx| { v.switch_session(id, cx); });
+                            },
+                        )
                         .into_any_element(),
+                    ));
+                    row_index += 1;
+                    shown += 1;
+                }
+                // 内容命中（current-surface user/assistant 文本）
+                if let Some((_, hits, more)) = &content {
+                    for hit in hits.iter().cloned() {
+                        if listed.contains(&hit.session_id) || shown >= 20 {
+                            if shown >= 20 && !listed.contains(&hit.session_id) {
+                                has_more = true;
+                                break;
+                            }
+                            continue;
+                        }
+                        listed.insert(hit.session_id.clone());
+                        let t_sw = this.clone();
+                        let id = dsh_llm::SessionId::new(hit.session_id.clone());
+                        let key = format!("sbrow-{row_index}");
+                        let active = hit.session_id == current_id.as_str();
+                        let title = hit.title.clone().unwrap_or_else(|| "未命名".into());
+                        let ws_label = hit
+                            .cwd
+                            .clone()
+                            .and_then(|cwd| self.workspaces.iter().find(|w| w.id == cwd).map(|w| w.title.clone()));
+                        let snippet = hit.snippet.clone();
+                        all_rows.push(anchored_row(
+                            key,
+                            search_result_row(
+                                row_index,
+                                title,
+                                ws_label,
+                                Some(snippet),
+                                active,
+                                self.running_ids.contains(&id),
+                                move |_, _, cx| {
+                                    let id = id.clone();
+                                    t_sw.update(cx, |v, cx| { v.switch_session(id, cx); });
+                                },
+                            )
+                            .into_any_element(),
+                        ));
+                        row_index += 1;
+                        shown += 1;
+                    }
+                    if *more {
+                        has_more = true;
+                    }
+                }
+                // 空态（上游 search.noMatches）
+                if shown == 0 && !(self.searching && content.is_none()) {
+                    all_rows.push(anchored_row(
+                        format!("sbrow-{row_index}"),
+                        div()
+                            .min_h(px(28.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(theme::t().text_3)
+                            .child("无匹配会话").into_any_element(),
+                    ));
+                    row_index += 1;
+                }
+                // 超限提示（上游 search.hasMore：仅显示前 20 条）
+                if has_more {
+                    all_rows.push(anchored_row(
+                        format!("sbrow-{row_index}"),
+                        div()
+                            .min_h(px(24.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(theme::t().text_3)
+                            .child("仅显示前 20 条结果，请缩小搜索范围。").into_any_element(),
                     ));
                     row_index += 1;
                 }
@@ -478,9 +730,9 @@ impl Render for SidebarView {
                 let t_sw = this.clone();
                 let id = meta.id.clone();
                 let active = meta.id == current_id;
+                let t_m = sb.clone();
+                let id_m = meta.id.as_str().to_string();
                 {
-                    let t_m = sb.clone();
-                    let id_m = meta.id.as_str().to_string();
                     let key = format!("sbrow-{row_index}");
                     let kb = key.clone();
                     let slot = row_bounds.clone();

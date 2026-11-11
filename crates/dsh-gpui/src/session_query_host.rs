@@ -14,7 +14,7 @@ use dsh_tools::{Tool, ToolDefinition, ToolExecutionInput, ToolExecutionResult};
 use serde_json::{json, Value};
 
 use dsh_session_query::{
-    availability_text, event_trace, format_event_read, format_event_search, format_event_trace,
+    event_trace, format_event_read, format_event_search, format_event_trace,
     format_session_search, format_session_trace, read_event, search_events, search_sessions,
     session_lineage, CorpusSession, EventFilters, EventSearchRequest, SessionFilters,
     SessionSearchRequest, Surface, MAX_SEARCH_RESULTS,
@@ -460,3 +460,67 @@ query_tool!(
     })
 );
 
+
+/// 侧栏内容检索的一行（上游 SearchResultNode 的后端半：host RPC
+/// session.search 只搜 cwd 可见会话的 current-surface user/assistant
+/// 文本，limit 20、摘录 240 码点）。
+#[derive(Clone, Debug)]
+pub struct ContentHit {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub snippet: String,
+}
+
+/// 侧栏内容扫描（上游 `session.search` host RPC 等价）：cwd 桶内全部
+/// 会话 + current-surface user/assistant 文本过滤；返回 (行, 是否超限)。
+pub fn sidebar_content_scan(
+    recorder: &SessionRecorder,
+    cwd: &str,
+    query: &str,
+) -> (Vec<ContentHit>, bool) {
+    let Ok(entries) = recorder.list() else {
+        return (Vec::new(), false);
+    };
+    let mut corpus = Vec::new();
+    for entry in entries {
+        if entry.cwd.as_deref() != Some(cwd) {
+            continue;
+        }
+        if let Ok((session, _)) = recorder.load(&entry.id, entry.cwd.as_deref()) {
+            let modified = entry.modified;
+            let id = entry.id.as_str().to_string();
+            corpus.push(materialize(&id, entry.cwd.clone(), &session, modified));
+        }
+    }
+    let request = dsh_session_query::SessionSearchRequest {
+        query: query.to_string(),
+        session_filters: dsh_session_query::SessionFilters {
+            cwds: vec![cwd.to_string()],
+            ..Default::default()
+        },
+        event_filters: dsh_session_query::EventFilters {
+            event_types: vec!["user/message".into(), "assistant/message".into()],
+            surfaces: vec![Surface::Current],
+            ..Default::default()
+        },
+        // 上游 SESSION_SEARCH_RESULT_LIMIT = 20；多取一行探超限
+        limit: Some(21),
+    };
+    let hits = match search_sessions(&corpus, &request) {
+        Ok(hits) => hits,
+        Err(_) => return (Vec::new(), false),
+    };
+    let has_more = hits.len() > 20;
+    let rows = hits
+        .into_iter()
+        .take(20)
+        .map(|hit| ContentHit {
+            session_id: hit.session_id,
+            title: hit.title,
+            cwd: hit.cwd,
+            snippet: hit.best.snippet,
+        })
+        .collect();
+    (rows, has_more)
+}

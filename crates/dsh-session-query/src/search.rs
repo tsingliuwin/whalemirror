@@ -167,7 +167,7 @@ pub fn read_event(
     let session = corpus.iter().find(|s| s.id == session_id)?;
     let shadowed = crate::documents::classify_surfaces(&session.events);
     let pos = session.events.iter().position(|(s, _, _)| *s == seq)?;
-    let (_, event, time) = &session.events[pos];
+    let (_, event, _time) = &session.events[pos];
     let target_json = serde_json::to_string_pretty(event).unwrap_or_else(|_| "{}".into());
     let neighbor_line = |(s, ev, t): &(u64, dsh_session::SessionEvent, Option<i64>)| -> String {
         let semantic = crate::documents::extract_event_text(ev);

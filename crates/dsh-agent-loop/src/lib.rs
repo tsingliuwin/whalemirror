@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Notify;
 
+pub mod policy;
 pub mod retry;
 pub mod time_context;
 
@@ -257,6 +258,10 @@ pub struct ReactLoopAgent {
     /// 会话绑定的 agent 预设 id（上游会话头 `agentPreset`；工具准入按它
     /// 门控，运行中会话保持其预设不变）。
     agent_preset: Mutex<String>,
+    /// 运行时策略观察（web `sandbox:policy` / `approval:policy` 语境的值
+    /// 源；`set_session` 折叠恢复，宿主运行时切换显式更新——见
+    /// [`policy::PolicyContext`]）。
+    policy: policy::PolicyContext,
 }
 
 /// 一个会话的 prompt 接纳收据：已扫描到的日志长度 + 已接纳的消息 id。
@@ -311,6 +316,7 @@ impl ReactLoopAgent {
             plan_pending: Mutex::new(None),
             prompt_receipts: Mutex::new(PromptReceipts::default()),
             agent_preset: Mutex::new(String::new()),
+            policy: policy::PolicyContext::new(),
         })
     }
 
@@ -322,6 +328,12 @@ impl ReactLoopAgent {
 
     pub fn agent_preset(&self) -> String {
         self.agent_preset.lock().unwrap().clone()
+    }
+
+    /// 运行时策略观察句柄（宿主运行时切换用：权限预设换挡时更新沙箱档/
+    /// 审批策略，下一次请求组装生效；会话恢复走 `set_session` 折叠）。
+    pub fn policy(&self) -> &policy::PolicyContext {
+        &self.policy
     }
 
     /// 运行期热更新模型路由（设置面板保存时调用）。
@@ -368,6 +380,30 @@ impl ReactLoopAgent {
         });
         self.plan_mode.store(plan_active.unwrap_or(false), Ordering::Relaxed);
         *self.plan_entered.lock().unwrap() = plan_entered;
+        // 权限旋钮折叠 → 运行时语境（上游 `sandbox:policy` / `approval:policy`
+        // 语境每请求读投影；set_session 即折叠恢复）。三类事件各取最后值，
+        // 缺省回落预设映射（上游 effective = projected ?? 部署默认；rustdsh
+        // 部署默认 = 目录默认预设 workspace-write 的旋钮）。
+        {
+            let mut preset: Option<String> = None;
+            let mut approval: Option<String> = None;
+            let mut sandbox: Option<String> = None;
+            for e in session.entries() {
+                match &e.event {
+                    SessionEvent::PermissionPreset { preset: p } => preset = Some(p.clone()),
+                    SessionEvent::ApprovalPolicy { policy: p } => approval = Some(p.clone()),
+                    SessionEvent::SandboxModeSwitch { mode } => sandbox = Some(mode.clone()),
+                    _ => {}
+                }
+            }
+            let (default_sandbox, default_approval) = policy::preset_knobs(
+                preset.as_deref().unwrap_or(policy::DEFAULT_PRESET),
+            );
+            self.policy
+                .set_sandbox(&sandbox.unwrap_or_else(|| default_sandbox.into()), Vec::new());
+            self.policy
+                .set_approval_policy(&approval.unwrap_or_else(|| default_approval.into()));
+        }
         // v3 replace 语义要求换端点恰为当前 head：切换会话必须把内存 head
         // 重定基到日志末条 system/message 行——否则 None 分支会对已有 head
         // 重复 append（旧行残留），跨会话残留旧 seq 则写出悬空 replace 端点。
@@ -385,6 +421,25 @@ impl ReactLoopAgent {
     /// `agent.session.append(...)`): retry events ride this too.
     pub fn append_session_event(&self, event: SessionEvent) {
         self.append_event(event);
+    }
+
+    /// 审批策略切换通知（上游 `ApprovalService.setPolicy` 的 inject 面）：
+    /// user/plugin `user-approval` 裸源耐久消息（V4 wire `{kind:
+    /// 'user-approval'}`），落盘并即时入内存面——运行中轮从下一步、空闲
+    /// 会话从下一轮可见。policy 事件本身由宿主切换路径落（上游同分工）。
+    pub fn append_policy_change_notice(&self, previous: &str, policy: &str) {
+        let message = Message::new(
+            Role::User,
+            vec![ContentBlock::text(policy::policy_change_notice_text(previous, policy))],
+            MessageSource::Plugin {
+                plugin: "user-approval".into(),
+                form: None,
+                summary: None,
+                sections: None,
+            },
+        );
+        self.append_event(SessionEvent::UserMessage(message.clone()));
+        self.emit_ui(AgentEvent::ContextMessage { message });
     }
 
     /// plan 模式切换（上游 /plan 命令与 exit_plan_mode 审阅共用的提交路径）：
@@ -800,15 +855,16 @@ impl ReactLoopAgent {
         if !sections.is_empty() {
             parts.push(sections);
         }
-        // 运行时上下文：会话工作目录（web sandbox:policy 快照的同一措辞——
-        // 模型据此知道自己在哪个工作区工作）
+        // 运行时语境：sandbox:policy + approval:policy（上游语境逐字；工作区
+        // 根 = 会话工作目录，档位随宿主切换在下一次请求组装生效——set_session
+        // 折叠恢复，权限预设切换走 policy() 显式更新）
         {
             let o = self.options.read().unwrap();
-            if let Some(ws) = o.workdir.get() {
-                parts.push(format!(
-                    "Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: \"{}\". Some platform temporary areas may also be writable.",
-                    ws.display()
-                ));
+            if let Some(sentence) = self.policy.sandbox_sentence(o.workdir.get().as_deref()) {
+                parts.push(sentence);
+            }
+            if let Some(sentence) = self.policy.approval_sentence() {
+                parts.push(sentence);
             }
         }
         PromptAssembly {

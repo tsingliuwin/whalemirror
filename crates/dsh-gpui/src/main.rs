@@ -4213,7 +4213,8 @@ impl AppView {
         self.agent.set_session(Session::new(id.clone()));
         self.sync_job_owner();
         self.draft_session = Some(id.clone());
-        // 权限三旋钮内存态（物化时随 pin 三事件落盘）
+        // 权限三旋钮内存态（物化时随 pin 三事件落盘）；运行时语境随宿主
+        // 默认对齐（草稿会话无事件，set_session 折叠回落的是目录默认）
         {
             let default_preset = default_permission_preset();
             let (_, _, sandbox, approval) = preset_spec(&default_preset);
@@ -4223,6 +4224,8 @@ impl AppView {
             if let Some(m) = dsh_fs::FsMode::from_web(sandbox) {
                 self.fs_sandbox.set_mode(m);
             }
+            self.agent.policy().set_sandbox(sandbox, Vec::new());
+            self.agent.policy().set_approval_policy(approval);
         }
         self.selected_tool = None;
         self.selected_message = None;
@@ -4257,6 +4260,10 @@ impl AppView {
             .append_session_event(SessionEvent::SandboxModeSwitch { mode: sandbox.to_string() });
         self.agent
             .append_session_event(SessionEvent::ApprovalPolicy { policy: approval.to_string() });
+        // 运行时语境随 pin 对齐（草稿期 set_session 折叠无事件，回落的是
+        // 目录默认；设置默认预设非 workspace-write 时以 pin 值为准）
+        self.agent.policy().set_sandbox(sandbox, Vec::new());
+        self.agent.policy().set_approval_policy(approval);
         let ws = self.current_workspace.clone();
         self.assign_session_to_workspace(&id, ws.as_deref());
         if let Some(m) = self.sessions.iter_mut().find(|m| m.id == id) {
@@ -5978,11 +5985,18 @@ impl AppView {
             self.fs_sandbox
                 .set_mode(dsh_fs::FsMode::from_web(sandbox).unwrap_or(dsh_fs::FsMode::WorkspaceWrite));
         }
+        // 运行时语境同步（web setSandboxMode/setApprovalPolicy 写投影；下一
+        // 请求组装生效——shell/sandbox 节与 approval:policy 句随档位重建）
+        self.agent.policy().set_sandbox(sandbox, Vec::new());
         if approval != self.approval_policy {
+            let previous = self.approval_policy.clone();
             self.agent
                 .append_session_event(SessionEvent::ApprovalPolicy { policy: approval.to_string() });
             self.approval_policy = approval.to_string();
             self.sync_approval_gate();
+            // 审批策略切换通知（上游 setPolicy inject 逐字；策略未变的切换
+            // 不通知——上游 setPolicy 同守卫）
+            self.agent.append_policy_change_notice(&previous, approval);
         }
         self.permission_preset = preset.to_string();
         // 上游 prompt narration：shell 节按档位告知模型写边界

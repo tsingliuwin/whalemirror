@@ -4015,11 +4015,15 @@ impl AppView {
                 message_id: message_id.clone(),
                 target_session_id: Some(target_session_id.clone()),
             };
-            let committed_task = if task.record.is_recurring() {
-                dsh_schedule::advanced(task, occurrence.clone(), receipt, &dsh_schedule::DeliveryRetentionBounds::default())
-            } else {
-                dsh_schedule::delivered(task, receipt, &dsh_schedule::DeliveryRetentionBounds::default())
-            };
+            // 上游统一走 advanced：单次规则的 occurrence 无下一目标 →
+            // scheduledAt 保持、status 置 ended（delivered 不推进规则，
+            // 会让单次任务每地板间隔重投）。
+            let committed_task = dsh_schedule::advanced(
+                task,
+                occurrence.clone(),
+                receipt,
+                &dsh_schedule::DeliveryRetentionBounds::default(),
+            );
             let _ = self.schedule.store.put(&committed_task);
             committed.push(task.record.id().to_string());
         }
@@ -4029,7 +4033,6 @@ impl AppView {
             let executing_state = Arc::clone(&self.schedule);
             let watch_runtime = Arc::clone(&runtime);
             let watch_committed = committed.clone();
-            let view = cx.entity();
             cx.spawn(async move |this, cx| {
                 let _ = watch_runtime.when_idle().await;
                 {

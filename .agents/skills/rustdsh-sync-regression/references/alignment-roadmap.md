@@ -284,7 +284,7 @@ A4 ──→ A6 的 skill/team UI
 | A4.2 | `mcp`：客户端 + manager + resources + 设置页集群 | 设置页扩展 | 1-2 周 | ✅ **已落 11-09**（backlog #112）：`dsh-mcp` crate（stdio + JSON-RPC 2.0、initialize 四版协商、`tools/list` 分页与重名整表拒绝、`tools/call` 60s、`mcp__<server>__<raw>` 桥两阶段换代）+ 宿主按 `settings.yaml mcp.servers[]` 拉起；13 条测试。剩 Streamable HTTP / 重连退避 / mcp-resources / 设置页编辑 |
 | A4.3 | `lsp`：stdio + `tool-lsp` + 设置 | B3 | 1-2 周 | 跳定义 / 引用 / hover；✅ **纯面已落 11-09**（backlog #114）：`dsh-lsp` 缝（四操作闭集、`final_extension`、全有或全无注册、错误码文案）、帧协议（Content-Length、64KiB 头上限、五类失败文案）、渲染（一基↔零基换算、`path:line:character`、两类截断标记、`file:` URI 相对化、空结果文案、present 卡）；30 条测试。**剩批②**：stdio client + provider + `lsp` 工具 + `settings.yaml servers` 表与宿主接线 |
 | A4.4 | `worktree` + `session-query`（工具 + 侧栏检索） | 无 | 4-6 天 | 建 worktree 进入；跨会话关键词检索并跳转 |
-| A5.1 | `ask-user` 通用提问 + 已回答批次气泡 + 提问卡 | A0-a | 3-5 天 | 提问 → 选择 → 答案回模型；多轮不串话 |
+| A5.1 | `ask-user` 通用提问 + 已回答批次气泡 + 提问卡 | A0-a | 3-5 天 | ✅ **已落 11-11**（批①②③ + 实机 E2E）：批① `dsh-tools::AskUserTool`（legacy 阻塞形，文案/schema 逐字 + AskUserSlot fail-closed + 子代理拒答探针）；批② 宿主提问卡（`question_card` 纯态：分页单题/单多选/自定义/跳过/推荐剥离预选 + 泵 + 答案通道 + 停止弃卡）；批③ 转录面（`question_reply`：工具行「提问 · n/m 已回答」状态摘要 + 已回答批次气泡右对齐——ToolResult 答案批合成 user 条目，回放/实时两路同形）。**实机 E2E**：卡弹出（推荐预选✓+徽标+分页+自定义输入）→ 提交 → 答案批 JSON 回流（会话日志 seq 4521 tool/call → tool/result answers）→ 模型续跑；工具行「2/2 已回答」+ 气泡两题齐全。**剩**（backlog #123）：timed 变体（timeout/pending/projection/late-reply）、X 钮 hide+工具行重开（现走取消）、气泡时间/复制钮 |
 | A5.2 | feedback / quotes / 命令目录 / 快捷键 / 右键 / 参数页 / `@`候选 / 文件另存 | 无 | 1-2 周 | 逐项 UI 判据 |
 | A6 | `workspace-changes` 轮改动卡 + 整文件 diff + 任务类页面 | A1/A4 | 2-3 周 | 轮尾 ±行数卡、可点开单文件 diff |
 

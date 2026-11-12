@@ -180,6 +180,8 @@ struct ContextInfo {
     summary: Option<String>,
     /// 压缩分隔行的展示事实（仅压缩行；上游 CompactionItem 的计数与摘要）
     compaction: Option<dsh_gpui::compaction_row::CompactionRowFacts>,
+    /// workspace-changes 轮改动卡（A6：逐文件路径 + ± 行数）
+    changes_files: Option<Vec<(String, u64, u64)>>,
 }
 
 #[derive(Clone)]
@@ -2223,7 +2225,7 @@ fn context_info(
         }
     });
     let _ = form;
-    ContextInfo { title, label, summary: bounded, compaction: None }
+    ContextInfo { title, label, summary: bounded, compaction: None, changes_files: None }
 }
 
 fn non_empty(s: String) -> Option<String> {

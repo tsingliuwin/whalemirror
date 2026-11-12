@@ -931,6 +931,7 @@ impl ChatView {
                             label: None,
                             summary: None,
                             compaction: None,
+    changes_files: None,
                         }),
                         open: false,
                     });
@@ -1067,21 +1068,21 @@ context: Some(crate::ContextInfo {
     label: None,
     summary: Some(facts.summary_text()),
     compaction: Some(facts),
+    changes_files: None,
 }),
 open: false,
 });
                 }
                 SessionEvent::WorkspaceChanges { turn: _, files } if !files.is_empty() => {
-                    // workspace-changes 轮尾卡（上游 ChangedFiles 的 Notice 形
-                    // ——标题 + 摘要；可点开的 diff 视图后续批）
+                    // workspace-changes 轮尾卡（上游 ChangedFiles）：标题 +
+                    // 文件列表（changes_files 供 Notice 渲染展开形）
                     let total_added: u64 = files.iter().map(|f| f.added).sum();
                     let total_deleted: u64 = files.iter().map(|f| f.deleted).sum();
-                    let mut detail_lines: Vec<String> = files
+                    let summary = format!("已编辑 {} 个文件  +{} -{}", files.len(), total_added, total_deleted);
+                    let changes: Vec<(String, u64, u64)> = files
                         .iter()
-                        .map(|f| format!("{}  +{} -{}", f.display, f.added, f.deleted))
+                        .map(|f| (f.display.clone(), f.added, f.deleted))
                         .collect();
-                    detail_lines.insert(0, format!("已编辑 {} 个文件  +{} -{}", files.len(), total_added, total_deleted));
-                    let summary = detail_lines.join("\n");
                     self.entries.push(ChatEntry {
             echo_id: None,
                     question_reply: None,
@@ -1092,6 +1093,7 @@ context: Some(crate::ContextInfo {
     label: None,
     summary: Some(summary),
     compaction: None,
+    changes_files: Some(changes),
 }),
 open: false,
 });
@@ -3232,6 +3234,88 @@ Role::Notice => {
                             ),
                     ),
                     None => {
+                        // workspace-changes 轮改动卡（A6：上游 ChangedFiles
+                        // 的 Notice 形——标题 + 逐文件 ± 行列表）
+                        if let Some(changes) = entry
+                            .context
+                            .as_ref()
+                            .and_then(|c| c.changes_files.as_ref())
+                        {
+                            let total_added: u64 = changes.iter().map(|(_, a, _)| a).sum();
+                            let total_deleted: u64 = changes.iter().map(|(_, _, d)| d).sum();
+                            let t_expand = this.clone();
+                            let open_state = entry.open;
+                            let ei_val = ei;
+                            let mut card = div()
+                                .w_full()
+                                .v_flex()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .line_height(px(20.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::t().text_2)
+                                        .child(format!(
+                                            "已编辑 {} 个文件  +{} -{}",
+                                            changes.len(), total_added, total_deleted
+                                        )),
+                                );
+                            let visible: Vec<_> = if open_state {
+                                changes.iter().collect()
+                            } else {
+                                changes.iter().take(4).collect()
+                            };
+                            for (path, added, deleted) in &visible {
+                                card = card.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .pl(px(14.0))
+                                        .min_h(px(24.0))
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
+                                        .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_color(theme::t().text_2)
+                                                .child(path.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(theme::t().accent)
+                                                .child(format!("+{added}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(theme::t().error)
+                                                .child(format!("-{deleted}")),
+                                        ),
+                                );
+                            }
+                            if changes.len() > 4 {
+                                let extra = changes.len() - 4;
+                                card = card.child(
+                                    div()
+                                        .pl(px(14.0))
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
+                                        .text_color(theme::t().text_3)
+                                        .child(format!("全部 {} 个文件", changes.len())),
+                                );
+                            }
+                            let _ = t_expand;
+                            let _ = ei_val;
+                            return div().w_full().child(card);
+                        }
                         // 压缩分隔行（上游 ui-chat CompactionItem）：24 高
                         // 可展开行「上下文已压缩 · 已压缩 N 条历史记录（约 T
                         // tokens）」，展开体为摘要原文；无摘要时禁用展开。

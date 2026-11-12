@@ -3266,9 +3266,13 @@ Role::Notice => {
                             } else {
                                 changes.iter().take(4).collect()
                             };
-                            for (path, added, deleted) in &visible {
+                            let app_for_rows = self.app.clone();
+                            for (ix, (path, added, deleted)) in visible.iter().enumerate() {
+                                let app_click = app_for_rows.clone();
+                                let path_text = path.clone();
                                 card = card.child(
                                     div()
+                                        .id(SharedString::from(format!("wc-{ei}-{ix}")))
                                         .flex()
                                         .items_center()
                                         .gap(px(8.0))
@@ -3277,6 +3281,14 @@ Role::Notice => {
                                         .text_size(px(12.0))
                                         .line_height(px(18.0))
                                         .overflow_hidden()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::t().hover))
+                                        .on_click(move |_, _, cx| {
+                                            let p = path_text.clone();
+                                            app_click.update(cx, |v, cx| {
+                                                v.open_file_preview(p, cx);
+                                            });
+                                        })
                                         .child(
                                             div()
                                                 .flex_1()

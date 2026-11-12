@@ -183,6 +183,10 @@ pub struct WorkspaceChangedFile {
     pub display: String,
     pub added: u64,
     pub deleted: u64,
+    /// 变更行文本（`+ 新行` / `- 旧行` 逐行；serde skip——只活内存面，
+    /// 不进耐久日志以免大文件膨胀）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diff_lines: Vec<String>,
 }
 
 /// Serialized as tagged JSON (one line per event) so a session can be
@@ -1060,11 +1064,40 @@ impl TurnChangesWatcher {
             let after = std::fs::read_to_string(path).ok();
             let (added, deleted) = count_lines(before.as_deref(), after.as_deref());
             if added > 0 || deleted > 0 {
+                // 逐行 diff（简化：旧集减新集 = 删除行；新集减旧集 = 新增行；
+                // 共同行跳过——上游用 jsdiff structuredPatch 做 LCS 对齐，
+                // rustdsh 首批用集合差近似——偏差登记）
+                let before_set: std::collections::HashSet<&str> =
+                    before.as_deref().map(|s| s.lines().collect()).unwrap_or_default();
+                let after_set: std::collections::HashSet<&str> =
+                    after.as_deref().map(|s| s.lines().collect()).unwrap_or_default();
+                let mut diff_lines = Vec::new();
+                if let Some(b) = before.as_deref() {
+                    for line in b.lines() {
+                        if !after_set.contains(line) {
+                            diff_lines.push(format!("- {line}"));
+                        }
+                    }
+                }
+                if let Some(a) = after.as_deref() {
+                    for line in a.lines() {
+                        if !before_set.contains(line) {
+                            diff_lines.push(format!("+ {line}"));
+                        }
+                    }
+                }
+                // 截断（上游 MAX_RENDERED_LINES 同语义——只显示前 N 行）
+                const MAX_DIFF_LINES: usize = 200;
+                if diff_lines.len() > MAX_DIFF_LINES {
+                    diff_lines.truncate(MAX_DIFF_LINES);
+                    diff_lines.push(format!("… ({} more lines)", (added + deleted) as usize));
+                }
                 files.push(WorkspaceChangedFile {
                     path: path.clone(),
                     display: path.clone(),
                     added,
                     deleted,
+                    diff_lines,
                 });
             }
         }

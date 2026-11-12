@@ -251,6 +251,56 @@ impl ScheduleState {
         Ok(catalog_entry(&task, false, None))
     }
 
+    /// 服务操作：手动创建（上游 `create` 的 UI 面——无会话 actor，目标
+    /// 固定 new_once + 调用方 cwd；规则走 rrule 文本同一构造分发）。
+    /// 声明错误码原样上抛（not_future/invalid_rule/invalid_time_zone/
+    /// frequency_too_high/invalid_prompt——UI 表单直接展示 message）。
+    pub fn create_manual(
+        &self,
+        title: &str,
+        prompt: &str,
+        rrule: &str,
+        cwd: &str,
+    ) -> Result<ScheduleCatalogEntry, Value> {
+        let id = new_schedule_id();
+        let now = now_ms();
+        let record = dsh_schedule::create_schedule_record(
+            &id,
+            title,
+            prompt,
+            &json!({"kind": "rrule", "rrule": rrule}),
+            now,
+        )
+        .map_err(|error| input_to_declared(&error, CREATE_CODES))?;
+        let task = decode_schedule_task(&json!({
+            "record": serde_json::to_value(&record).unwrap_or(Value::Null),
+            "target": {
+                "kind": "new_once",
+                "create": { "cwd": cwd, "agentPreset": "standard" }
+            },
+            "involvedSessionIds": [],
+            "status": "active",
+            "createdAt": dsh_schedule::format_instant(now),
+            "updatedAt": dsh_schedule::format_instant(now),
+            "deliveryHistory": {
+                "records": [],
+                "earlierRecordsUnavailable": false,
+                "earlierRecordsPruned": false
+            },
+        }))
+        .map_err(|_| internal_error())?;
+        self.store.put(&task).map_err(|_| internal_error())?;
+        self.request_drive();
+        self.emit_notice(ScheduleNotice {
+            change: "created",
+            id: id.clone(),
+            title: record.title().to_string(),
+            involved: task.involved_session_ids.clone(),
+            actor: None,
+        });
+        Ok(catalog_entry(&task, false, None))
+    }
+
     /// 服务操作：列表页（上游 `list`；active 过滤 + 排序后切页）。
     pub fn list(
         &self,
@@ -959,6 +1009,41 @@ mod tests {
         assert_eq!(notice.title, "通知测试");
         assert_eq!(notice.actor.as_deref(), Some("session-actor"));
         assert!(notice.involved.iter().any(|s| s == "session-actor"));
+    }
+
+    #[test]
+    fn create_manual_builds_active_new_once_task_without_actor() {
+        let state = state("manual-create");
+        let entry = state
+            .create_manual(
+                "手动创建任务",
+                "手动创建的演示内容。",
+                "DTSTART;TZID=Asia/Shanghai:20300101T090000\nRRULE:FREQ=DAILY",
+                "C:/work",
+            )
+            .expect("manual create");
+        assert_eq!(entry.record.title(), "手动创建任务");
+        // 落盘验证：store.list 能读回 active 任务（new_once 目的地）
+        let listing = state.store.list().unwrap();
+        assert_eq!(listing.tasks.len(), 1);
+        assert!(listing.tasks[0].record.id().starts_with("schedule-"));
+        assert_eq!(listing.tasks[0].status, ScheduleTaskStatus::Active);
+        assert!(matches!(
+            listing.tasks[0].target,
+            dsh_schedule::ScheduleTarget::NewOnce { .. }
+        ));
+        // rrule 文本路径：同一构造分发可读回（09:00 Shanghai = 01:00 UTC）
+        assert_eq!(listing.tasks[0].record.scheduled_at(), "2030-01-01T01:00:00.000Z");
+        // 过去时间 → not_future 逐字码上抛（UI 表单错误行展示面）
+        let error = state
+            .create_manual(
+                "过去任务",
+                "x",
+                "DTSTART;TZID=Asia/Shanghai:20200101T090000\nRRULE:FREQ=DAILY;COUNT=1",
+                "C:/work",
+            )
+            .unwrap_err();
+        assert_eq!(error.get("code").and_then(|c| c.as_str()), Some("not_future"));
     }
 }
 

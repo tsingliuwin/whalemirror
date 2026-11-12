@@ -630,6 +630,12 @@ pub fn format_schedule_local_time(time_zone: &str, instant: &str) -> String {
         .unwrap_or_else(|_| zoned.to_string())
 }
 
+/// 系统时区的 IANA 名（jiff system zone；偏移制系统回 UTC——上游
+/// host 表单默认「系统」同语义）。
+pub fn system_time_zone() -> String {
+    jiff::tz::TimeZone::system().iana_name().unwrap_or("UTC").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

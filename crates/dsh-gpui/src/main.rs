@@ -270,6 +270,15 @@ enum AutomationFilter {
     All,
 }
 
+/// 手动创建的重复预设（上游 rule.repeat 预集的工具面子集：每天 / 仅一次
+/// / 自定义 RRULE——自定义走与 schedule 工具同一条 rrule 文本路径）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutomationRulePreset {
+    Daily,
+    Once,
+    Custom,
+}
+
 /// 一次待决定的审批（上游 `conversation.approval.card` 的 rustdsh 子集）：
 /// 工具名 + 模型给的 justification + 调用 id（审计配对）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1973,6 +1982,15 @@ pub(crate) struct AppView {
     automation_selected: Option<String>,
     automation_confirm_delete: Option<String>,
     automation_loaded: bool,
+    /// 手动创建表单（上游 TaskEditorFields 的 rustdsh 有界面）：名称/
+    /// 内容/规则三输入 + 重复预设 + 错误行
+    automation_name_input: Entity<InputState>,
+    automation_instruction_input: Entity<InputState>,
+    automation_rule_input: Entity<InputState>,
+    automation_rule_preset: AutomationRulePreset,
+    automation_form_error: Option<String>,
+    /// 表单三输入的渲染期清空旗标（set_value 需 window）
+    automation_form_clear: bool,
     /// 提问卡答案通道（Submit=提交批 / Cancel=放弃；hook 轮询收）
     question_answer_tx:
         Option<std::sync::mpsc::Sender<dsh_gpui::question_card::QuestionUiAnswer>>,
@@ -2207,6 +2225,9 @@ impl AppView {
         sessions: Vec<SessionMeta>,
         plan_feedback: Entity<InputState>,
         question_custom: Entity<InputState>,
+        automation_name_input: Entity<InputState>,
+        automation_instruction_input: Entity<InputState>,
+        automation_rule_input: Entity<InputState>,
         input: Entity<TextareaState>,
         #[allow(dead_code)] // 被 DeepSeek 卡引用
     api_input: Entity<InputState>,
@@ -2369,6 +2390,12 @@ impl AppView {
         automation_selected: None,
         automation_confirm_delete: None,
         automation_loaded: false,
+        automation_name_input: automation_name_input.clone(),
+        automation_instruction_input: automation_instruction_input.clone(),
+        automation_rule_input: automation_rule_input.clone(),
+        automation_rule_preset: AutomationRulePreset::Daily,
+        automation_form_error: None,
+        automation_form_clear: false,
         job_owner: job_owner.clone(),
         fs_observation,
         todos: Vec::new(),
@@ -4028,6 +4055,104 @@ impl AppView {
         self.pending_input =
             Some("请根据需求创建一个自动化任务。".to_string());
         self.chat.update(cx, |c, _| c.tab = CenterTab::Conversation);
+        cx.notify();
+    }
+
+    /// 手动创建表单：读三输入 → 重复预设映射 rrule 文本 → create_manual。
+    /// 规则文本：每天 = 当天 DTSTART + FREQ=DAILY；仅一次 = COUNT=1；
+    /// 自定义 = 输入原文（与 schedule 工具同一 rrule 文本路径）。
+    /// 构造器的未来校验（not_future）等错误逐字上抛进表单错误行。
+    fn automation_create(&mut self, cx: &mut Context<Self>) {
+        let name = self
+            .automation_name_input
+            .read_with(cx, |s, _| s.value().trim().to_string());
+        let instruction = self
+            .automation_instruction_input
+            .read_with(cx, |s, _| s.value().trim().to_string());
+        let rule = self
+            .automation_rule_input
+            .read_with(cx, |s, _| s.value().trim().to_string());
+        let zone = dsh_schedule::system_time_zone();
+        let dt_stamp = |date: &str, time: &str| -> String {
+            let date_digits: String = date.chars().filter(|c| c.is_ascii_digit()).collect();
+            let time_digits: String = time.chars().filter(|c| c.is_ascii_digit()).collect();
+            format!("{}T{}", date_digits, time_digits)
+        };
+        let today = {
+            let now = dsh_schedule::format_instant(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            );
+            now.chars().take(10).collect::<String>()
+        };
+        let build_rrule = || -> Result<String, String> {
+            match self.automation_rule_preset {
+                AutomationRulePreset::Daily => {
+                    let time = rule.replace(':', "");
+                    if time.len() < 4 {
+                        return Err("请填写时间（HH:mm）".into());
+                    }
+                    Ok(format!(
+                        "DTSTART;TZID={zone}:{today}T{time}00\nRRULE:FREQ=DAILY"
+                    ))
+                }
+                AutomationRulePreset::Once => {
+                    let parts: Vec<&str> = rule.split_whitespace().collect();
+                    if parts.len() != 2 {
+                        return Err("请填写日期时间（YYYY-MM-DD HH:mm）".into());
+                    }
+                    let stamp = dt_stamp(parts[0], parts[1]);
+                    Ok(format!(
+                        "DTSTART;TZID={zone}:{stamp}00\nRRULE:FREQ=DAILY;COUNT=1"
+                    ))
+                }
+                AutomationRulePreset::Custom => {
+                    if !rule.contains("DTSTART") || !rule.contains("RRULE:") {
+                        return Err(
+                            "自定义规则需要 DTSTART 行与 RRULE 行（各一行）".into()
+                        );
+                    }
+                    Ok(rule.clone())
+                }
+            }
+        };
+        let rrule = match build_rrule() {
+            Ok(text) => text,
+            Err(message) => {
+                self.automation_form_error = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let cwd = if self.current_cwd.is_empty() {
+            let current = self.current_session_id();
+            self.sessions
+                .iter()
+                .find(|m| &m.id == &current)
+                .and_then(|m| m.cwd.clone())
+                .unwrap_or_default()
+        } else {
+            self.current_cwd.clone()
+        };
+        match self.schedule.create_manual(&name, &instruction, &rrule, &cwd) {
+            Ok(entry) => {
+                // 清表单（set_value 需 window——渲染期清空旗标）+ 选中新任务
+                self.automation_form_clear = true;
+                self.automation_selected = Some(entry.id().to_string());
+                self.refresh_automation(cx);
+            }
+            Err(error) => {
+                // 声明错误码 → message 逐字（not_future/invalid_rule 等）
+                let message = error
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("无法创建任务，已保留填写内容，请重试")
+                    .to_string();
+                self.automation_form_error = Some(message);
+            }
+        }
         cx.notify();
     }
 
@@ -6510,6 +6635,16 @@ impl Render for AppView {
         {
             self.refresh_automation(cx);
         }
+        if self.automation_form_clear {
+            self.automation_form_clear = false;
+            for input in [
+                &self.automation_name_input,
+                &self.automation_instruction_input,
+                &self.automation_rule_input,
+            ] {
+                input.update(cx, |state, cx| state.set_value("", window, cx));
+            }
+        }
         if self.pending_clear {
             self.pending_clear = false;
             self.input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -7502,8 +7637,8 @@ impl AppView {
                             .pb(px(48.0))
                             .px(px(32.0))
                             .v_flex()
-                            // 页头：标题 + 新建（上游 split 按钮的简化——
-                            // 仅 chat-create 主钮）
+                            // 页头：标题 + 新建（chat-create 主钮）+ 手动创建
+                            // （上游 split 按钮两半的并排简化形）
                             .child(
                                 div()
                                     .flex()
@@ -7537,6 +7672,38 @@ impl AppView {
                                                 t_new.update(cx, |v, cx| v.automation_new(cx));
                                             })
                                             .child("新建"),
+                                    )
+                                    .child(
+                                        // 手动创建（上游 host.manualCreate：页内
+                                        // 空任务编辑形）
+                                        div()
+                                            .id("automation-manual")
+                                            .ml(px(8.0))
+                                            .h(px(32.0))
+                                            .px(px(12.0))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(16.0))
+                                            .border(px(0.5))
+                                            .border_color(theme::t().border_l3)
+                                            .text_size(px(13.0))
+                                            .text_color(theme::t().text)
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme::t().hover))
+                                            .on_click({
+                                                let t_manual = this.clone();
+                                                move |_, _, cx| {
+                                                    t_manual.update(cx, |v, cx| {
+                                                        v.automation_form_clear = true;
+                                                        v.automation_form_error = None;
+                                                        v.automation_rule_preset =
+                                                            AutomationRulePreset::Daily;
+                                                        v.automation_selected = Some("new".into());
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            })
+                                            .child("手动创建"),
                                     ),
                             )
                             // 状态过滤 chips（已开启/已暂停/已结束/全部）
@@ -7686,6 +7853,191 @@ impl AppView {
                             }),
                     ),
             );
+        // 手动创建表单（上游 manualCreate → TaskDetail 空任务编辑形）：
+        // 名称/内容输入 + 重复预设 chips + 规则文本 + 创建/放弃
+        if self.automation_selected.as_deref() == Some("new") {
+            let preset = self.automation_rule_preset;
+            let (rule_placeholder, _rule_lines) = match preset {
+                AutomationRulePreset::Daily => ("09:30", 1),
+                AutomationRulePreset::Once => ("2026-11-20 09:30", 1),
+                AutomationRulePreset::Custom => (
+                    "DTSTART;TZID=Asia/Shanghai:20261113T090000\nRRULE:FREQ=DAILY",
+                    3,
+                ),
+            };
+            let rule_hint: &str = match preset {
+                AutomationRulePreset::Daily => "每天——时间（HH:mm）",
+                AutomationRulePreset::Once => "仅一次——日期时间（YYYY-MM-DD HH:mm）",
+                AutomationRulePreset::Custom => "自定义——DTSTART 行 + RRULE 行（逐字）",
+            };
+            let (t_preset, t_create, t_cancel) = (this.clone(), this.clone(), this.clone());
+            let mut form = div()
+                .id("automation-form-scroll")
+                .w(px(width * 0.47))
+                .flex_none()
+                .h_full()
+                .overflow_y_scroll()
+                .border_l_1()
+                .border_color(theme::t().border_l3)
+                .px(px(24.0))
+                .pt(px(28.0))
+                .v_flex()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .text_size(px(18.0))
+                        .line_height(px(26.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::t().text)
+                        .child("手动创建"),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .text_color(theme::t().text_3)
+                                .child("自动化任务名称"),
+                        )
+                        .child(Input::new(&self.automation_name_input).w_full()),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .text_color(theme::t().text_3)
+                                .child("自动化任务内容"),
+                        )
+                        .child(Input::new(&self.automation_instruction_input).w_full()),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .text_color(theme::t().text_3)
+                                .child("运行时间"),
+                        )
+                        .child({
+                            let mut row = div().flex().gap(px(6.0));
+                            for (label, chip_preset) in [
+                                ("每天", AutomationRulePreset::Daily),
+                                ("仅一次", AutomationRulePreset::Once),
+                                ("自定义", AutomationRulePreset::Custom),
+                            ] {
+                                let t_chip = t_preset.clone();
+                                let active = preset == chip_preset;
+                                row = row.child(
+                                    div()
+                                        .id(SharedString::from(format!("auto-rule-{label}")))
+                                        .h(px(28.0))
+                                        .px(px(10.0))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(14.0))
+                                        .text_size(px(13.0))
+                                        .line_height(px(20.0))
+                                        .text_color(if active { theme::t().text } else { theme::t().text_3 })
+                                        .bg(if active { theme::t().hover } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) })
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::t().hover))
+                                        .on_click(move |_, _, cx| {
+                                            t_chip.update(cx, |v, cx| {
+                                                v.automation_rule_preset = chip_preset;
+                                                v.automation_form_error = None;
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(label),
+                                );
+                            }
+                            row
+                        })
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .text_color(theme::t().text_3)
+                                .child(rule_hint),
+                        )
+                        .child(Input::new(&self.automation_rule_input).w_full())
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .text_color(theme::t().text_3)
+                                .child(format!(
+                                    "时区 {}（系统） · 执行位置 新建会话并复用",
+                                    dsh_schedule::system_time_zone()
+                                )),
+                        ),
+                )
+                .children(self.automation_form_error.clone().map(|message| {
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(theme::t().error)
+                        .child(message)
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .id("automation-form-cancel")
+                                .h(px(32.0))
+                                .px(px(12.0))
+                                .flex()
+                                .items_center()
+                                .text_size(px(13.0))
+                                .text_color(theme::t().text_2)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme::t().hover))
+                                .on_click(move |_, _, cx| {
+                                    t_cancel.update(cx, |v, cx| {
+                                        v.automation_selected = None;
+                                        v.automation_form_error = None;
+                                        cx.notify();
+                                    });
+                                })
+                                .child("放弃"),
+                        )
+                        .child(
+                            div()
+                                .id("automation-form-create")
+                                .h(px(32.0))
+                                .px(px(14.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(16.0))
+                                .bg(theme::t().text)
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::t().bg_base)
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.9))
+                                .on_click(move |_, _, cx| {
+                                    t_create.update(cx, |v, cx| v.automation_create(cx));
+                                })
+                                .child("创建"),
+                        ),
+                );
+            let _ = rule_placeholder;
+            page = page.child(form);
+            return page;
+        }
         // 详情列（选中：47% 右栏——规则摘要 + 内容 + 操作）
         if let Some(selected_id) = self.automation_selected.clone() {
             if let Some(task) = self.automation_tasks.iter().find(|t| t.record.id() == selected_id) {
@@ -7887,6 +8239,56 @@ impl AppView {
                                     .text_color(theme::t().text)
                                     .child(task.record.prompt().to_string()),
                             ),
+                    )
+                    // 任务运行记录（上游 detail.records / delivery.*：最近
+                    // 在后；上限外的历史由保留策略裁剪——不再单独分页）
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap(px(4.0))
+                            .pt(px(4.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .line_height(px(17.0))
+                                    .text_color(theme::t().text_3)
+                                    .child("任务运行记录"),
+                            )
+                            .children({
+                                let records: Vec<&dsh_schedule::DeliveryHistoryRecord> =
+                                    task.delivery_history.records.iter().rev().collect();
+                                if records.is_empty() {
+                                    vec![div()
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
+                                        .text_color(theme::t().text_3)
+                                        .child("暂无任务运行记录")]
+                                } else {
+                                    records
+                                        .iter()
+                                        .map(|record| {
+                                            let target = record
+                                                .receipt
+                                                .target_session_id
+                                                .clone()
+                                                .unwrap_or_else(|| "待创建".into());
+                                            div()
+                                                .text_size(px(12.0))
+                                                .line_height(px(18.0))
+                                                .text_color(theme::t().text_2)
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(format!(
+                                                    "{} → {} · {}",
+                                                    record.receipt.scheduled_at,
+                                                    record.receipt.delivered_at,
+                                                    target
+                                                ))
+                                        })
+                                        .collect()
+                                }
+                            }),
                     )
                     .child(
                         div()
@@ -11948,6 +12350,17 @@ fn main() {
                     InputState::new(window, cx)
                         .placeholder(dsh_gpui::question_card::CUSTOM_PLACEHOLDER_LABEL)
                 });
+                // 手动创建表单输入×3（名称/内容/规则文本——placeholder 上游
+                // detail.namePlaceholder / instructionPlaceholder 逐字）
+                let automation_name_input = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx).placeholder("例如：每日阅读摘要")
+                });
+                let automation_instruction_input = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx).placeholder("说明任务内容和预期结果")
+                });
+                let automation_rule_input = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx).placeholder("09:30")
+                });
                 let input = cx.new(|cx: &mut Context<TextareaState>| {
                     TextareaState::new(window, cx)
                         .placeholder("给智能体发消息")
@@ -12045,6 +12458,9 @@ fn main() {
                         sessions_meta.clone(),
                         input_feedback,
                         question_custom.clone(),
+                        automation_name_input.clone(),
+                        automation_instruction_input.clone(),
+                        automation_rule_input.clone(),
                         input.clone(),
                         api_input,
                         desired_model,

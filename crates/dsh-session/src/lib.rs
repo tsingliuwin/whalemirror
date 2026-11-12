@@ -24,6 +24,6 @@ pub use goal::{
 pub use session::{
     CancelCause, EpochHeader, HeaderReason, ImageOffloadTarget, PresentedFile, RequestContext,
     JobRecord, JobSettlement, Session, SessionEntry, SessionEvent, SessionStatsTotals, TitleSource,
-    TodoEntry, TurnEndReason,
+    TodoEntry, TurnChangesWatcher, TurnEndReason, WorkspaceChangedFile,
     session_stats_fold,
 };

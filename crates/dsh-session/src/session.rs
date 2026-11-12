@@ -173,6 +173,18 @@ impl TitleSource {
 
 /// One durable session event.
 ///
+/// 一个文件的轮内改动摘要（上游 `WorkspaceChangedFile`；display 与 path
+/// 同形——上游可缩写展示，rustdsh 直用完整路径）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceChangedFile {
+    pub path: String,
+    /// 展示路径（与 path 同形；上游可缩写，rustdsh 直用完整路径）。
+    #[serde(default)]
+    pub display: String,
+    pub added: u64,
+    pub deleted: u64,
+}
+
 /// Serialized as tagged JSON (one line per event) so a session can be
 /// persisted to JSONL and rebuilt verbatim from the log; the model-visible
 /// history is always re-derived from these events (`derive_messages`), never
@@ -259,6 +271,13 @@ pub enum SessionEvent {
     /// 会话标题（log-only，latest-wins；不进模型可见面）。
     /// web SessionTitleEventData 形（title + source；messageSeqs 由写侧
     /// 固定 `[]`——rustdsh 不按 seq 增量折叠，见 backlog）。
+    /// `workspace/changes`（log-only）：轮尾文件改动摘要（上游
+    /// workspace-changes recorder 面——每个文件 ± 行数 + 路径）。
+    #[serde(rename = "workspace/changes")]
+    WorkspaceChanges {
+        turn: u64,
+        files: Vec<WorkspaceChangedFile>,
+    },
     SessionTitle {
         title: String,
         /// 标题来源（web SessionTitleSource；旧日志缺省 = fallback）。
@@ -963,5 +982,92 @@ mod image_offload_tests {
             },
             other => panic!("{other:?}"),
         }
+    }
+}
+
+/// 轮内文件改动追踪器（上游 `workspace-changes` TurnRecorder 的简化
+/// 形——监听 ToolCall 中的写/编辑/fs 写操作，首次触碰某路径时读入变更
+/// 前内容；TurnEnd 读取当前内容，按行对比 ± 数。无 git 快照/内容寻址
+/// 拷贝——上游用 git tree + 池化副本，rustdsh 简化为内存 before/after
+/// 缓存。偏差：不覆盖 bash 命令造成的文件改动（上游也不覆盖——fs intent
+/// 面同限），不追踪 delete（无 delete 工具）。
+pub struct TurnChangesWatcher {
+    turn: u64,
+    /// path → before content（首次触碰时读入；后续同一路径不再覆盖）
+    baseline: std::collections::HashMap<String, Option<String>>,
+}
+
+/// 可追踪的写面工具名（fs 家族：write/edit/fs 带 write op）。
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(name, "write" | "edit" | "fs")
+}
+
+/// 从工具 arguments 提取目标路径（write/edit 的 path/file_path 字段，
+/// fs 的 path 字段）。
+fn extract_path(arguments: &serde_json::Value) -> Option<String> {
+    for key in ["path", "file_path"] {
+        if let Some(p) = arguments.get(key).and_then(|v| v.as_str()) {
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
+/// ± 行数（简化对比：逐行 diff 行计数——上游用 jsdiff structuredPatch，
+/// rustdsh 简化为 before/after 行数差近似）。
+fn count_lines(before: Option<&str>, after: Option<&str>) -> (u64, u64) {
+    let before_count = before.map(|s| s.lines().count()).unwrap_or(0);
+    let after_count = after.map(|s| s.lines().count()).unwrap_or(0);
+    let changed = before != after;
+    if !changed {
+        (0, 0)
+    } else {
+        let added = after_count.saturating_sub(before_count);
+        let deleted = before_count.saturating_sub(after_count);
+        // 两方向都有变化时至少各报 1（上游 numstat 语义：同文件既有加也有删）
+        let added = if added == 0 && deleted > 0 { 1 } else { added };
+        let deleted = if deleted == 0 && added > 0 { 1 } else { deleted };
+        (added as u64, deleted as u64)
+    }
+}
+
+impl TurnChangesWatcher {
+    pub fn new(turn: u64) -> Self {
+        Self { turn, baseline: std::collections::HashMap::new() }
+    }
+
+    pub fn turn(&self) -> u64 {
+        self.turn
+    }
+
+    /// 监听一次 ToolCall：写面工具 + 首次触碰某路径时读入当前内容作 baseline。
+    pub fn observe_tool_call(&mut self, name: &str, arguments: &serde_json::Value) {
+        if !is_mutating_tool(name) {
+            return;
+        }
+        if let Some(path) = extract_path(arguments) {
+            if !self.baseline.contains_key(&path) {
+                let content = std::fs::read_to_string(&path).ok();
+                self.baseline.insert(path, content);
+            }
+        }
+    }
+
+    /// TurnEnd 计算：对每个追踪的路径读当前内容，± 行数对比。
+    pub fn finish(&self) -> Vec<WorkspaceChangedFile> {
+        let mut files = Vec::new();
+        for (path, before) in &self.baseline {
+            let after = std::fs::read_to_string(path).ok();
+            let (added, deleted) = count_lines(before.as_deref(), after.as_deref());
+            if added > 0 || deleted > 0 {
+                files.push(WorkspaceChangedFile {
+                    path: path.clone(),
+                    display: path.clone(),
+                    added,
+                    deleted,
+                });
+            }
+        }
+        files
     }
 }

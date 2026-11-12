@@ -1309,6 +1309,13 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
                 .unwrap_or_default()
                 .to_string(),
         }),
+        "workspace/changes" => Some(SessionEvent::WorkspaceChanges {
+            turn: data.and_then(|d| d.get("turn")).and_then(|v| v.as_u64()).unwrap_or(0),
+            files: data
+                .and_then(|d| d.get("files"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default(),
+        }),
         "sandbox/mode" => Some(SessionEvent::SandboxModeSwitch {
             mode: data?
                 .get("mode")
@@ -1651,6 +1658,7 @@ pub const KNOWN_SESSION_EVENT_TYPES: &[&str] = &[
     "step/end",
     "step/start",
     "subagent/descriptor",
+    "workspace/changes",
     "subagent/model-selection-policy",
     "system/message",
     "workspace/changes",
@@ -1954,6 +1962,10 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
         SessionEvent::ApprovalPolicy { policy } => Some(row(
             "approval/policy",
             serde_json::json!({"policy": policy}),
+        )),
+        SessionEvent::WorkspaceChanges { turn, files } => Some(row(
+            "workspace/changes",
+            serde_json::json!({"turn": turn, "files": files}),
         )),
         SessionEvent::ApprovalAsked { id, tool_name, call_id, reason } => Some(row(
             "approval/asked",

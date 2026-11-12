@@ -1071,6 +1071,31 @@ context: Some(crate::ContextInfo {
 open: false,
 });
                 }
+                SessionEvent::WorkspaceChanges { turn: _, files } if !files.is_empty() => {
+                    // workspace-changes 轮尾卡（上游 ChangedFiles 的 Notice 形
+                    // ——标题 + 摘要；可点开的 diff 视图后续批）
+                    let total_added: u64 = files.iter().map(|f| f.added).sum();
+                    let total_deleted: u64 = files.iter().map(|f| f.deleted).sum();
+                    let mut detail_lines: Vec<String> = files
+                        .iter()
+                        .map(|f| format!("{}  +{} -{}", f.display, f.added, f.deleted))
+                        .collect();
+                    detail_lines.insert(0, format!("已编辑 {} 个文件  +{} -{}", files.len(), total_added, total_deleted));
+                    let summary = detail_lines.join("\n");
+                    self.entries.push(ChatEntry {
+            echo_id: None,
+                    question_reply: None,
+step: None,
+step_duration_ms: None, role: Role::Notice, blocks: vec![], done: true, elapsed: None, usage: None, ended_at_ms: None, turn: cur_turn,
+context: Some(crate::ContextInfo {
+    title: "本轮改动".into(),
+    label: None,
+    summary: Some(summary),
+    compaction: None,
+}),
+open: false,
+});
+                }
                 _ => {}
             }
         }

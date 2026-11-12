@@ -1986,6 +1986,9 @@ pub(crate) struct AppView {
     /// pending 提问注册表（timed 到期：问题仍可答；迟到答案从这里转向
     /// agent——上游 userQuestions pending 半的注册表等价）
     pending_asks: Arc<Mutex<std::collections::HashMap<String, dsh_tools::AskUserRequest>>>,
+    /// 轮内文件改动追踪器（A6 workspace-changes：ToolCall 捕获 before
+    /// 内容，TurnEnd 计算 ± 行数并发 WorkspaceChanges 事件）
+    changes_watcher: Arc<Mutex<Option<dsh_session::TurnChangesWatcher>>>,
     /// 自动化任务页（A6：目录快照 + 过滤/选中/删除确认；进入 tab 时刷新）
     automation_tasks: Vec<dsh_schedule::ScheduleTask>,
     automation_filter: AutomationFilter,
@@ -2398,6 +2401,7 @@ impl AppView {
         live_asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         ask_answer_txs: Arc::new(Mutex::new(std::collections::HashMap::new())),
         pending_asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        changes_watcher: Arc::new(Mutex::new(None)),
         question_card_drafts: Default::default(),
         question_answer_tx: None,
         question_custom: question_custom.clone(),
@@ -2997,6 +3001,46 @@ impl AppView {
         ev: dsh_agent_loop::AgentEvent,
         cx: &mut Context<Self>,
     ) -> bool {
+        // workspace-changes 追踪（A6：ToolCall 捕获 before 内容，TurnEnd
+        // 计算 ± 行数并发 WorkspaceChanges 事件——主 agent + 主会话限定）
+        if owner == self.current_session_id().as_str() {
+            match &ev {
+                dsh_agent_loop::AgentEvent::TurnStarted { .. } => {
+                    let turn = {
+                        let session = self.agent.session();
+                        let s = session.lock().unwrap();
+                        s.entries().iter().rev().find_map(|e| match &e.event {
+                            dsh_session::SessionEvent::TurnStart { turn } => Some(*turn),
+                            _ => None,
+                        }).unwrap_or(0)
+                    };
+                    *self.changes_watcher.lock().unwrap() =
+                        Some(dsh_session::TurnChangesWatcher::new(turn));
+                }
+                dsh_agent_loop::AgentEvent::ToolCall { name, arguments, .. } => {
+                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) {
+                        if let Some(w) = self.changes_watcher.lock().unwrap().as_mut() {
+                            w.observe_tool_call(name, &args);
+                        }
+                    }
+                }
+                dsh_agent_loop::AgentEvent::TurnEnded { .. } => {
+                    let watcher = self.changes_watcher.lock().unwrap().take();
+                    if let Some(w) = watcher {
+                        let files = w.finish();
+                        if !files.is_empty() {
+                            let _ = self.agent.append_session_event(
+                                dsh_session::SessionEvent::WorkspaceChanges {
+                                    turn: w.turn(),
+                                    files,
+                                },
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         let boundary = matches!(
             ev,
             dsh_agent_loop::AgentEvent::TurnStarted { .. }

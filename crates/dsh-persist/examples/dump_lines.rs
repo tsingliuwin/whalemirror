@@ -38,6 +38,7 @@ fn main() {
                         dsh_session::SessionEvent::ApprovalAsked { .. } => "approval/asked",
                         dsh_session::SessionEvent::ApprovalDecided { .. } => "approval/decided",
                         dsh_session::SessionEvent::TodoWrite { .. } => "todo/write",
+                        dsh_session::SessionEvent::WorkspaceChanges { .. } => "workspace/changes",
                         dsh_session::SessionEvent::GoalChange { .. } => "goal/change",
                         dsh_session::SessionEvent::JobRegistered { .. } => "job/registered",
                         dsh_session::SessionEvent::JobSettled { .. } => "job/settled",

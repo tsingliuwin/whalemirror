@@ -2001,6 +2001,9 @@ pub(crate) struct AppView {
     automation_form_error: Option<String>,
     /// 表单三输入的渲染期清空旗标（set_value 需 window）
     automation_form_clear: bool,
+    /// 隐藏卡草稿（callId → 完整卡态；X 隐藏时暂存、工具行重开时恢复——
+    /// 上游 editor-store `task:${id}` 的单进程等价）
+    question_card_drafts: std::collections::HashMap<String, dsh_gpui::question_card::QuestionCardState>,
     /// 提问卡答案通道（Submit=提交批 / Cancel=放弃；hook 轮询收）
     question_answer_tx:
         Option<std::sync::mpsc::Sender<dsh_gpui::question_card::QuestionUiAnswer>>,
@@ -2395,6 +2398,7 @@ impl AppView {
         live_asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         ask_answer_txs: Arc::new(Mutex::new(std::collections::HashMap::new())),
         pending_asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        question_card_drafts: Default::default(),
         question_answer_tx: None,
         question_custom: question_custom.clone(),
         pending_question_input: None,
@@ -4182,6 +4186,14 @@ impl AppView {
     /// 工具行「回答」钮：重开/打开一张提问卡（live 隐藏卡或 timed pending
     /// 问题——问题批从工具行 arguments 原样重建，推荐预选等纯函数复用）。
     fn reopen_ask_card(&mut self, call_id: String, arguments: &str, cx: &mut Context<Self>) {
+        // 草稿恢复优先（X 隐藏时暂存的完整卡态）；无草稿从工具行
+        // arguments 重建（新建形，推荐预选等纯函数复用）
+        if let Some(state) = self.question_card_drafts.remove(&call_id) {
+            self.pending_question = Some(state);
+            self.pending_question_input = Some(String::new());
+            cx.notify();
+            return;
+        }
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(arguments);
         let questions = match parsed
             .map(|value| dsh_tools::AskUserTool::parse_questions(&value))
@@ -5663,15 +5675,15 @@ impl AppView {
         let live = call_id
             .as_ref()
             .is_some_and(|id| self.live_asks.lock().unwrap().contains_key(id));
-        if !live {
-            // 非活动（pending 已注册或已消失）：仅收卡片不动钩子
+        if live {
+            // live 卡 X = hide（上游 callId 键卡 dismissal:'hide'）：暂存
+            // 卡态草稿（选择/自定义/分页），工具行重开恢复
+            if let Some(card) = self.pending_question.take() {
+                self.question_card_drafts.insert(card.call_id.clone(), card);
+            }
+        } else {
             self.pending_question = None;
-            self.pending_question_input = Some(String::new());
-            cx.notify();
-            return;
         }
-        // live 卡 X = hide：卡片收起，钩子继续等待，可从工具行重开
-        self.pending_question = None;
         self.pending_question_input = Some(String::new());
         cx.notify();
     }

@@ -181,3 +181,52 @@ pub fn is_pending_result(result: &str) -> bool {
 
 /// pending 态摘要（上游 `ask.pending`，zh 逐字）。
 pub const ASK_PENDING_LABEL: &str = "已继续工作，仍可回答";
+
+/// 气泡复制文本（上游 `replyClipboardText`：每题 `header — question\n回
+/// 答：<values>` 块，题间空行分隔）。
+pub fn clipboard_text(lines: &[QuestionReplyLine]) -> String {
+    let blocks: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            let label = line.header.clone().filter(|h| !h.trim().is_empty());
+            let head = match &label {
+                Some(h) => format!("{h} — {}", line.question),
+                None => line.question.clone(),
+            };
+            let answer = if line.skipped {
+                REPLY_SKIPPED_LABEL.to_string()
+            } else {
+                line.answers.join(", ")
+            };
+            format!("{head}\n回答：{answer}")
+        })
+        .collect();
+    blocks.join("\n\n")
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_text_blocks_with_header_and_skipped() {
+        let lines = vec![
+            QuestionReplyLine {
+                header: Some("选择".into()),
+                question: "选哪个方案？".into(),
+                answers: vec!["方案 A".into()],
+                skipped: false,
+            },
+            QuestionReplyLine {
+                header: None,
+                question: "补充？".into(),
+                answers: vec![],
+                skipped: true,
+            },
+        ];
+        assert_eq!(
+            clipboard_text(&lines),
+            "选择 — 选哪个方案？\n回答：方案 A\n\n补充？\n回答：已跳过"
+        );
+    }
+}

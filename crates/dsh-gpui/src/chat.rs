@@ -2699,53 +2699,102 @@ open: false,
                 let t = this.clone();
                 // A5.1 已回答批次气泡（上游 QuestionReplyBubble）：右对齐
                 // dl——每题 header + 题面（13px 次级）在上，答案值 join ", "
-                // 或「已跳过」在下；行集已由 attach_question_reply 配好
+                // 或「已跳过」在下；行集已由 attach_question_reply 配好；
+                // 气泡下时间行 + 复制钮（上游 HH:MM + replyClipboardText）
                 if let Some(lines) = &entry.question_reply {
-                    let bubble = div()
-                        .max_w(px(layout::user_bubble_max(content_w)))
-                        .rounded(px(dsh_gpui::ui_metrics::USER_BUBBLE_RADIUS_PX))
-                        .bg(theme::t().bubble)
-                        .px(px(dsh_gpui::ui_metrics::USER_BUBBLE_PAD_X_PX))
-                        .py(px(dsh_gpui::ui_metrics::USER_BUBBLE_PAD_Y_PX))
-                        .v_flex()
-                        .gap(px(6.0))
-                        .children(lines.iter().map(|line| {
-                            let mut item = div().v_flex().gap(px(2.0));
-                            if let Some(header) = line.header.clone().filter(|h| !h.trim().is_empty()) {
-                                item = item.child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .line_height(px(18.0))
-                                        .text_color(theme::t().text_3)
-                                        .child(header),
-                                );
-                            }
-                            item = item.child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .line_height(px(20.0))
-                                    .text_color(theme::t().text_2)
-                                    .child(line.question.clone()),
-                            );
-                            item = item.child(
-                                div()
-                                    .text_size(px(theme::FONT_ROW))
-                                    .line_height(px(22.0))
-                                    .text_color(theme::t().text)
-                                    .child(if line.skipped {
-                                        dsh_gpui::question_reply::REPLY_SKIPPED_LABEL.to_string()
-                                    } else {
-                                        line.answers.join(", ")
-                                    }),
-                            );
-                            item
-                        }));
-                    return div()
+                    let copy_text = dsh_gpui::question_reply::clipboard_text(lines);
+                    let t_copy = self.app.clone();
+                    let group: SharedString = format!("qreply-{ei}").into();
+                    let group_copy = group.clone();
+                    let hhmm = {
+                        let zoned = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::system());
+                        jiff::fmt::strtime::format("%H:%M", &zoned).unwrap_or_default()
+                    };
+                    let mut col = div()
                         .w_full()
                         .flex()
                         .flex_col()
                         .items_end()
-                        .child(bubble);
+                        .gap(px(6.0))
+                        .group(group)
+                        .child(
+                            div()
+                                .max_w(px(layout::user_bubble_max(content_w)))
+                                .rounded(px(dsh_gpui::ui_metrics::USER_BUBBLE_RADIUS_PX))
+                                .bg(theme::t().bubble)
+                                .px(px(dsh_gpui::ui_metrics::USER_BUBBLE_PAD_X_PX))
+                                .py(px(dsh_gpui::ui_metrics::USER_BUBBLE_PAD_Y_PX))
+                                .v_flex()
+                                .gap(px(6.0))
+                                .children(lines.iter().map(|line| {
+                                    let mut item = div().v_flex().gap(px(2.0));
+                                    if let Some(header) = line.header.clone().filter(|h| !h.trim().is_empty()) {
+                                        item = item.child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .line_height(px(18.0))
+                                                .text_color(theme::t().text_3)
+                                                .child(header),
+                                        );
+                                    }
+                                    item = item.child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .line_height(px(20.0))
+                                            .text_color(theme::t().text_2)
+                                            .child(line.question.clone()),
+                                    );
+                                    item = item.child(
+                                        div()
+                                            .text_size(px(theme::FONT_ROW))
+                                            .line_height(px(22.0))
+                                            .text_color(theme::t().text)
+                                            .child(if line.skipped {
+                                                dsh_gpui::question_reply::REPLY_SKIPPED_LABEL.to_string()
+                                            } else {
+                                                line.answers.join(", ")
+                                            }),
+                                    );
+                                    item
+                                })),
+                        )
+                        .child(
+                            // 气泡下：HH:MM 时间行 + 复制钮（最新行常显、
+                            // 早行 hover 显现——上游 MessageIconActions 同位）
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .line_height(px(17.0))
+                                        .text_color(theme::t().caption)
+                                        .child(hhmm),
+                                )
+                                .child(
+                                    div()
+                                        .id(("copy-qreply", ei as u64))
+                                        .size(px(20.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(4.0))
+                                        .cursor_pointer()
+                                        .text_color(theme::t().caption)
+                                        // 上游气泡的复制钮恒显（question-reply 是主动作面）
+                                        .hover(|s| s.text_color(theme::t().text_2).bg(theme::t().hover))
+                                        .tooltip(tip("复制"))
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                copy_text.clone(),
+                                            ));
+                                        })
+                                        .child(Icon::new(IconName::Copy).size(px(14.0))),
+                                ),
+                        );
+                    let _ = &group_copy;
+                    return col;
                 }
                 // #32 凭据掩码（上游 ui-secret-mask 语义）：命中已发布格式
                 // 则气泡显示掩码串，存储/发送原文不变（复制钮与编辑仍取

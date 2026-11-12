@@ -1398,6 +1398,7 @@ dependencies = [
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
+ "jiff",
  "resvg 0.45.1",
  "rfd",
  "serde",

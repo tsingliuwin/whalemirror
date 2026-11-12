@@ -159,6 +159,55 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_ms)
             .clamp(1, self.max_timeout_ms);
+        // 前台也过注册表（上游 tool-bash waitOnJob 同构）：满窗未完不杀——
+        // 整段转后台（promoted），job_output 从当前输出无缝接续；窗内完成
+        // 则移除记录（模型没见过 id）走前台渲染。无注册表回退旧路径（超时
+        // 杀进程——登记偏差，随 jobs 缺席组合）。
+        if let Some(caller) = self.jobs.clone() {
+            let id = match start_background_job(&caller, &command, &self.workdir) {
+                Ok(id) => id,
+                Err(error) => return ToolExecutionResult::error(format!("spawn failed: {error}")),
+            };
+            let owner_slot = caller.owner();
+            let owner = owner_slot.as_ref();
+            let view = match caller
+                .jobs()
+                .wait(&id, std::time::Duration::from_millis(timeout_ms), owner)
+                .await
+            {
+                Ok(view) => view,
+                Err(error) => return ToolExecutionResult::error(format!("spawn failed: {error}")),
+            };
+            if view.status.is_terminal() {
+                // 窗内完成：读输出 + 退出标记，记录随调用离开注册表
+                let Ok(read) = caller.jobs().read(&id, owner) else {
+                    return ToolExecutionResult::error(format!(
+                        "started background job {id} — job record vanished before settle"
+                    ));
+                };
+                let _ = caller.jobs().remove(&id, owner);
+                let mut text = dsh_jobs::render::render_model_delta(&read.chunks, read.lossy, &[]);
+                let detail = view.detail.clone().unwrap_or_default();
+                let exit_code = detail
+                    .strip_prefix("exit code: ")
+                    .and_then(|s| s.trim().parse::<i32>().ok());
+                let signal = detail.strip_prefix("signal: ").map(str::to_string);
+                append_exit_marker(&mut text, exit_code, signal.as_deref());
+                return ToolExecutionResult::text(text);
+            }
+            // promoted：命令继续跑（上游 kind:'promoted' + [timed out] 标记）
+            let Ok(read) = caller.jobs().read_at(&id, 0, owner) else {
+                return ToolExecutionResult::error(format!(
+                    "started background job {id} — job record vanished at promotion"
+                ));
+            };
+            let mut text = dsh_jobs::render::render_model_delta(&read.chunks, read.lossy, &[]);
+            text.push_str(&format!("\n[timed out after {timeout_ms}ms]\n"));
+            text.push_str(&format!(
+                "started background job {id} — further output: job_output"
+            ));
+            return ToolExecutionResult::text(text);
+        }
         run(&command, timeout_ms, &self.workdir).await
     }
 }
@@ -435,6 +484,7 @@ fn decode_system_codepage(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use dsh_llm::types::CallId;
+    use std::sync::{Arc, Mutex};
 
     fn input(raw: &str) -> ToolExecutionInput {
         ToolExecutionInput::with_raw_arguments(CallId("t".into()), "bash".into(), raw.into())
@@ -529,6 +579,74 @@ mod tests {
         // 覆盖 5000 被 clamp 到 200：sleep 5 应在 200ms 预算内超时
         let result = tool.execute(&input(r#"{"command": "sleep 5", "timeout_ms": 5000}"#)).await;
         assert!(result.is_error);
+    }
+
+    /// 有注册表时的超时转后台（#121）：满窗未完 → promoted——命令继续
+    /// 跑、输出随行、job id 在结果里供 job_output 接续。
+    #[tokio::test]
+    async fn timeout_promotes_to_background_job_and_output_continues() {
+        let jobs = dsh_jobs::Jobs::new(tokio::runtime::Handle::current());
+        let owner: dsh_jobs::OwnerCell = Arc::new(Mutex::new(None));
+        let caller = dsh_jobs::JobCaller::new(jobs.clone(), Arc::clone(&owner));
+        let tool = ShellTool::default().with_jobs(caller.clone());
+        let result = tool
+            .execute(&input(
+                r#"{"command": "echo promoted-marker; sleep 5", "timeout_ms": 1000}"#,
+            ))
+            .await;
+        assert!(!result.is_error, "promoted 不是错误（上游 kind:'promoted'）");
+        let text = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                dsh_llm::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(text.contains("promoted-marker"), "已产出的输出随行：{text}");
+        assert!(text.contains("[timed out after 1000ms]"), "{text}");
+        assert!(text.contains("started background job"), "{text}");
+        // 作业仍在注册表跑：输出环可非消费读（job_output 同路径）；清理
+        let job_id = text
+            .split_whitespace()
+            .find(|w| w.starts_with("bash-"))
+            .expect("promoted result carries the job id");
+        let id = dsh_jobs::JobId(job_id.to_string());
+        let view = jobs.read_at(&id, 0, None).expect("job still registered");
+        assert!(
+            view.chunks.iter().any(|c| c.text.contains("promoted-marker")),
+            "环里有已产出输出"
+        );
+        jobs.kill(&id, None, Some("test cleanup")).ok();
+    }
+
+    #[tokio::test]
+    async fn in_window_completion_leaves_no_record() {
+        // 窗内完成：正常前台渲染（退出标记），记录随调用离开注册表——
+        // 模型没见过 id（上游 waitOnJob 完成分支同语义）
+        let jobs = dsh_jobs::Jobs::new(tokio::runtime::Handle::current());
+        let owner: dsh_jobs::OwnerCell = Arc::new(Mutex::new(None));
+        let caller = dsh_jobs::JobCaller::new(jobs.clone(), Arc::clone(&owner));
+        let tool = ShellTool::default().with_jobs(caller.clone());
+        let result = tool
+            .execute(&input(r#"{"command": "echo quick", "timeout_ms": 10000}"#))
+            .await;
+        assert!(!result.is_error);
+        let text = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                dsh_llm::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(text.contains("quick"), "{text}");
+        assert!(text.ends_with("\n[exit code: 0]"), "{text}");
+        assert!(
+            jobs.list(None).is_empty(),
+            "记录应随调用移除（模型没见过 id）：{:?}",
+            jobs.list(None)
+        );
     }
 
     #[test]

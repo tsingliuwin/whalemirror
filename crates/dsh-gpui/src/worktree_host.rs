@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use dsh_tools::{Tool, ToolDefinition, ToolExecutionInput, ToolExecutionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 
 /// 调用者材料：会话 id / 当前 cwd / 该会话的共享工作目录句柄。
 #[derive(Clone, Debug)]

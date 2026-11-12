@@ -336,8 +336,8 @@ pub fn format_task_local_time(task: &ScheduleTask, instant: &str) -> String {
         crate::ScheduleRecord::RRule(record) => crate::RRule::parse(&record.rrule, false)
             .map(|rule| rule.time_zone().to_string())
             .unwrap_or_else(|_| "UTC".to_string()),
-        crate::ScheduleRecord::After(record) => "UTC".to_string(),
-        crate::ScheduleRecord::At(record) => "UTC".to_string(),
+        crate::ScheduleRecord::After(_) => "UTC".to_string(),
+        crate::ScheduleRecord::At(_) => "UTC".to_string(),
         other => other
             .time_zone()
             .unwrap_or("UTC")

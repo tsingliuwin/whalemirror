@@ -29,6 +29,7 @@ pub enum ScheduleTiming {
 
 impl ScheduleTiming {
     /// 上游 selectors 表的 kind → 选择器键名。
+    #[allow(dead_code)]
     fn selector_key(&self) -> &'static str {
         match self {
             Self::After { .. } => "after_seconds",

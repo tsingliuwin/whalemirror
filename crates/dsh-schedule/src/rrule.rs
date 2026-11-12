@@ -168,7 +168,7 @@ struct LibraryParts {
 
 /// 一个校验过的规则与 UTC 形墙钟枚举所需的库输入（上游 `PreparedRRule`）。
 #[derive(Clone, Debug)]
-pub(crate) struct PreparedRRule {
+pub struct PreparedRRule {
     /// Trim 后的两行输入；存储记录保留此文本。
     pub(crate) normalized: String,
     /// canonical 时区；DTSTART 以 Z 结尾时为 `UTC`。

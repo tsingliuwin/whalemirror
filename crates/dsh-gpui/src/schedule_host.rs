@@ -22,7 +22,7 @@ use dsh_schedule::{
     new_reserved_session_id, new_schedule_id, resolve_list_page, revised_task,
     DeliveryRetentionBounds, ScheduleCatalogEntry, ScheduleEditAction, ScheduleEditRequest,
     ScheduleInputError, ScheduleInputErrorCode, SchedulePatchRequest, ScheduleRuntimeLimits,
-    ScheduleStore, ScheduleTarget, ScheduleTask, SUBAGENT_SESSION_REFUSAL,
+    ScheduleStore, ScheduleTarget, SUBAGENT_SESSION_REFUSAL,
 };
 
 /// 子代理会话拒投文案（上游 runForCaller 逐字）。

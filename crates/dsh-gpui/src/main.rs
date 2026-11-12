@@ -8052,7 +8052,7 @@ impl AppView {
                 AutomationRulePreset::Custom => "自定义——DTSTART 行 + RRULE 行（逐字）",
             };
             let (t_preset, t_create, t_cancel) = (this.clone(), this.clone(), this.clone());
-            let mut form = div()
+            let form = div()
                 .id("automation-form-scroll")
                 .w(px(width * 0.47))
                 .flex_none()
@@ -8225,7 +8225,7 @@ impl AppView {
                 let t_toggle = this.clone();
                 let t_delete = this.clone();
                 let t_confirm = this.clone();
-                let ended = task.status != dsh_schedule::ScheduleTaskStatus::Active;
+                let _ended = task.status != dsh_schedule::ScheduleTaskStatus::Active;
                 let paused = task.status == dsh_schedule::ScheduleTaskStatus::Paused;
                 let next_text =
                     dsh_schedule::format_task_local_time(task, task.record.scheduled_at());
@@ -10366,7 +10366,7 @@ impl AppView {
         // @ 文件候选下拉（A5.2：composer 末词以 @ 开头 → 工作区文件匹配列表）
         let mut file_mention_el: Option<AnyElement> = None;
         if !file_mention_matches.is_empty() && !locked {
-            let t_pick = this.clone();
+
             let mut menu = div()
                 .id("file-mention-menu")
                 .absolute()

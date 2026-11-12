@@ -2769,7 +2769,7 @@ open: false,
                 // 气泡下时间行 + 复制钮（上游 HH:MM + replyClipboardText）
                 if let Some(lines) = &entry.question_reply {
                     let copy_text = dsh_gpui::question_reply::clipboard_text(lines);
-                    let t_copy = self.app.clone();
+                    
                     let group: SharedString = format!("qreply-{ei}").into();
                     let group_copy = group.clone();
                     let hhmm = {
@@ -3314,7 +3314,7 @@ Role::Notice => {
                                 );
                             }
                             if changes.len() > 4 {
-                                let extra = changes.len() - 4;
+                                
                                 card = card.child(
                                     div()
                                         .pl(px(14.0))
@@ -4949,7 +4949,7 @@ impl ChatView {
                     }
                 });
             })
-            .on_scroll_wheel(move |_, _, cx| {
+            .on_scroll(move |_, _, cx| {
                 // 梯滚动改变渐隐带/预览卡位置：下一帧重取偏移
                 if let Some(v) = wheel_this.upgrade() {
                     v.update(cx, |_, cx| cx.notify());
@@ -5182,7 +5182,7 @@ impl Render for ChatView {
             .id("chat-scroll")
             .h_full()
             .relative()
-            .on_scroll_wheel(move |event: &ScrollWheelEvent, _window, cx| {
+            .on_scroll(move |event: &ScrollEvent, _window, cx| {
                 if !chat_list_state_for_wheel.viewport_bounds().contains(&event.position) {
                     let delta = event.delta.pixel_delta(px(20.0));
                     if !delta.y.is_zero() {

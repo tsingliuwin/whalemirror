@@ -180,8 +180,8 @@ struct ContextInfo {
     summary: Option<String>,
     /// 压缩分隔行的展示事实（仅压缩行；上游 CompactionItem 的计数与摘要）
     compaction: Option<dsh_gpui::compaction_row::CompactionRowFacts>,
-    /// workspace-changes 轮改动卡（A6：逐文件路径 + ± 行数）
-    changes_files: Option<Vec<(String, u64, u64)>>,
+    /// workspace-changes 轮改动卡（A6：完整结构含 diff_lines）
+    changes_files: Option<Vec<dsh_session::WorkspaceChangedFile>>,
 }
 
 #[derive(Clone)]
@@ -2011,6 +2011,7 @@ pub(crate) struct AppView {
     /// 隐藏卡草稿（callId → 完整卡态；X 隐藏时暂存、工具行重开时恢复——
     /// 上游 editor-store `task:${id}` 的单进程等价）
     question_card_drafts: std::collections::HashMap<String, dsh_gpui::question_card::QuestionCardState>,
+    question_drafts_loaded: bool,
     /// 提问卡答案通道（Submit=提交批 / Cancel=放弃；hook 轮询收）
     question_answer_tx:
         Option<std::sync::mpsc::Sender<dsh_gpui::question_card::QuestionUiAnswer>>,
@@ -2409,6 +2410,7 @@ impl AppView {
         pending_asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         changes_watcher: Arc::new(Mutex::new(None)),
         question_card_drafts: Default::default(),
+        question_drafts_loaded: false,
         question_answer_tx: None,
         question_custom: question_custom.clone(),
         pending_question_input: None,
@@ -5728,15 +5730,42 @@ impl AppView {
             .is_some_and(|id| self.live_asks.lock().unwrap().contains_key(id));
         if live {
             // live 卡 X = hide（上游 callId 键卡 dismissal:'hide'）：暂存
-            // 卡态草稿（选择/自定义/分页），工具行重开恢复
+            // 卡态草稿（选择/自定义/分页）到内存 + 磁盘（跨重启持久）
             if let Some(card) = self.pending_question.take() {
                 self.question_card_drafts.insert(card.call_id.clone(), card);
+                self.save_question_drafts();
             }
         } else {
             self.pending_question = None;
         }
         self.pending_question_input = Some(String::new());
         cx.notify();
+    }
+
+    /// 草稿持久化（上游 localStorage `dsh.user-questions.drafts.v1` 的
+    /// 文件等价：~/.dsh/question_drafts.json）
+    fn save_question_drafts(&self) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let dir = std::path::Path::new(&home).join(".dsh");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("question_drafts.json");
+        if let Ok(json) = serde_json::to_string_pretty(&self.question_card_drafts) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    fn load_question_drafts(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let path = std::path::Path::new(&home).join(".dsh/question_drafts.json");
+        if !path.exists() || self.question_drafts_loaded { return; }
+        self.question_drafts_loaded = true;
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(drafts) = serde_json::from_str::<std::collections::HashMap<String, dsh_gpui::question_card::QuestionCardState>>(&text) {
+                for (k, v) in drafts {
+                    self.question_card_drafts.entry(k).or_insert(v);
+                }
+            }
+        }
     }
 
     /// 审批策略闸同步（`approval/policy` 的消费面：`ask` 才弹卡，
@@ -6784,6 +6813,8 @@ impl Render for AppView {
                 .update(cx, |state, cx| state.set_value(text, window, cx));
         }
         // 自动化任务页：进入时拉一次目录快照（动作后即时刷新；此后常驻）
+        // 提问卡草稿持久化：启动时从磁盘加载
+        self.load_question_drafts();
         if !self.automation_loaded
             && self.chat.read_with(cx, |c, _| c.tab) == CenterTab::Automation
         {

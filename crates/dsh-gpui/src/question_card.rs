@@ -51,7 +51,7 @@ pub fn parse_recommended_label(label: &str) -> Option<String> {
 }
 
 /// 一次待答提问卡的完整状态（分页单题；跨页缓存每题选择与自定义答案）。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QuestionCardState {
     pub call_id: String,
     pub questions: Vec<AskUserQuestion>,

@@ -1075,14 +1075,10 @@ open: false,
                 }
                 SessionEvent::WorkspaceChanges { turn: _, files } if !files.is_empty() => {
                     // workspace-changes 轮尾卡（上游 ChangedFiles）：标题 +
-                    // 文件列表（changes_files 供 Notice 渲染展开形）
+                    // 文件列表含 diff_lines（展开时逐行渲染）
                     let total_added: u64 = files.iter().map(|f| f.added).sum();
                     let total_deleted: u64 = files.iter().map(|f| f.deleted).sum();
                     let summary = format!("已编辑 {} 个文件  +{} -{}", files.len(), total_added, total_deleted);
-                    let changes: Vec<(String, u64, u64)> = files
-                        .iter()
-                        .map(|f| (f.display.clone(), f.added, f.deleted))
-                        .collect();
                     self.entries.push(ChatEntry {
             echo_id: None,
                     question_reply: None,
@@ -1093,7 +1089,7 @@ context: Some(crate::ContextInfo {
     label: None,
     summary: Some(summary),
     compaction: None,
-    changes_files: Some(changes),
+    changes_files: Some(files.clone()),
 }),
 open: false,
 });
@@ -3241,8 +3237,8 @@ Role::Notice => {
                             .as_ref()
                             .and_then(|c| c.changes_files.as_ref())
                         {
-                            let total_added: u64 = changes.iter().map(|(_, a, _)| a).sum();
-                            let total_deleted: u64 = changes.iter().map(|(_, _, d)| d).sum();
+                            let total_added: u64 = changes.iter().map(|f| f.added).sum();
+                            let total_deleted: u64 = changes.iter().map(|f| f.deleted).sum();
                             let t_expand = this.clone();
                             let open_state = entry.open;
                             let ei_val = ei;
@@ -3267,9 +3263,9 @@ Role::Notice => {
                                 changes.iter().take(4).collect()
                             };
                             let app_for_rows = self.app.clone();
-                            for (ix, (path, added, deleted)) in visible.iter().enumerate() {
+                            for (ix, file) in visible.iter().enumerate() {
                                 let app_click = app_for_rows.clone();
-                                let path_text = path.clone();
+                                let path_text = file.path.clone();
                                 card = card.child(
                                     div()
                                         .id(SharedString::from(format!("wc-{ei}-{ix}")))
@@ -3297,24 +3293,44 @@ Role::Notice => {
                                                 .whitespace_nowrap()
                                                 .text_ellipsis()
                                                 .text_color(theme::t().text_2)
-                                                .child(path.clone()),
+                                                .child(file.display.clone()),
                                         )
                                         .child(
                                             div()
                                                 .flex_none()
                                                 .text_color(theme::t().accent)
-                                                .child(format!("+{added}")),
+                                                .child(format!("+{}", file.added)),
                                         )
                                         .child(
                                             div()
                                                 .flex_none()
                                                 .text_color(theme::t().error)
-                                                .child(format!("-{deleted}")),
+                                                .child(format!("-{}", file.deleted)),
                                         ),
                                 );
+                                // 展开态：逐行渲染 diff（+ 绿 / - 红）
+                                if open_state && !file.diff_lines.is_empty() {
+                                    let mut diff_block = div()
+                                        .ml(px(20.0))
+                                        .p(px(6.0))
+                                        .rounded(px(6.0))
+                                        .bg(theme::t().hover)
+                                        .v_flex();
+                                    for dl in &file.diff_lines {
+                                        let color = if dl.starts_with("+ ") { theme::t().accent } else { theme::t().error };
+                                        diff_block = diff_block.child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .line_height(px(18.0))
+                                                .text_color(color)
+                                                .child(dl.clone()),
+                                        );
+                                    }
+                                    card = card.child(diff_block);
+                                }
                             }
                             if changes.len() > 4 {
-                                
+
                                 card = card.child(
                                     div()
                                         .pl(px(14.0))

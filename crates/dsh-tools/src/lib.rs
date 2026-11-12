@@ -189,7 +189,7 @@ impl ApprovalSlot {
 // `interaction/user-questions` 服务词表的 rustdsh 等价）----
 
 /// 一次提问里给用户的选择项（上游 `AskUserQuestionOption`）。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AskUserOption {
     pub label: String,
     pub description: Option<String>,
@@ -197,7 +197,7 @@ pub struct AskUserOption {
 
 /// 一次提问的单个问题（上游 `AskUserQuestionItem` 的模型面：`multi_select`
 /// 蛇形——服务词表的 multiSelect 驼峰只在 timed 变体出现，rustdsh 走 legacy）。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AskUserQuestion {
     pub id: String,
     pub question: String,
@@ -207,7 +207,7 @@ pub struct AskUserQuestion {
 }
 
 /// 单题答案（上游 `AskUserQuestionAnswerItem`）。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AskUserAnswerItem {
     pub id: String,
     pub selected: Vec<String>,

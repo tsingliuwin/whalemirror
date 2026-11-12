@@ -313,6 +313,8 @@ struct ChatSnap {
     stats: crate::chat::SessionStats,
     /// 草稿 '/' 前缀的命令菜单过滤词（会话态才有）。
     slash_query: Option<String>,
+    /// @ 文件候选匹配列表（composer 末词以 @ 开头时的工作区文件名）。
+    file_mention_matches: Vec<String>,
     /// 排队条带行（QueueDock 渲染与行动作面；editable=纯文本行）。
     queued: Vec<QueueRowSnap>,
 }
@@ -2127,6 +2129,8 @@ pub(crate) struct AppView {
     /// 切换会话待应用的输入草稿（set_value 需 window——渲染期应用，
     /// 同 pending_clear 模式）。
     pending_input: Option<String>,
+    /// @ 文件选中旗标（工具行/候选菜单点击 → 渲染期替换末词）
+    file_mention_selected: Option<String>,
     /// 会话各自的 composer 草稿存档（上游 per-session input shell）。
     session_drafts: HashMap<SessionId, ComposerDraft>,
     /// 排队条带折叠态（上游 QueueDock 多条默认折叠只露计数头）。
@@ -2477,6 +2481,7 @@ impl AppView {
             web_search_base_url_input,
             web_search_count_input,            pending_clear: false,
             pending_input: None,
+            file_mention_selected: None,
             session_drafts: HashMap::new(),
             queue_collapsed: true,
             pending_toasts: Vec::new(),
@@ -6763,6 +6768,16 @@ impl Render for AppView {
             // 会话草稿换入的输入值（set_value 需 window——渲染期应用）
             self.input.update(cx, |state, cx| state.set_value(text, window, cx));
         }
+        if let Some(selected) = self.file_mention_selected.take() {
+            // @ 文件候选选中：替换末词 @query 为 @path（渲染期 set_value）
+            self.input.update(cx, |state, cx| {
+                let draft = state.value().to_string();
+                if let Some(pos) = draft.rfind('@') {
+                    let new_text = format!("{}@{} ", &draft[..pos], selected);
+                    state.set_value(new_text, window, cx);
+                }
+            });
+        }
         if let Some(text) = self.pending_question_input.take() {
             // 提问卡自定义答案输入的翻页恢复/关卡清空（同上渲染期应用）
             self.question_custom
@@ -6850,6 +6865,32 @@ impl Render for AppView {
                 .starts_with('/')
                 .then(|| draft[1..].trim().to_lowercase())
         };
+        // @ 文件候选检测（A5.2：composer 末词以 @ 开头 → 提取查询词；
+        // 工作区目录浅列 + 前缀过滤——上游 ui-workspace 文件候选的简化形）
+        let file_mention_query: Option<String> = if self.chat.read_with(cx, |c, _| c.is_empty()) {
+            None
+        } else {
+            let draft = self.input.read_with(cx, |s, _| s.value().to_string());
+            let last_word = draft.split_whitespace().last().unwrap_or("");
+            (last_word.starts_with('@') && last_word.len() > 1)
+                .then(|| last_word[1..].to_lowercase())
+        };
+        let file_mention_matches: Vec<String> = file_mention_query
+            .as_deref()
+            .map(|query| {
+                let cwd = std::path::Path::new(&self.current_cwd);
+                let mut matches: Vec<String> = std::fs::read_dir(cwd)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().to_lowercase().contains(query))
+                    .take(8)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                matches.sort();
+                matches
+            })
+            .unwrap_or_default();
         // ChatView 快照：header/composer 的渲染输入（子实体状态一次读取）
         let snap = self.chat.read_with(cx, |c, _| ChatSnap {
             empty: c.is_empty(),
@@ -6857,6 +6898,7 @@ impl Render for AppView {
             tab: c.tab(),
             stats: c.session_stats(),
             slash_query,
+            file_mention_matches: file_mention_matches.clone(),
             queued: c
                 .queued
                 .iter()
@@ -9132,7 +9174,7 @@ impl AppView {
             .when(!snap.queued.is_empty(), |d| {
                 d.child(self.queue_dock_render(&this, snap, card_w))
             })
-            .child(self.composer_card(this.clone(), has_text, card_w, snap.running, locked, snap.slash_query.as_deref(), false));
+            .child(self.composer_card(this.clone(), has_text, card_w, snap.running, locked, snap.slash_query.as_deref(), false, &snap.file_mention_matches));
         // web StatsPills（0.1.5-alpha.1）：输入卡下方两个图标 pill——
         // 仪表 pill（轮/步 + 输出速度）开「会话统计」对话框，数据 pill
         // （总 token + 缓存命中）开「Token 用量」对话框；互斥开合（exclusive
@@ -9499,7 +9541,7 @@ impl AppView {
                             .child(agent_preset_label()),
                     )
                     .child({
-                        let c = self.composer_card(this, has_text, layout::composer_card_width(center_w), snap.running, snap.empty && self.current_workspace.is_none(), None, true);
+                        let c = self.composer_card(this, has_text, layout::composer_card_width(center_w), snap.running, snap.empty && self.current_workspace.is_none(), None, true, &[]);
                         c
                     })
                     // 下拉面板挂在栈层级（输入卡之后渲染 → 绘制在其上，
@@ -10204,7 +10246,7 @@ impl AppView {
         panel
     }
 
-    fn composer_card(&self, this: Entity<AppView>, has_text: bool, card_w: f32, running: bool, locked: bool, slash_query: Option<&str>, hero: bool) -> Stateful<Div> {
+    fn composer_card(&self, this: Entity<AppView>, has_text: bool, card_w: f32, running: bool, locked: bool, slash_query: Option<&str>, hero: bool, file_mention_matches: &[String]) -> Stateful<Div> {
         // #5 真并发：异会话运行中 composer 不再让位（消息路由到被查看
         // 会话的 runtime）；运行态按钮跟被查看会话（chat.running 由按属主
         // 路由的事件驱动）。偏差：模型菜单/权限钮改动只落主 agent 配置，
@@ -10320,6 +10362,49 @@ impl AppView {
         if !locked && (self.command_menu || slash_query.is_some()) {
             command_menu_el =
                 Some(self.command_menu_element(&this, slash_query).into_any_element());
+        }
+        // @ 文件候选下拉（A5.2：composer 末词以 @ 开头 → 工作区文件匹配列表）
+        let mut file_mention_el: Option<AnyElement> = None;
+        if !file_mention_matches.is_empty() && !locked {
+            let t_pick = this.clone();
+            let mut menu = div()
+                .id("file-mention-menu")
+                .absolute()
+                .left(px(48.0))
+                .bottom(px(56.0))
+                .w(px(280.0))
+                .max_h(px(200.0))
+                .overflow_y_scroll()
+                .occlude()
+                .v_flex()
+                .p(px(4.0))
+                .rounded(px(12.0))
+                .bg(theme::t().menu)
+                .shadow(theme::elevation_prominent());
+            for path in file_mention_matches {
+                let t_sel = this.clone();
+                let path_s = path.clone();
+                menu = menu.child(
+                    div()
+                        .id(SharedString::from(format!("fm-{path}")))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .text_color(theme::t().text)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::t().hover))
+                        .on_click(move |_, _, cx| {
+                            // 选中文件：渲染期替换末词 @query（borrow-safe 旗标）
+                            t_sel.update(cx, |v, _| {
+                                v.file_mention_selected = Some(path_s.clone());
+                            });
+                        })
+                        .child(path.clone()),
+                );
+            }
+            file_mention_el = Some(menu.into_any_element());
         }
         // 权限预设菜单（上游 PermissionSelect 的 Menu）：三行 + 当前勾选；
         // 完全权限行走风险确认门
@@ -10629,6 +10714,7 @@ impl AppView {
             )
             .children(model_menu_el)
             .children(command_menu_el)
+            .children(file_mention_el)
             .children(permission_menu_el)
     }
 

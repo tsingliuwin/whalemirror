@@ -851,6 +851,34 @@ impl Render for SidebarView {
                         .child("新建会话"),
                 )
                 .child(
+                    // 自动化任务导航行（A6：上游 sidebar.panellist 的
+                    // TaskManagerIcon 行——点击换中栏主面板，会话不动）
+                    {
+                        let t_auto = this.clone();
+                        div()
+                            .id("sb-automation")
+                            .h(px(34.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px_2()
+                            .rounded(px(8.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::t().hover))
+                            .on_click(move |_, _, cx| {
+                                t_auto.update(cx, |v, cx| v.open_automation(cx));
+                            })
+                            .child(gpui::svg().path("icons/clock.svg").size(px(16.0)).text_color(theme::t().text_2))
+                            .child(
+                                div()
+                                    .text_size(px(theme::FONT_ROW))
+                                    .line_height(px(20.0))
+                                    .text_color(theme::t().text)
+                                    .child("自动化任务"),
+                            )
+                    },
+                )
+                .child(
                     // 区块头：会话 + 搜索 / 视图 / 新建工作区（web .sectionHeader）
                     div()
                         .h(px(36.0))

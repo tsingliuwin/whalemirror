@@ -256,6 +256,18 @@ struct MessageDetail {
 enum CenterTab {
     Conversation,
     Trajectory,
+    /// 自动化任务页（A6：中栏主面板——上游 ui-schedule TaskManagerPage；
+    /// 侧栏导航行换中栏，当前会话不动）
+    Automation,
+}
+
+/// 自动化任务页的状态过滤（上游 filter tabs：active 默认 + all）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutomationFilter {
+    Active,
+    Paused,
+    Ended,
+    All,
 }
 
 /// 一次待决定的审批（上游 `conversation.approval.card` 的 rustdsh 子集）：
@@ -1955,6 +1967,12 @@ pub(crate) struct AppView {
     /// 待答提问卡（A5.1 通用提问通道：上游 QuestionComposer 单进程版——
     /// 分页单题 + 选项单/多选 + 自定义答案 + 跳过）
     pending_question: Option<dsh_gpui::question_card::QuestionCardState>,
+    /// 自动化任务页（A6：目录快照 + 过滤/选中/删除确认；进入 tab 时刷新）
+    automation_tasks: Vec<dsh_schedule::ScheduleTask>,
+    automation_filter: AutomationFilter,
+    automation_selected: Option<String>,
+    automation_confirm_delete: Option<String>,
+    automation_loaded: bool,
     /// 提问卡答案通道（Submit=提交批 / Cancel=放弃；hook 轮询收）
     question_answer_tx:
         Option<std::sync::mpsc::Sender<dsh_gpui::question_card::QuestionUiAnswer>>,
@@ -2346,6 +2364,11 @@ impl AppView {
         question_answer_tx: None,
         question_custom: question_custom.clone(),
         pending_question_input: None,
+        automation_tasks: Vec::new(),
+        automation_filter: AutomationFilter::Active,
+        automation_selected: None,
+        automation_confirm_delete: None,
+        automation_loaded: false,
         job_owner: job_owner.clone(),
         fs_observation,
         todos: Vec::new(),
@@ -3933,6 +3956,87 @@ impl AppView {
                 vec![dsh_llm::ContentBlock::text(text.clone())],
                 dsh_llm::MessageSource::Schedule,
             ));
+        }
+        cx.notify();
+    }
+
+    /// 自动化任务页：目录快照刷新（上游 catalog-source：进页/动作后拉全
+    /// 量；排序 = 下次运行时间升序——scheduledAt 升序近似，地板 nuance
+    /// 略）。加载态只立一次旗；失败静默保留旧快照。
+    fn refresh_automation(&mut self, cx: &mut Context<Self>) {
+        self.automation_loaded = true;
+        match self.schedule.store.list() {
+            Ok(listing) => {
+                let mut tasks = listing.tasks;
+                tasks.sort_by_key(|task| {
+                    dsh_schedule::instant_epoch_ms(task.record.scheduled_at())
+                        .unwrap_or(i64::MAX)
+                });
+                self.automation_tasks = tasks;
+            }
+            Err(_) => {}
+        }
+        cx.notify();
+    }
+
+    /// 自动化任务：暂停/恢复切换（上游 edit({patch:{active}}) 同形；
+    /// CAS 用快照 updatedAt——冲突静默（下次进页刷新见新值））。
+    fn automation_toggle(&mut self, id: String, active: bool, cx: &mut Context<Self>) {
+        let expected = self
+            .automation_tasks
+            .iter()
+            .find(|t| t.record.id() == id)
+            .and_then(|t| t.updated_at.clone());
+        let request = dsh_schedule::ScheduleEditRequest {
+            id,
+            action: dsh_schedule::ScheduleEditAction::Update {
+                patch: dsh_schedule::SchedulePatchRequest {
+                    title: None,
+                    prompt: None,
+                    timing: None,
+                    target: None,
+                    active: Some(active),
+                },
+                target: None,
+                active: Some(active),
+            },
+            expected_updated_at: expected,
+        };
+        let _ = self.schedule.edit(None, request);
+        self.refresh_automation(cx);
+    }
+
+    /// 自动化任务：删除（确认流后；上游 edit({action:'delete'}) 同形）。
+    fn automation_delete(&mut self, id: String, cx: &mut Context<Self>) {
+        self.automation_confirm_delete = None;
+        let request = dsh_schedule::ScheduleEditRequest {
+            id: id.clone(),
+            action: dsh_schedule::ScheduleEditAction::Delete,
+            expected_updated_at: None,
+        };
+        let _ = self.schedule.edit(None, request);
+        if self.automation_selected.as_deref() == Some(id.as_str()) {
+            self.automation_selected = None;
+        }
+        self.refresh_automation(cx);
+    }
+
+    /// 自动化任务：新建（上游默认路径——新会话 + composer 预填
+    /// host.createPrompt 逐字；切回对话 tab 让用户看见输入位）。
+    fn automation_new(&mut self, cx: &mut Context<Self>) {
+        self.new_session(cx);
+        self.pending_input =
+            Some("请根据需求创建一个自动化任务。".to_string());
+        self.chat.update(cx, |c, _| c.tab = CenterTab::Conversation);
+        cx.notify();
+    }
+
+    /// 打开自动化任务页（侧栏导航行）：中栏换主面板，当前会话不动；
+    /// 首次进入拉目录快照。
+    fn open_automation(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |c, _| c.tab = CenterTab::Automation);
+        if !self.automation_loaded {
+            self.refresh_automation(cx);
         }
         cx.notify();
     }
@@ -6400,6 +6504,12 @@ impl Render for AppView {
             self.question_custom
                 .update(cx, |state, cx| state.set_value(text, window, cx));
         }
+        // 自动化任务页：进入时拉一次目录快照（动作后即时刷新；此后常驻）
+        if !self.automation_loaded
+            && self.chat.read_with(cx, |c, _| c.tab) == CenterTab::Automation
+        {
+            self.refresh_automation(cx);
+        }
         if self.pending_clear {
             self.pending_clear = false;
             self.input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -7351,8 +7461,449 @@ impl Render for AppView {
 impl AppView {
 
 
-    fn render_center(&self, width: f32, this: Entity<AppView>, has_text: bool, snap: &ChatSnap) -> Div {
-        let t = this.clone();
+    /// 自动化任务页（上游 ui-schedule TaskManagerPage 的 rustdsh 等价）：
+    /// 页头（标题 + 新建）→ 状态过滤 chips → 任务列表（下次运行升序）→
+    /// 右侧详情列（47%：规则/内容/操作）。文案 zh 逐字（schedule.manager）。
+    fn render_automation(&self, this: Entity<AppView>, width: f32) -> Div {
+        let status_word = |status: &dsh_schedule::ScheduleTaskStatus| match status {
+            dsh_schedule::ScheduleTaskStatus::Active => "已开启",
+            dsh_schedule::ScheduleTaskStatus::Paused => "已暂停",
+            _ => "已结束",
+        };
+        // 频率概要（近似：cron/rrule 归「自定义规则」——上游
+        // frequency-locales 的逐形文案后续批）
+        let frequency_text = |task: &dsh_schedule::ScheduleTask| match &task.record {
+            dsh_schedule::ScheduleRecord::After { .. } | dsh_schedule::ScheduleRecord::At { .. } => "仅一次".to_string(),
+            dsh_schedule::ScheduleRecord::Daily { .. } => "每天".to_string(),
+            dsh_schedule::ScheduleRecord::Weekly { .. } => "每周".to_string(),
+            _ => "自定义规则".to_string(),
+        };
+        let t_new = this.clone();
+        let t_chip = this.clone();
+        let mut page = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .overflow_hidden()
+            .child(
+                // 列表列（上游 .pageContent max-width 960 居中；此为有详情
+                // 时的左列 + 无详情时的整宽）
+                div()
+                    .id("automation-list-scroll")
+                    .flex_1()
+                    .min_w_0()
+                .h_full()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .max_w(px(960.0))
+                            .mx_auto()
+                            .pt(px(28.0))
+                            .pb(px(48.0))
+                            .px(px(32.0))
+                            .v_flex()
+                            // 页头：标题 + 新建（上游 split 按钮的简化——
+                            // 仅 chat-create 主钮）
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .mb(px(24.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(20.0))
+                                            .line_height(px(28.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().text)
+                                            .child("自动化任务"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("automation-new")
+                                            .ml_auto()
+                                            .h(px(32.0))
+                                            .px(px(14.0))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(16.0))
+                                            .bg(theme::t().text)
+                                            .text_size(px(13.0))
+                                            .line_height(px(20.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().bg_base)
+                                            .cursor_pointer()
+                                            .hover(|s| s.opacity(0.9))
+                                            .on_click(move |_, _, cx| {
+                                                t_new.update(cx, |v, cx| v.automation_new(cx));
+                                            })
+                                            .child("新建"),
+                                    ),
+                            )
+                            // 状态过滤 chips（已开启/已暂停/已结束/全部）
+                            .child({
+                                let chips = [
+                                    ("已开启", AutomationFilter::Active),
+                                    ("已暂停", AutomationFilter::Paused),
+                                    ("已结束", AutomationFilter::Ended),
+                                    ("全部", AutomationFilter::All),
+                                ];
+                                let mut row = div().flex().gap(px(8.0)).mb(px(14.0));
+                                for (label, filter) in chips {
+                                    let t_chip = t_chip.clone();
+                                    let active = self.automation_filter == filter;
+                                    row = row.child(
+                                        div()
+                                            .id(SharedString::from(format!("auto-filter-{}", label)))
+                                            .h(px(28.0))
+                                            .px(px(10.0))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(14.0))
+                                            .text_size(px(14.0))
+                                            .line_height(px(20.0))
+                                            .text_color(if active { theme::t().text } else { theme::t().text_3 })
+                                            .bg(if active { theme::t().hover } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) })
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme::t().hover))
+                                            .on_click(move |_, _, cx| {
+                                                t_chip.update(cx, |v, cx| {
+                                                    v.automation_filter = filter;
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(label),
+                                    );
+                                }
+                                row
+                            })
+                            .children({
+                                // 列表（过滤 + 下次运行升序；快照已排序）
+                                let in_filter = |task: &dsh_schedule::ScheduleTask| match self.automation_filter {
+                                    AutomationFilter::All => true,
+                                    AutomationFilter::Active => task.status == dsh_schedule::ScheduleTaskStatus::Active,
+                                    AutomationFilter::Paused => task.status == dsh_schedule::ScheduleTaskStatus::Paused,
+                                    AutomationFilter::Ended => matches!(
+                                        task.status,
+                                        dsh_schedule::ScheduleTaskStatus::Ended
+                                            | dsh_schedule::ScheduleTaskStatus::Inactive
+                                    ),
+                                };
+                                let visible: Vec<&dsh_schedule::ScheduleTask> =
+                                    self.automation_tasks.iter().filter(|t| in_filter(t)).collect();
+                                if self.automation_tasks.is_empty() {
+                                    Some(
+                                        div()
+                                            .pt(px(48.0))
+                                            .flex()
+                                            .justify_center()
+                                            .text_size(px(14.0))
+                                            .line_height(px(21.0))
+                                            .text_color(theme::t().text_3)
+                                            .child("还没有自动化任务，在会话中创建的任务会显示在这里")
+                                            .into_any_element(),
+                                    )
+                                } else if visible.is_empty() {
+                                    let empty = match self.automation_filter {
+                                        AutomationFilter::Paused => "没有已暂停的自动化任务",
+                                        AutomationFilter::Ended => "没有已结束的自动化任务",
+                                        _ => "没有已开启的自动化任务",
+                                    };
+                                    Some(
+                                        div()
+                                            .pt(px(48.0))
+                                            .flex()
+                                            .justify_center()
+                                            .text_size(px(14.0))
+                                            .line_height(px(21.0))
+                                            .text_color(theme::t().text_3)
+                                            .child(empty)
+                                            .into_any_element(),
+                                    )
+                                } else {
+                                    let mut list = div().v_flex().gap(px(2.0));
+                                    for task in visible {
+                                        let t_row = this.clone();
+                                        let id = task.record.id().to_string();
+                                        let selected = self.automation_selected.as_deref() == Some(id.as_str());
+                                        let ended = task.status != dsh_schedule::ScheduleTaskStatus::Active;
+                                        let status_suffix = if ended {
+                                            format!("{} · ", status_word(&task.status))
+                                        } else {
+                                            String::new()
+                                        };
+                                        let next_text = dsh_schedule::format_task_local_time(task, task.record.scheduled_at());
+                                        let title_color = if ended { theme::t().text_3 } else { theme::t().text };
+                                        let summary_color = if ended { theme::t().caption } else { theme::t().text_3 };
+                                        list = list.child(
+                                            div()
+                                                .id(SharedString::from(format!("auto-row-{id}")))
+                                                .w_full()
+                                                .v_flex()
+                                                .gap(px(2.0))
+                                                .p(px(8.0))
+                                                .rounded(px(12.0))
+                                                .cursor_pointer()
+                                                .bg(if selected { theme::t().hover } else { gpui::hsla(0.0, 0.0, 0.0, 0.0) })
+                                                .hover(|s| s.bg(theme::t().hover))
+                                                .on_click({
+                                                    let id = id.clone();
+                                                    move |_, _, cx| {
+                                                        t_row.update(cx, |v, cx| {
+                                                            v.automation_selected = if v.automation_selected.as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+                                                            v.automation_confirm_delete = None;
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                })
+                                                .child(
+                                                    div()
+                                                        .text_size(px(14.0))
+                                                        .line_height(px(23.0))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(title_color)
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis()
+                                                        .child(task.record.title().to_string()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(13.0))
+                                                        .line_height(px(21.0))
+                                                        .text_color(summary_color)
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis()
+                                                        .child(format!(
+                                                            "{status_suffix}{} · 下次计划时间：{next_text}",
+                                                            frequency_text(task)
+                                                        )),
+                                                ),
+                                        );
+                                    }
+                                    Some(list.into_any_element())
+                                }
+                            }),
+                    ),
+            );
+        // 详情列（选中：47% 右栏——规则摘要 + 内容 + 操作）
+        if let Some(selected_id) = self.automation_selected.clone() {
+            if let Some(task) = self.automation_tasks.iter().find(|t| t.record.id() == selected_id) {
+                let t_toggle = this.clone();
+                let t_delete = this.clone();
+                let t_confirm = this.clone();
+                let ended = task.status != dsh_schedule::ScheduleTaskStatus::Active;
+                let paused = task.status == dsh_schedule::ScheduleTaskStatus::Paused;
+                let next_text =
+                    dsh_schedule::format_task_local_time(task, task.record.scheduled_at());
+                let target_text = match &task.target {
+                    dsh_schedule::ScheduleTarget::Session { session_id } => {
+                        format!("关联会话 {session_id}")
+                    }
+                    dsh_schedule::ScheduleTarget::NewOnce { .. } => "新建会话并复用".to_string(),
+                    dsh_schedule::ScheduleTarget::New { .. } => "每次新建会话".to_string(),
+                };
+                let detail = div()
+                    .id("automation-detail-scroll")
+                    .w(px(width * 0.47))
+                    .flex_none()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .border_l_1()
+                    .border_color(theme::t().border_l3)
+                    .px(px(24.0))
+                    .pt(px(28.0))
+                    .v_flex()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .line_height(px(26.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::t().text)
+                            .child(task.record.title().to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .text_color(theme::t().text_2)
+                            .child(format!(
+                                "{} · {} · 下次运行 {next_text}",
+                                status_word(&task.status),
+                                frequency_text(task)
+                            )),
+                    )
+                    .child(
+                        // 操作行：暂停/恢复 + 删除
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .id("automation-toggle")
+                                    .h(px(32.0))
+                                    .px(px(12.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(16.0))
+                                    .border(px(0.5))
+                                    .border_color(theme::t().border_l3)
+                                    .text_size(px(13.0))
+                                    .text_color(theme::t().text)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme::t().hover))
+                                    .on_click(move |_, _, cx| {
+                                        t_toggle.update(cx, |v, cx| {
+                                            if let Some(id) = v.automation_selected.clone() {
+                                                v.automation_toggle(id, paused, cx);
+                                            }
+                                        });
+                                    })
+                                    .child(if paused { "恢复任务" } else { "暂停任务" }),
+                            )
+                            .child(
+                                div()
+                                    .id("automation-delete")
+                                    .h(px(32.0))
+                                    .px(px(12.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(16.0))
+                                    .border(px(0.5))
+                                    .border_color(theme::t().border_l3)
+                                    .text_size(px(13.0))
+                                    .text_color(if self.automation_confirm_delete.is_some() {
+                                        theme::t().error
+                                    } else {
+                                        theme::t().text
+                                    })
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme::t().hover))
+                                    .on_click(move |_, _, cx| {
+                                        t_delete.update(cx, |v, _| {
+                                            v.automation_confirm_delete = Some(
+                                                v.automation_selected.clone().unwrap_or_default(),
+                                            );
+                                        });
+                                    })
+                                    .child("删除任务"),
+                            ),
+                    )
+                    // 删除确认（内联：标题 + 描述 + 取消/确认删除）
+                    .children({
+                        self.automation_confirm_delete.as_ref().map(|_| {
+                            let t_yes = t_confirm.clone();
+                            let t_no = this.clone();
+                            div()
+                                .v_flex()
+                                .gap(px(8.0))
+                                .p(px(12.0))
+                                .rounded(px(12.0))
+                                .bg(theme::t().hover)
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .line_height(px(20.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::t().text)
+                                        .child("删除此任务？"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
+                                        .text_color(theme::t().text_3)
+                                        .child("任务将停止触发，并连同其已保存的任务运行记录一并删除。原会话及其消息仍然保留；已排队的消息不会被撤回。"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_end()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .id("automation-delete-cancel")
+                                                .px(px(10.0))
+                                                .h(px(28.0))
+                                                .flex()
+                                                .items_center()
+                                                .text_size(px(13.0))
+                                                .text_color(theme::t().text_2)
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme::t().hover))
+                                                .on_click(move |_, _, cx| {
+                                                    t_no.update(cx, |v, _| {
+                                                        v.automation_confirm_delete = None;
+                                                    });
+                                                })
+                                                .child("取消"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("automation-delete-confirm")
+                                                .px(px(10.0))
+                                                .h(px(28.0))
+                                                .flex()
+                                                .items_center()
+                                                .rounded(px(14.0))
+                                                .bg(theme::t().error)
+                                                .text_size(px(13.0))
+                                                .text_color(theme::t().bg_base)
+                                                .cursor_pointer()
+                                                .on_click(move |_, _, cx| {
+                                                    t_yes.update(cx, |v, cx| {
+                                                        if let Some(id) =
+                                                            v.automation_confirm_delete.clone()
+                                                        {
+                                                            v.automation_delete(id, cx);
+                                                        }
+                                                    });
+                                                })
+                                                .child("确认删除"),
+                                        ),
+                                )
+                        })
+                    })
+                    .child(
+                        // 内容原文（详情主体）
+                        div()
+                            .v_flex()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .line_height(px(17.0))
+                                    .text_color(theme::t().text_3)
+                                    .child("任务内容"),
+                            )
+                            .child(
+                                div()
+                                    .p(px(10.0))
+                                    .rounded(px(10.0))
+                                    .bg(theme::t().hover)
+                                    .text_size(px(13.0))
+                                    .line_height(px(21.0))
+                                    .text_color(theme::t().text)
+                                    .child(task.record.prompt().to_string()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(theme::t().text_3)
+                            .child(format!(
+                                "执行位置：{target_text} · 下次计划时间：{next_text}"
+                            )),
+                    );
+                page = page.child(detail);
+            }
+        }
+        page
+    }
+
+    fn render_center(&self, width: f32, this: Entity<AppView>, has_text: bool, snap: &ChatSnap) -> Div {        let t = this.clone();
         let mut center = div()
             .relative()
             .h_full()
@@ -7362,13 +7913,16 @@ impl AppView {
             .v_flex()
             .bg(theme::t().bg_base);
 
-        let show_header = !snap.empty || snap.running;
+        let show_header = snap.tab != CenterTab::Automation && (!snap.empty || snap.running);
         if show_header {
             center = center.child(self.render_header(this.clone(), snap));
         }
 
-        // 主体：hero（空会话）/ 对话/轨迹（ChatView entity）
-        if snap.empty && !snap.running {
+        // 主体：hero（空会话）/ 对话/轨迹（ChatView entity）/ 自动化任务页
+        if snap.tab == CenterTab::Automation {
+            // 自动化任务页（上游 TaskManagerPage：整中栏替换、无 composer）
+            center = center.child(self.render_automation(this.clone(), width));
+        } else if snap.empty && !snap.running {
             center = center.child(self.render_hero(this.clone(), has_text, width, snap));
         } else {
             // 对话/轨迹主体都是 ChatView entity：对话 = 虚拟列表（折叠派生
@@ -7617,7 +8171,8 @@ impl AppView {
     fn render_tabs(&self, this: Entity<AppView>, snap: &ChatSnap) -> Div {
         use dsh_gpui::ui_metrics as m;
         let t1 = this.clone();
-        let t2 = this;
+        let t2 = this.clone();
+        let t3 = this;
         let tab = |id: &'static str, label: &'static str, active: bool, t: Entity<AppView>| {
             div()
                 .id(id)
@@ -7650,7 +8205,11 @@ impl AppView {
                 .on_click(move |_, _, cx| {
                     // tab 状态在 ChatView 上；其 notify 沿祖先链把 AppView
                     // 一并置脏，header 高亮下帧刷新
-                    let tab = if label == "轨迹" { CenterTab::Trajectory } else { CenterTab::Conversation };
+                    let tab = match label {
+                        "轨迹" => CenterTab::Trajectory,
+                        "自动化任务" => CenterTab::Automation,
+                        _ => CenterTab::Conversation,
+                    };
                     t.read_with(cx, |v, _| v.chat.clone())
                         .update(cx, |c, cx| {
                             c.tab = tab;
@@ -7667,6 +8226,12 @@ impl AppView {
             .gap(px(m::TABS_GAP_PX))
             .child(tab("tab-chat", "对话", snap.tab == CenterTab::Conversation, t1))
             .child(tab("tab-traj", "轨迹", snap.tab == CenterTab::Trajectory, t2))
+            .child(tab(
+                "tab-auto",
+                "自动化任务",
+                snap.tab == CenterTab::Automation,
+                t3,
+            ))
     }
 
     /// 底部 composer 区：输入卡 + 统计行（web composer.dock 槽，卡下 footer）。

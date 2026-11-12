@@ -292,12 +292,14 @@ impl ScheduleState {
 
     /// 服务操作：编辑（上游 `edit`：update 应用全部补丁字段并于规则变更
     /// 或 resume 时重算下一 occurrence；expectedUpdatedAt 不符报 conflict）。
+    /// actor 可空——UI 自动化页（A6）的暂停/恢复/删除是用户直接操作，
+    /// 无会话 actor（involved 归并对 None 透传 revised_task）。
     pub fn edit(
         &self,
         actor: Option<&ActorInfo>,
         request: ScheduleEditRequest,
     ) -> Result<Value, Value> {
-        let actor = actor.ok_or_else(internal_error)?;
+        let acting = actor.map(|a| a.session_id.clone());
         let listing = self.store.list().map_err(|_| internal_error())?;
         let Some(current) = listing.tasks.into_iter().find(|task| task.record.id() == request.id)
         else {
@@ -318,7 +320,7 @@ impl ScheduleState {
                     id: request.id.clone(),
                     title: current.record.title().to_string(),
                     involved: current.involved_session_ids.clone(),
-                    actor: Some(actor.session_id.clone()),
+                    actor: acting,
                 });
                 Ok(json!({"id": request.id, "deleted": true}))
             }
@@ -335,7 +337,7 @@ impl ScheduleState {
                     &current,
                     &request_patch,
                     resolved_target,
-                    Some(&actor.session_id),
+                    acting.as_deref(),
                     now_ms(),
                 )
                 .map_err(|error| input_to_declared(&error, EDIT_CODES))?;
@@ -347,7 +349,7 @@ impl ScheduleState {
                     id: request.id.clone(),
                     title: updated.record.title().to_string(),
                     involved: updated.involved_session_ids.clone(),
-                    actor: Some(actor.session_id.clone()),
+                    actor: acting,
                 });
                 let entry = catalog_entry(&updated, false, None);
                 self.model_task(&entry)

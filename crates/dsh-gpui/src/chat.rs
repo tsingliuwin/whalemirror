@@ -2164,6 +2164,45 @@ open: false,
                             .child(summary_text.clone()),
                     );
                 }
+                // timed pending：「回答」钮（上游 ask.reopen——点击重开卡片）
+                let is_pending_ask = tool.name == "ask_user_question"
+                    && tool.result.as_deref()
+                        .map(dsh_gpui::question_reply::is_pending_result)
+                        .unwrap_or(false);
+                if is_pending_ask {
+                    let call_id = tool
+                        .result
+                        .as_deref()
+                        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+                        .and_then(|v| v.get("callId").and_then(|c| c.as_str()).map(str::to_string))
+                        .unwrap_or_default();
+                    let t_answer = self.app.clone();
+                    let arguments = tool.arguments.clone();
+                    header = header.child(
+                        div()
+                            .id(("ask-answer", (ei * 1000 + bi) as u64))
+                            .h(px(22.0))
+                            .px(px(8.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .rounded(px(11.0))
+                            .bg(theme::t().accent)
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::t().bg_base)
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.85))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                t_answer.update(cx, |v, cx| {
+                                    v.reopen_ask_card(call_id.clone(), &arguments, cx);
+                                });
+                            })
+                            .child(dsh_gpui::question_reply::ASK_PENDING_LABEL.to_string()),
+                    );
+                }
                 if running {
                     // web .row::after 运行扫光：with_animation 每帧驱动 left
                     header = header.child(

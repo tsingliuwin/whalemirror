@@ -24,6 +24,7 @@ use crate::sidebar::SidebarView;
 use crate::widgets::*;
 
 use async_stream::stream;
+use serde_json::{json, Value};
 use async_trait::async_trait;
 use dsh_agent_loop::InboxTarget;
 use dsh_agent_loop::{AgentOptions, ReactLoopAgent};
@@ -51,7 +52,7 @@ use dsh_gpui::{
 pub(crate) use dsh_gpui::EnterBehavior;
 use std::collections::{HashMap, HashSet};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // --- 参考 ui-layout/columns.ts 列宽契约 ---------------------------------------
@@ -1976,6 +1977,15 @@ pub(crate) struct AppView {
     /// 待答提问卡（A5.1 通用提问通道：上游 QuestionComposer 单进程版——
     /// 分页单题 + 选项单/多选 + 自定义答案 + 跳过）
     pending_question: Option<dsh_gpui::question_card::QuestionCardState>,
+    /// live 提问注册表（钩子等待中的问题，callId → 问题批；卡片 X = 隐藏
+    /// 不取消——工具行「回答」钮从这里重开）
+    live_asks: Arc<Mutex<std::collections::HashMap<String, dsh_tools::AskUserRequest>>>,
+    /// 提问应答通道注册表（callId → 发送端；钩子等待中注册，返回即摘除
+    /// ——按 callId 路由修复并发提问串答）
+    ask_answer_txs: Arc<Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<dsh_gpui::question_card::QuestionUiAnswer>>>>,
+    /// pending 提问注册表（timed 到期：问题仍可答；迟到答案从这里转向
+    /// agent——上游 userQuestions pending 半的注册表等价）
+    pending_asks: Arc<Mutex<std::collections::HashMap<String, dsh_tools::AskUserRequest>>>,
     /// 自动化任务页（A6：目录快照 + 过滤/选中/删除确认；进入 tab 时刷新）
     automation_tasks: Vec<dsh_schedule::ScheduleTask>,
     automation_filter: AutomationFilter,
@@ -2382,6 +2392,9 @@ impl AppView {
         approval_answer_tx: None,
         approval_ask: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         pending_question: None,
+        live_asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        ask_answer_txs: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        pending_asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         question_answer_tx: None,
         question_custom: question_custom.clone(),
         pending_question_input: None,
@@ -4166,6 +4179,26 @@ impl AppView {
         cx.notify();
     }
 
+    /// 工具行「回答」钮：重开/打开一张提问卡（live 隐藏卡或 timed pending
+    /// 问题——问题批从工具行 arguments 原样重建，推荐预选等纯函数复用）。
+    fn reopen_ask_card(&mut self, call_id: String, arguments: &str, cx: &mut Context<Self>) {
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(arguments);
+        let questions = match parsed
+            .map(|value| dsh_tools::AskUserTool::parse_questions(&value))
+        {
+            Ok(Ok(q)) => q,
+            _ => {
+                self.pending_toasts.push("无法重建问题".into());
+                cx.notify();
+                return;
+            }
+        };
+        self.pending_question =
+            Some(dsh_gpui::question_card::QuestionCardState::new(call_id, questions));
+        self.pending_question_input = Some(String::new());
+        cx.notify();
+    }
+
     /// 重启恢复面（上游 `runtime.recoverOutstandingExecution` 的宿主等价）：
     /// 按 (收据 message_id, 目标会话) 分组——组内收据行存在于会话日志且其
     /// 后无 turn/end（轮未完成：重启掐死的认领轮/中途轮）→ 整组视作未
@@ -4960,10 +4993,12 @@ impl AppView {
         } else if let Some(a) = self.session_runtimes.get(&viewed_key) {
             a.cancel();
         }
-        // 待答提问随轮次中止一起放弃（上游 exec.signal abort → ASK_ABORTED
-        // 同语义；视图切换会话不弃卡——卡是全局遮罩，答案归属发起轮）
-        if self.pending_question.is_some() {
-            if let Some(tx) = &self.question_answer_tx {
+        // 待答提问随轮次中止一起放弃：live 钩子（等待中）逐个回 Cancelled
+        // （上游 exec.signal abort → ASK_ABORTED 同语义）；pending 注册表
+        // 不动（上游同——到期后的问题跨轮仍可答）
+        {
+            let txs: Vec<_> = self.ask_answer_txs.lock().unwrap().values().cloned().collect();
+            for tx in txs {
                 let _ = tx.send(dsh_gpui::question_card::QuestionUiAnswer::Cancel);
             }
             self.pending_question = None;
@@ -5569,11 +5604,49 @@ impl AppView {
         card.cache_custom(value);
         match card.build_answers() {
             Some(answers) => {
+                let call_id = card.call_id.clone();
                 self.pending_question = None;
-                if let Some(tx) = &self.question_answer_tx {
-                    let _ = tx.send(dsh_gpui::question_card::QuestionUiAnswer::Submit(answers));
+                self.automation_form_clear = false;
+                // 路由：live（钩子等待中）→ per-call 通道；pending（timed
+                // 到期）→ 摘除注册表 + 转向 agent（上游 answer() 同语义）
+                let routed = if self.live_asks.lock().unwrap().contains_key(&call_id) {
+                    let tx = self.ask_answer_txs.lock().unwrap().get(&call_id).cloned();
+                    match tx {
+                        Some(tx) => {
+                            let _ = tx.send(dsh_gpui::question_card::QuestionUiAnswer::Submit(answers));
+                            true
+                        }
+                        None => false,
+                    }
+                } else if let Some(request) = self.pending_asks.lock().unwrap().remove(&call_id) {
+                    let payload = json!({
+                        "kind": "answer_to_pending_question",
+                        "tool": "ask_user_question",
+                        "callId": call_id,
+                        "questions": serde_json::to_value(&request.questions).unwrap_or(Value::Null),
+                        "answers": serde_json::to_value(&answers).unwrap_or(Value::Null),
+                    });
+                    let message = dsh_llm::Message::new(
+                        dsh_llm::Role::User,
+                        vec![dsh_llm::ContentBlock::text(payload.to_string())],
+                        dsh_llm::MessageSource::Context {
+                            context_kind: "user-question-reply".into(),
+                            plugin: None,
+                            form: Some("notice".into()),
+                            summary: None,
+                            changes_paths: Vec::new(),
+                            reference_labels: Vec::new(),
+                            name: None,
+                        },
+                    );
+                    self.agent.send(message, dsh_agent_loop::InboxTarget::NextTurn);
+                    true
+                } else {
+                    false
+                };
+                if routed {
+                    self.pending_question_input = Some(String::new());
                 }
-                self.pending_question_input = Some(String::new());
             }
             None => {
                 card.error = Some(dsh_gpui::question_card::ERROR_INCOMPLETE_LABEL.to_string());
@@ -5582,16 +5655,24 @@ impl AppView {
         cx.notify();
     }
 
-    /// 提问卡放弃（X 钮/轮次中止共用：hook 回 Cancelled——工具结果按
-    /// ASK_ABORTED 文案回模型。偏差登记：上游对 callId 键卡是 hide 可
-    /// 重开（工具行按钮随批③），rustdsh 先走取消避免不可达悬置态）。
+    /// 提问卡 X（上游 nav.cancel 放弃整组——X=hide 语义随 timed 批：live
+    /// 卡隐藏后钩子仍在等待，工具行「回答」钮重开； Cancel 仅在转后台后
+    /// 无意义的悬置态下由轮次中止触发）。
     fn question_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.pending_question.take().is_some() {
-            if let Some(tx) = &self.question_answer_tx {
-                let _ = tx.send(dsh_gpui::question_card::QuestionUiAnswer::Cancel);
-            }
+        let call_id = self.pending_question.as_ref().map(|c| c.call_id.clone());
+        let live = call_id
+            .as_ref()
+            .is_some_and(|id| self.live_asks.lock().unwrap().contains_key(id));
+        if !live {
+            // 非活动（pending 已注册或已消失）：仅收卡片不动钩子
+            self.pending_question = None;
             self.pending_question_input = Some(String::new());
+            cx.notify();
+            return;
         }
+        // live 卡 X = hide：卡片收起，钩子继续等待，可从工具行重开
+        self.pending_question = None;
+        self.pending_question_input = Some(String::new());
         cx.notify();
     }
 
@@ -12747,47 +12828,81 @@ fn main() {
                     .detach();
                 }
 
-                // A5.1 提问缝（单进程 userQuestions.ask 的通用通道）：
-                // hook（工具线程）投卡态 → async 泵开提问卡；UI 提交/放弃
-                // 走 answer 通道（AppView 字段）→ hook 轮询收。legacy 阻塞
-                // 无截止（上游无限等答案）；通道断（宿主落）= 取消。
+                // A5.1 提问缝（单进程 userQuestions.ask 的通用通道，timed 变体）：
+                // hook（工具线程）投卡态 + 注册 per-call 应答通道 → async 泵开
+                // 提问卡；UI 提交按 callId 路由回对应钩子。timeout 到期 → 问题
+                // 移入 pending 注册表（仍可答）→ 钩子回 TimedOut → 工具回
+                // {pending:true}；迟到答案从工具行「回答」重开卡片提交后**转向**
+                // agent（user-question-reply 源，上游 answer() 同语义）。
                 {
                     let (open_tx, open_rx) =
                         std::sync::mpsc::channel::<dsh_gpui::question_card::QuestionCardState>();
-                    let (answer_tx, answer_rx) =
-                        std::sync::mpsc::channel::<dsh_gpui::question_card::QuestionUiAnswer>();
-                    let answer_rx = std::sync::Mutex::new(answer_rx);
+                    let live_asks = Arc::new(Mutex::new(
+                        std::collections::HashMap::<String, dsh_tools::AskUserRequest>::new(),
+                    ));
+                    let txs = Arc::new(Mutex::new(
+                        std::collections::HashMap::<
+                            String,
+                            std::sync::mpsc::Sender<dsh_gpui::question_card::QuestionUiAnswer>,
+                        >::new(),
+                    ));
+                    let pendings = Arc::new(Mutex::new(
+                        std::collections::HashMap::<String, dsh_tools::AskUserRequest>::new(),
+                    ));
+                    // 钩子闭包持一份克隆（原 Arc 留给 AppView 注册表）
+                    let hook_live = Arc::clone(&live_asks);
+                    let hook_txs = Arc::clone(&txs);
+                    let hook_pendings = Arc::clone(&pendings);
                     let ask_hook: dsh_tools::AskUserHook = std::sync::Arc::new(
-                        move |req: &dsh_tools::AskUserRequest| {
+                        move |req: &dsh_tools::AskUserRequest, timeout_ms: Option<u64>| {
+                            let call_id = req.call_id.clone();
+                            // 注册 live + per-call 应答通道
+                            hook_live.lock().unwrap().insert(call_id.clone(), req.clone());
+                            let (answer_tx, answer_rx) =
+                                std::sync::mpsc::channel::<dsh_gpui::question_card::QuestionUiAnswer>();
+                            hook_txs.lock().unwrap().insert(call_id.clone(), answer_tx);
                             let _ = open_tx.send(dsh_gpui::question_card::QuestionCardState::new(
-                                req.call_id.clone(),
+                                call_id.clone(),
                                 req.questions.clone(),
                             ));
-                            loop {
-                                match answer_rx.lock().unwrap().try_recv() {
+                            let deadline =
+                                timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+                            let resolution = loop {
+                                match answer_rx.try_recv() {
                                     Ok(dsh_gpui::question_card::QuestionUiAnswer::Submit(items)) => {
-                                        return dsh_tools::AskUserResolution::Answered(items);
+                                        break dsh_tools::AskUserResolution::Answered(items);
                                     }
                                     Ok(dsh_gpui::question_card::QuestionUiAnswer::Cancel) => {
-                                        return dsh_tools::AskUserResolution::Cancelled;
+                                        break dsh_tools::AskUserResolution::Cancelled;
                                     }
                                     Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                                            // 前台窗口到期：移入 pending（仍可答）
+                                            // + 回 TimedOut（工具层映射 pending JSON）
+                                            hook_pendings.lock().unwrap().insert(call_id.clone(), req.clone());
+                                            break dsh_tools::AskUserResolution::TimedOut;
+                                        }
                                         std::thread::sleep(std::time::Duration::from_millis(250));
                                     }
                                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                        return dsh_tools::AskUserResolution::Cancelled;
+                                        break dsh_tools::AskUserResolution::Cancelled;
                                     }
                                 }
-                            }
+                            };
+                            hook_live.lock().unwrap().remove(&call_id);
+                            hook_txs.lock().unwrap().remove(&call_id);
+                            resolution
                         },
                     );
                     ask_user_slot.set(ask_hook);
-                    {
-                        let answer_tx = answer_tx;
-                        app.update(cx, |v: &mut AppView, _| {
-                            v.question_answer_tx = Some(answer_tx);
-                        });
-                    }
+                    // 共享注册表进 AppView（卡片提交按 callId 路由；X 隐藏/
+                    // 工具行重开也从这里取）
+                    app.update(cx, |v: &mut AppView, _| {
+                        v.live_asks = Arc::clone(&live_asks);
+                        v.ask_answer_txs = Arc::clone(&txs);
+                        v.pending_asks = Arc::clone(&pendings);
+                        v.question_answer_tx = None;
+                    });
                     // async 泵：开提问卡（无答案职责）
                     let ask_pump_view = app.clone();
                     cx.spawn(async move |cx| {

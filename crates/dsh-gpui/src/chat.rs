@@ -1904,7 +1904,13 @@ open: false,
                     match (tool.result.as_deref(), tool.error) {
                         (None, _) => Some(dsh_gpui::question_reply::ASK_WAITING_LABEL.to_string()),
                         (Some(result), false) => {
-                            dsh_gpui::question_reply::row_summary(&tool.arguments, result)
+                            // timed pending（{pending:true,...}）→「已继续工作，
+                            // 仍可回答」（上游 ask.pending）
+                            if dsh_gpui::question_reply::is_pending_result(result) {
+                                Some(dsh_gpui::question_reply::ASK_PENDING_LABEL.to_string())
+                            } else {
+                                dsh_gpui::question_reply::row_summary(&tool.arguments, result)
+                            }
                         }
                         (Some(result), true) => {
                             let text = result;

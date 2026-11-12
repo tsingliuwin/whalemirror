@@ -169,3 +169,15 @@ mod tests {
         assert!(lines[2].skipped);
     }
 }
+
+/// pending 结果判别（上游 `{pending:true, callId}` 形——timed 到期后
+/// 工具行的「已继续工作，仍可回答」态）。
+pub fn is_pending_result(result: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|v| v.get("pending").and_then(|p| p.as_bool()))
+        .unwrap_or(false)
+}
+
+/// pending 态摘要（上游 `ask.pending`，zh 逐字）。
+pub const ASK_PENDING_LABEL: &str = "已继续工作，仍可回答";

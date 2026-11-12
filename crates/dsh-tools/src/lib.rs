@@ -189,7 +189,7 @@ impl ApprovalSlot {
 // `interaction/user-questions` 服务词表的 rustdsh 等价）----
 
 /// 一次提问里给用户的选择项（上游 `AskUserQuestionOption`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AskUserOption {
     pub label: String,
     pub description: Option<String>,
@@ -197,7 +197,7 @@ pub struct AskUserOption {
 
 /// 一次提问的单个问题（上游 `AskUserQuestionItem` 的模型面：`multi_select`
 /// 蛇形——服务词表的 multiSelect 驼峰只在 timed 变体出现，rustdsh 走 legacy）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AskUserQuestion {
     pub id: String,
     pub question: String,
@@ -207,7 +207,7 @@ pub struct AskUserQuestion {
 }
 
 /// 单题答案（上游 `AskUserQuestionAnswerItem`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AskUserAnswerItem {
     pub id: String,
     pub selected: Vec<String>,
@@ -221,12 +221,14 @@ pub struct AskUserRequest {
     pub questions: Vec<AskUserQuestion>,
 }
 
-/// 一次提问的归宿（上游 ask() 结果闭集的 rustdsh 阻塞面子集；timed 的
-/// pending/late-reply 半随后续批）。
+/// 一次提问的归宿（上游 ask()/askTimed() 结果闭集的 rustdsh 等价）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AskUserResolution {
     /// 用户提交了完整答案批（每题恰一项）。
     Answered(Vec<AskUserAnswerItem>),
+    /// 前台等待到期、问题仍可答（上游 `ASK_TIMED_OUT` → `{pending:true}`
+    /// 映射在工具层；宿主把问题移入仍可答注册表）。
+    TimedOut,
     /// 请求被撤回（轮次中止）——上游 `ASK_ABORTED`。
     Cancelled,
     /// 无可用答案通道（fail-closed）——上游 `NO_PROVIDER`。
@@ -235,7 +237,9 @@ pub enum AskUserResolution {
 
 /// 提问回调：宿主注入（弹提问卡、等用户提交），阻塞到有答案为止。
 /// 工具执行线程内调用——宿主用独立通道 + 轮询承载（审批槽同形）。
-pub type AskUserHook = Arc<dyn Fn(&AskUserRequest) -> AskUserResolution + Send + Sync>;
+/// `timeout_ms` = 前台等待毫秒（None = 无限等——legacy 阻塞形；到期由
+/// 宿主返回 `TimedOut` 并把问题移入仍可答注册表）。
+pub type AskUserHook = Arc<dyn Fn(&AskUserRequest, Option<u64>) -> AskUserResolution + Send + Sync>;
 
 /// 可后置注入的提问槽：工具构造时先持槽，宿主 UI 就绪后 `set`。
 /// 未接线时 `request` 返回 `Unavailable`（上游 NO_PROVIDER fail-closed 同语义）。
@@ -263,10 +267,11 @@ impl AskUserSlot {
     }
 
     /// 请求一次提问；未接线 = `Unavailable`（fail-closed）。
-    pub fn request(&self, req: &AskUserRequest) -> AskUserResolution {
+    /// `timeout_ms` 透传宿主钩子（legacy 阻塞形传 None）。
+    pub fn request(&self, req: &AskUserRequest, timeout_ms: Option<u64>) -> AskUserResolution {
         let hook = self.0.read().unwrap().clone();
         match hook {
-            Some(hook) => hook(req),
+            Some(hook) => hook(req, timeout_ms),
             None => AskUserResolution::Unavailable,
         }
     }
@@ -275,18 +280,54 @@ impl AskUserSlot {
 /// 跳答语义说明（上游 `skippedAnswerGuidance`，逐字；legacy 与 timed 描述共享）。
 pub const SKIPPED_ANSWER_GUIDANCE: &str = "An answer item with empty selected and no custom means the user skipped that question: continue without it, do not ask it again, and do not treat the skip as permission.";
 
-/// legacy 工具描述（上游 tool-ask-user `description`，逐字拼接）。
+/// timed 工具描述（上游 tool-ask-user/timed `description`，逐字拼接）。
 pub fn ask_user_tool_description() -> String {
     format!(
-        "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. {SKIPPED_ANSWER_GUIDANCE}"
+        "Ask brief, direct, self-contained questions about missing information, preferences, or decisions. \
+         Use user-facing terms; assume no knowledge of background work or internal names. \
+         Use distinct stable question IDs. {SKIPPED_ANSWER_GUIDANCE} \
+         A pending result instead means no answer batch arrived before the timeout and the user can still answer."
     )
 }
+
+/// pending 结果携带的指引（上游 `pendingNotice`，逐字；是结果 JSON 的
+/// message 字段而非旁白——记录的结果按一个 JSON 对象整体读回）。
+pub const ASK_USER_PENDING_NOTICE: &str = "No answer batch arrived before the timeout. This is pending, not a skipped answer. Continue useful independent work. The user can still answer; their reply will be a user message identified as answer_to_pending_question with this callId and the original questions. Do not treat this as permission.";
 
 /// 上游错误/状态文案（`user-questions` 服务词表，逐字）。
 pub const ASK_USER_ABORTED_MESSAGE: &str = "ask_user_question was aborted before the user answered";
 pub const ASK_USER_EMPTY_QUESTIONS_MESSAGE: &str = "ask_user_question requires at least one question";
 pub const ASK_USER_NO_PROVIDER_MESSAGE: &str = "no user-questions answerer accepted the request";
 pub const ASK_USER_DELEGATED_CALLER_MESSAGE: &str = "human interaction is unavailable while the calling agent is owned by another live agent; include the unresolved question or decision in the child agent's final result";
+pub const ASK_USER_TIMED_OUT_MESSAGE: &str = "ask_user_question timed out before the user answered";
+
+/// timeout 参数上限（上游 validateTimeout：-1 或 1..=2147483 秒）。
+pub const ASK_USER_TIMEOUT_MAX_SECS: i64 = 2_147_483;
+
+/// timeout 校验（上游 `validateTimeout`，文案逐字）：`None` = -1（无限
+/// 等、卡 keyed by callId），`Some(ms)` = 前台等待毫秒。
+pub fn validate_timeout(timeout: i64) -> Result<Option<u64>, String> {
+    if timeout != -1 && (timeout < 1 || timeout > ASK_USER_TIMEOUT_MAX_SECS) {
+        return Err(
+            "timeout must be -1 or a positive integer up to 2147483 seconds".into(),
+        );
+    }
+    Ok((timeout != -1).then(|| (timeout as u64) * 1000))
+}
+
+/// 问题 id 唯一性校验（上游 `validateQuestionIds`，文案逐字）。
+pub fn validate_question_ids(questions: &[AskUserQuestion]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for question in questions {
+        if !seen.insert(question.id.as_str()) {
+            return Err(format!(
+                "question id {} must be unique within this call",
+                serde_json::to_string(&question.id).unwrap_or_else(|_| "\"?\"".into())
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// 通用提问工具（legacy 阻塞形）：execute 阻塞到宿主 UI 给出答案批，
 /// 答案批作为普通工具结果回流模型（上游 execute 同语义）。
@@ -313,7 +354,7 @@ impl AskUserTool {
 
     /// 从模型入参解析问题批（上游 schemastery required 面的 rustdsh 等价：
     /// 形不合法报 invalid arguments）。
-    fn parse_questions(arguments: &Value) -> Result<Vec<AskUserQuestion>, String> {
+    pub fn parse_questions(arguments: &Value) -> Result<Vec<AskUserQuestion>, String> {
         let Some(items) = arguments.get("questions").and_then(|q| q.as_array()) else {
             return Err("invalid arguments: questions is required".into());
         };
@@ -378,7 +419,7 @@ impl Tool for AskUserTool {
                 "properties": {
                     "questions": {
                         "type": "array",
-                        "description": "Questions to ask the user before continuing.",
+                        "description": "Questions to ask the user.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -399,6 +440,10 @@ impl Tool for AskUserTool {
                                 "multi_select": { "type": "boolean", "description": "Whether the user may select more than one option. Defaults to false." }
                             }
                         }
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Wait seconds for the entire batch (default 120); omit unless the user specifies a duration. Use -1 only when an answer is required before proceeding."
                     }
                 }
             }),
@@ -413,6 +458,9 @@ impl Tool for AskUserTool {
         if questions.is_empty() {
             return ToolExecutionResult::error(ASK_USER_EMPTY_QUESTIONS_MESSAGE);
         }
+        if let Err(message) = validate_question_ids(&questions) {
+            return ToolExecutionResult::error(message);
+        }
         // 子代理拒答（上游 assertLiveRoot 的 DELEGATED_CALLER；探针缺省不查）
         {
             let probe = self.root_probe.lock().unwrap().clone();
@@ -422,14 +470,34 @@ impl Tool for AskUserTool {
                 }
             }
         }
+        // timeout（上游：默认 120s；-1 = 无限等且卡 keyed by callId）
+        let timeout_secs = input
+            .arguments
+            .get("timeout")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(120);
+        let timeout_ms = match validate_timeout(timeout_secs) {
+            Ok(ms) => ms,
+            Err(message) => return ToolExecutionResult::error(message),
+        };
         let request = AskUserRequest {
             call_id: input.call_id.as_str().to_string(),
             questions,
         };
-        match self.slot.request(&request) {
+        match self.slot.request(&request, timeout_ms) {
             AskUserResolution::Answered(items) => {
                 ToolExecutionResult::text(Self::answer_result_json(&items).to_string())
             }
+            // 前台等待到期：pending 结果（问题仍可答——不是跳答；上游
+            // `{pending:true, callId, message}` 逐字段）
+            AskUserResolution::TimedOut => ToolExecutionResult::text(
+                json!({
+                    "pending": true,
+                    "callId": input.call_id.as_str(),
+                    "message": ASK_USER_PENDING_NOTICE,
+                })
+                .to_string(),
+            ),
             AskUserResolution::Cancelled => ToolExecutionResult::error(ASK_USER_ABORTED_MESSAGE),
             AskUserResolution::Unavailable => {
                 ToolExecutionResult::error(ASK_USER_NO_PROVIDER_MESSAGE)
@@ -1217,12 +1285,19 @@ mod ask_user_tests {
     #[test]
     fn description_carries_skipped_answer_guidance_verbatim() {
         let tool = AskUserTool::new(AskUserSlot::new());
-        assert_eq!(
-            tool.definition().description,
-            "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. \
-             An answer item with empty selected and no custom means the user skipped that question: \
-             continue without it, do not ask it again, and do not treat the skip as permission."
-        );
+        // timed 描述（上游 timed.ts 逐字三段）
+        assert!(tool
+            .definition()
+            .description
+            .starts_with("Ask brief, direct, self-contained questions about missing information, preferences, or decisions."));
+        assert!(tool
+            .definition()
+            .description
+            .contains("A pending result instead means no answer batch arrived before the timeout and the user can still answer."));
+        assert!(tool
+            .definition()
+            .description
+            .contains("continue without it, do not ask it again, and do not treat the skip as permission."));
     }
 
     #[test]
@@ -1256,7 +1331,7 @@ mod ask_user_tests {
     #[test]
     fn answered_batch_flows_back_as_result_json() {
         let tool = AskUserTool::new(AskUserSlot::new());
-        tool.slot().set(std::sync::Arc::new(|req: &AskUserRequest| {
+        tool.slot().set(std::sync::Arc::new(|req: &AskUserRequest, _: Option<u64>| {
             // 请求形断言：call id + 问题字段原样借出
             assert_eq!(req.call_id, "call_ask");
             assert_eq!(req.questions.len(), 1);
@@ -1291,7 +1366,7 @@ mod ask_user_tests {
     fn cancelled_resolution_maps_to_aborted_message() {
         let tool = AskUserTool::new(AskUserSlot::new());
         tool.slot()
-            .set(std::sync::Arc::new(|_: &AskUserRequest| AskUserResolution::Cancelled));
+            .set(std::sync::Arc::new(|_: &AskUserRequest, _: Option<u64>| AskUserResolution::Cancelled));
         let input = ToolExecutionInput::with_raw_arguments(
             CallId("c".to_string()),
             "ask_user_question".to_string(),

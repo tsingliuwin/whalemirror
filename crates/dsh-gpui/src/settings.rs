@@ -1321,17 +1321,21 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                 Input::new(&app.edit_model_input).w_full(),
             ))
             .child(hint("输入模型 id 后回车（或点添加）；首行即路由默认模型。"))
-            .child({
-                let t_add = t.clone();
-                compact_action_button(
-                    "edit-model-add",
-                    "添加",
-                    false,
-                    move |_, _, cx| {
-                        t_add.update(cx, |v, cx| v.edit_add_model(cx));
-                    },
-                )
-            })
+            .child(
+                // compact_action_button 是行内 chip（h28/px10）——v_flex 里会
+                // 被拉伸成全宽横条，套 flex 行约束回行内宽度
+                div().flex().child({
+                    let t_add = t.clone();
+                    compact_action_button(
+                        "edit-model-add",
+                        "添加",
+                        false,
+                        move |_, _, cx| {
+                            t_add.update(cx, |v, cx| v.edit_add_model(cx));
+                        },
+                    )
+                }),
+            )
         })
         .child(
             // 自定义设置折叠（web details.customized：12/18 wt500 secondary + 旋转 chevron）

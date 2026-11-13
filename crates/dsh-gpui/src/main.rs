@@ -1117,7 +1117,7 @@ fn persist_user_config(
         if !p.base_url.is_empty() {
             def.insert("baseURL".into(), p.base_url.clone().into());
         }
-        def.insert("api".into(), "openai-completions".into());
+        def.insert("api".into(), protocol_wire(&p.protocol).into());
         let models: Vec<serde_yaml::Value> = p
             .models
             .iter()
@@ -2197,6 +2197,9 @@ pub(crate) struct AppView {
     /// 编辑卡「显示名称」输入（web ProviderEditor displayName；回写
     /// CustomProvider.name，落盘 displayName 字段）。
     edit_name_input: Entity<InputState>,
+    /// 编辑卡 API 协议（wire 标识；下拉选择，菜单经 edit_protocol_menu）。
+    edit_protocol: &'static str,
+    edit_protocol_menu: bool,
     /// 编辑卡模型行草稿池——**开卡时**在点击处理器里按当前模型行重建
     /// （InputState::new 需要 window，渲染期不能建实体）。官方蓝本：每行
     /// 两个可编辑框 + 展开体（上下文/最大输出/输入类型/推理等级）。
@@ -2525,6 +2528,8 @@ impl AppView {
         job_owner: job_owner.clone(),
         fs_observation,
         edit_name_input,
+        edit_protocol: "openai-completions",
+        edit_protocol_menu: false,
         edit_model_rows: Vec::new(),
         edit_row_open: std::collections::HashSet::new(),
         todos: Vec::new(),
@@ -6269,7 +6274,7 @@ impl AppView {
             name: entry.name.to_string(),
             base_url: base,
             api_key: key,
-            protocol: "openai".into(),
+            protocol: "openai-completions".into(),
             models: vec![CustomModel {
                 id: entry.model.to_string(),
                 display_name: String::new(),
@@ -6311,7 +6316,7 @@ impl AppView {
             name: if name.is_empty() { String::new() } else { name },
             base_url: base,
             api_key: key,
-            protocol: "openai".into(),
+            protocol: "openai-completions".into(),
             models: self
                 .dc_models
                 .iter()
@@ -6331,11 +6336,21 @@ impl AppView {
         Ok(())
     }
 
-    /// 注册一个自定义提供方的 adapter（OpenAI 兼容）。
+    /// 注册一个自定义提供方的 adapter（按 `protocol` 分派线协议；
+    /// openai-completions=DeepSeek 形，anthropic-messages=Anthropic
+    /// Messages 形——x-api-key + 顶层 system + tool_result 块）。
     fn register_custom(&self, p: &CustomProvider) {
-        let adapter = DeepSeekAdapter::with_base_url(&p.api_key, &p.base_url)
-            .with_image_fetcher(image_fetcher_for(sessions_dir().join("attachments/v1")));
-        let _ = self.llm.register_adapter(&[p.id.clone()], Arc::new(adapter));
+        let image = image_fetcher_for(sessions_dir().join("attachments/v1"));
+        let adapter: Arc<dyn dsh_llm::LlmAdapter> = match p.protocol.as_str() {
+            "anthropic-messages" => Arc::new(
+                dsh_llm_deepseek::AnthropicAdapter::with_base_url(&p.api_key, &p.base_url)
+                    .with_image_fetcher(image),
+            ),
+            _ => Arc::new(
+                DeepSeekAdapter::with_base_url(&p.api_key, &p.base_url).with_image_fetcher(image),
+            ),
+        };
+        let _ = self.llm.register_adapter(&[p.id.clone()], adapter);
     }
 
     /// 向 declare 卡追加一行模型（查重）。
@@ -6638,6 +6653,8 @@ impl AppView {
             .update(cx, |s, cx| s.set_value(p.name.clone(), window, cx));
         self.edit_base
             .update(cx, |s, cx| s.set_value(p.base_url.clone(), window, cx));
+        self.edit_protocol = protocol_wire(&p.protocol);
+        self.edit_protocol_menu = false;
         self.edit_model_rows = p
             .models
             .iter()
@@ -6706,6 +6723,22 @@ impl AppView {
         } else {
             row.modalities.push("image".to_string());
         }
+        cx.notify();
+    }
+
+    /// 编辑卡 API 协议下拉：选中 wire 标识。适配器未实现的协议如实拦截
+    /// （不放假选项——选了也连不通）。
+    fn edit_pick_protocol(&mut self, protocol: &'static str, cx: &mut Context<Self>) {
+        if !protocol_supported(protocol) {
+            self.pending_toasts.push(
+                "该协议适配器在建，当前可用：OpenAI Chat Completions、Anthropic Messages".into(),
+            );
+            self.edit_protocol_menu = false;
+            cx.notify();
+            return;
+        }
+        self.edit_protocol = protocol;
+        self.edit_protocol_menu = false;
         cx.notify();
     }
 
@@ -6796,6 +6829,7 @@ impl AppView {
                 if !name.is_empty() {
                     p.name = name;
                 }
+                p.protocol = self.edit_protocol.to_string();
             }
             self.apply_edit_model_rows(cx);
         }
@@ -6819,6 +6853,18 @@ impl AppView {
             if changed {
                 let snapshot = p.clone();
                 self.register_custom(&snapshot);
+            }
+            // 协议切换（或名称/模型行变更）同样需要按新协议重挂 adapter
+            if id != "deepseek" {
+                let snapshot = self
+                    .settings
+                    .providers
+                    .iter()
+                    .find(|p| p.id == id)
+                    .cloned();
+                if let Some(snapshot) = snapshot {
+                    self.register_custom(&snapshot);
+                }
             }
         }
         self.persist_settings();
@@ -13512,6 +13558,41 @@ fn valid_route_id(route: &str) -> bool {
         .split('-')
         .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
         && !route.ends_with('-')
+}
+
+/// 协议内部值 → settings.yaml `api` 的 wire 标识（web pi-ai 协议名）。
+/// 历史/缺省值 `openai` 归一为 `openai-completions`。
+fn protocol_wire(protocol: &str) -> &'static str {
+    match protocol {
+        "openai" | "" => "openai-completions",
+        "anthropic-messages" | "openai-responses" | "google-generative-ai" => {
+            // 常量直返需要 'static——这三种本身已是 wire 形
+            match protocol {
+                "anthropic-messages" => "anthropic-messages",
+                "openai-responses" => "openai-responses",
+                _ => "google-generative-ai",
+            }
+        }
+        "openai-completions" => "openai-completions",
+        _ => "openai-completions",
+    }
+}
+
+/// 协议是否有已实现的适配器（下拉可选集；其余两项点击如实拦截——
+/// 不放假选项）。
+fn protocol_supported(protocol: &str) -> bool {
+    matches!(protocol, "openai-completions" | "anthropic-messages")
+}
+
+/// 协议展示名（web protocol-label.ts：下拉显示产品名，值仍是 wire 标识）。
+fn protocol_label(protocol: &str) -> &'static str {
+    match protocol {
+        "openai-completions" | "openai" | "" => "OpenAI Chat Completions",
+        "openai-responses" => "OpenAI Responses",
+        "anthropic-messages" => "Anthropic Messages",
+        "google-generative-ai" => "Google Gemini",
+        _ => "OpenAI Chat Completions",
+    }
 }
 
 /// 容量拼法（web formatCapacity：K=1000、M=1000000，整除才缩写）。

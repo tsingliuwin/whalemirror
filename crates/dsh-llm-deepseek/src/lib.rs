@@ -8,10 +8,12 @@
 //! `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` back out of the prompt
 //! total.
 
-mod adapter;
+pub mod adapter;
+pub mod anthropic;
 mod discovery;
 pub mod listing;
 pub mod listing_cache;
 
 pub use adapter::DeepSeekAdapter;
+pub use anthropic::AnthropicAdapter;
 pub use discovery::{DiscoveredModel, DiscoveryError, discover_models};

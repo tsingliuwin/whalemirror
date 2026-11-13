@@ -1191,15 +1191,20 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                         d.child(field("显示名称", Input::new(&app.edit_name_input).w_full()))
                     })
                     .child(field("API 地址", Input::new(&app.edit_base).w_full()))
-                    // API 协议（官方下拉三协议；rustdsh 当前仅支持 OpenAI
-                    // 兼容端点——如实呈现当前值，选择面登记 backlog #125）
-                    .child(field(
-                        "API 协议",
-                        div()
+                    // API 协议（官方下拉：四协议，值存 wire 标识。适配器
+                    // 未实现的两项标「适配器在建」并在点击时如实拦截——
+                    // 不放假选项）
+                    .when(id != "deepseek", |d| {
+                        let t_proto = this.clone();
+                        let menu_open = app.edit_protocol_menu;
+                        let current = app.edit_protocol;
+                        let proto_field = div()
+                            .id("edit-protocol")
                             .w_full()
                             .h(px(32.0))
                             .flex()
                             .items_center()
+                            .justify_between()
                             .px(px(10.0))
                             .rounded(px(8.0))
                             .border(px(0.5))
@@ -1208,8 +1213,88 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                             .text_size(px(theme::FONT_ROW))
                             .line_height(px(22.0))
                             .text_color(tk.text)
-                            .child("OpenAI Chat Completions"),
-                    ))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(tk.hover))
+                            .on_click(move |_, _, cx| {
+                                t_proto.update(cx, |v, cx| {
+                                    v.edit_protocol_menu = !v.edit_protocol_menu;
+                                    cx.notify();
+                                });
+                            })
+                            .child(div().child(crate::protocol_label(current)))
+                            .child(
+                                div()
+                                    .text_size(px(theme::FONT_CAPTION))
+                                    .text_color(tk.text_3)
+                                    .child(if menu_open { "▴" } else { "▾" }),
+                            );
+                        let proto_menu = if menu_open {
+                            let entries: &[(&'static str, &'static str, bool)] = &[
+                                ("openai-completions", "OpenAI Chat Completions", true),
+                                ("openai-responses", "OpenAI Responses（适配器在建）", false),
+                                ("anthropic-messages", "Anthropic Messages", true),
+                                ("google-generative-ai", "Google Gemini（适配器在建）", false),
+                            ];
+                            let mut menu = div()
+                                .absolute()
+                                .top(px(36.0))
+                                .left_0()
+                                .w_full()
+                                .v_flex()
+                                .p(px(4.0))
+                                .rounded(px(12.0))
+                                .bg(tk.menu)
+                                .shadow(theme::elevation_prominent())
+                                .occlude();
+                            for (wire, label, supported) in entries {
+                                let t_item = this.clone();
+                                let wire = *wire;
+                                let selected = current == wire;
+                                menu = menu.child(
+                                    div()
+                                        .id(SharedString::from(format!("proto-{wire}")))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .px(px(10.0))
+                                        .py(px(6.0))
+                                        .rounded(px(8.0))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(tk.hover))
+                                        .on_click(move |_, _, cx| {
+                                            let wire = wire;
+                                            t_item.update(cx, |v, cx| {
+                                                v.edit_pick_protocol(wire, cx)
+                                            });
+                                        })
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_size(px(theme::FONT_ROW))
+                                                .line_height(px(22.0))
+                                                .text_color(if *supported { tk.text } else { tk.text_3 })
+                                                .child(*label),
+                                        )
+                                        .when(selected, |r| {
+                                            r.child(
+                                                Icon::new(IconName::Check)
+                                                    .size(px(16.0))
+                                                    .text_color(tk.text),
+                                            )
+                                        }),
+                                );
+                            }
+                            Some(menu)
+                        } else {
+                            None
+                        };
+                        // relative 挂在控件上：菜单锚定输入行正下方
+                        // （field() 的标签在上方，外壳锚定会被标签顶偏）
+                        d.child(field(
+                            "API 协议",
+                            div().relative().child(proto_field).children(proto_menu),
+                        ))
+                    })
                     // 模型目录：头行（状态 + 获取可用模型）+ 行编辑池 + 添加钮
                     .child(
                         div()

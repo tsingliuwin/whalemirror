@@ -598,7 +598,7 @@ impl StreamCtx {
 
 /// Extract one complete SSE event (up to and including a blank line) from the
 /// front of `buf`, if present. Handles both `\n\n` and `\r\n\r\n`.
-fn take_event(buf: &mut Vec<u8>) -> Option<String> {
+pub(crate) fn take_event(buf: &mut Vec<u8>) -> Option<String> {
     let (pos, sep_len) = if let Some(p) = buf.windows(2).position(|w| w == b"\n\n") {
         (p, 2)
     } else if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {

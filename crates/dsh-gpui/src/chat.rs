@@ -3245,18 +3245,49 @@ Role::Notice => {
                             let mut card = div()
                                 .w_full()
                                 .v_flex()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .line_height(px(20.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme::t().text_2)
-                                        .child(format!(
-                                            "已编辑 {} 个文件  +{} -{}",
-                                            changes.len(), total_added, total_deleted
-                                        )),
-                                );
+                                .gap(px(2.0));
+                            // 标题行（点击切换展开/收起）
+                            let t_toggle = this.clone();
+                            let was_open = open_state;
+                            card = card.child(
+                                div()
+                                    .id(SharedString::from(format!("wc-toggle-{ei}")))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.8))
+                                    .on_click(move |_, _, cx| {
+                                        t_toggle.update(cx, |v, cx| {
+                                            if let Some(entry) = v.entries.get_mut(ei) {
+                                                if let Some(ctx) = entry.context.as_mut() {
+                                                    if ctx.changes_files.is_some() {
+                                                        entry.open = !was_open;
+                                                    }
+                                                }
+                                            }
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .line_height(px(20.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme::t().text_2)
+                                            .child(format!(
+                                                "已编辑 {} 个文件  +{} -{}",
+                                                changes.len(), total_added, total_deleted
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .line_height(px(18.0))
+                                            .text_color(theme::t().text_3)
+                                            .child(if open_state { "收起" } else { "展开" }),
+                                    ),
+                            );
                             let visible: Vec<_> = if open_state {
                                 changes.iter().collect()
                             } else {

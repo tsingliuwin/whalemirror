@@ -2200,6 +2200,12 @@ pub(crate) struct AppView {
     /// 编辑卡 API 协议（wire 标识；下拉选择，菜单经 edit_protocol_menu）。
     edit_protocol: &'static str,
     edit_protocol_menu: bool,
+    /// 挂起的 fallback 标题（session_id → 标题文本）：首条 user 消息
+    /// **落盘后**由漏斗补写（官方日志形态：user/message 先行、session/title
+    /// 引用其 seq；官方校验器 titleSources 要求非 user 源标题必须带更早的
+    /// user 源引用——曾先写标题后落消息导致引用无从写起，web 拒载）。
+    pending_fallback_titles:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     /// 编辑卡模型行草稿池——**开卡时**在点击处理器里按当前模型行重建
     /// （InputState::new 需要 window，渲染期不能建实体）。官方蓝本：每行
     /// 两个可编辑框 + 展开体（上下文/最大输出/输入类型/推理等级）。
@@ -2377,6 +2383,9 @@ impl AppView {
         goal_store: Arc<dsh_goal::GoalStore>,
         schedule: Arc<dsh_gpui::schedule_host::ScheduleState>,
         edit_name_input: Entity<InputState>,
+        pending_fallback_titles: Arc<
+            std::sync::Mutex<std::collections::HashMap<String, String>>,
+        >,
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
@@ -2528,6 +2537,7 @@ impl AppView {
         job_owner: job_owner.clone(),
         fs_observation,
         edit_name_input,
+        pending_fallback_titles,
         edit_protocol: "openai-completions",
         edit_protocol_menu: false,
         edit_model_rows: Vec::new(),
@@ -2941,6 +2951,7 @@ impl AppView {
                 &cwd,
                 &SessionEvent::SessionTitle {
                     title,
+                    message_seqs: Vec::new(),
                     source: dsh_session::TitleSource::User,
                 },
             );
@@ -3034,12 +3045,34 @@ impl AppView {
         }
         meta.title = title.clone();
         meta.title_source = dsh_session::TitleSource::Provider;
-        if let Some(cwd) = meta.cwd.clone() {
+        // 官方校验器（titleSources）：provider 标题的 messageSeqs 必须是
+        // 请求输入里更早的 user 源消息 seq（唯一有序）——落盘时重扫合格
+        // 提问取真实 seq（触发消息此时已落盘）。空集（理论不达）不落盘，
+        // 避免写出官方拒绝的行。
+        let seqs: Vec<u64> = {
+            let session = self.agent.session();
+            let session = session.lock().unwrap();
+            session
+                .entries()
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        &e.event,
+                        SessionEvent::UserMessage(m) if m.source == MessageSource::User
+                    )
+                })
+                .map(|e| e.seq)
+                .collect()
+        };
+        if let Some(cwd) = meta.cwd.clone()
+            && !seqs.is_empty()
+        {
             let _ = self.recorder.append(
                 session_id,
                 &cwd,
                 &SessionEvent::SessionTitle {
                     title,
+                    message_seqs: seqs,
                     source: dsh_session::TitleSource::Provider,
                 },
             );
@@ -3079,11 +3112,22 @@ impl AppView {
                 .map(|m| m.title.clone())
                 .unwrap_or_else(|| "新会话".into()),
         );
+        // 子会话 fallback 标题引用源日志首条 user 源消息（复制保序 →
+        // 子会话同 seq；官方校验器要求非 user 源标题必须带更早引用）
+        let first_user_seq = source.entries().iter().find_map(|e| {
+            matches!(
+                &e.event,
+                SessionEvent::UserMessage(m)
+                    if matches!(m.source, dsh_llm::MessageSource::User)
+            )
+            .then_some(e.seq)
+        });
         let _ = self.recorder.append(
             &child_id,
             &cwd,
             &SessionEvent::SessionTitle {
                 title: child_title.clone(),
+                message_seqs: first_user_seq.into_iter().collect(),
                 source: dsh_session::TitleSource::Fallback,
             },
         );
@@ -4060,10 +4104,28 @@ impl AppView {
         {
             let sink_runtime = Arc::clone(&runtime);
             let sink_recorder = Arc::clone(&self.recorder);
+            let pending_runtime = Arc::clone(&self.pending_fallback_titles);
             let sink_cwd = cwd.unwrap_or_default();
             runtime.set_event_sink(move |event| {
                 let id = sink_runtime.session().lock().unwrap().id.clone();
-                let _ = sink_recorder.append(&id, &sink_cwd, &event);
+                let seq = sink_recorder.append(&id, &sink_cwd, &event);
+                // 挂起的 fallback 标题：首条 user 源消息落盘后补写（同主漏斗）
+                if let SessionEvent::UserMessage(message) = &event
+                    && matches!(message.source, dsh_llm::MessageSource::User)
+                    && let Ok(user_seq) = seq
+                    && let Some(title) =
+                        pending_runtime.lock().unwrap().remove(id.as_str())
+                {
+                    let _ = sink_recorder.append(
+                        &id,
+                        &sink_cwd,
+                        &SessionEvent::SessionTitle {
+                            title,
+                            message_seqs: vec![user_seq],
+                            source: dsh_session::TitleSource::Fallback,
+                        },
+                    );
+                }
             });
         }
         runtime.spawn();
@@ -5565,18 +5627,16 @@ impl AppView {
                 meta.title =
                     dsh_plugin::fallback_title(text, dsh_plugin::FALLBACK_MAX_WORDS, dsh_plugin::FALLBACK_MAX_BYTES);
                 meta.title_source = dsh_session::TitleSource::Fallback;
-                // 标题落盘（web session/title 事件 + session_projcache 投影行），
-                // 否则 web 端看到的本会话永远无标题
+                // 标题挂起：漏斗在本会话首条 user 消息落盘后补写（官方
+                // session/title 的 messageSeqs 必须引用该消息的 seq，且
+                // 引用行必须早于标题行——先写标题则引用无从写起，官方
+                // 校验器拒载整份日志）。挂起即更新侧栏（无 seq 时 web 看
+                // projcache 标题，漏斗落盘后随刷新收敛）。
                 let title = meta.title.clone();
-                let cwd = self.current_cwd.clone();
-                let _ = self.recorder.append(
-                    &current,
-                    &cwd,
-                    &SessionEvent::SessionTitle {
-                        title,
-                        source: dsh_session::TitleSource::Fallback,
-                    },
-                );
+                self.pending_fallback_titles
+                    .lock()
+                    .unwrap()
+                    .insert(current.as_str().to_string(), title);
                 self.refresh_sidebar(cx);
             }
         }
@@ -6028,10 +6088,28 @@ impl AppView {
         // 持久化 sink：事件落该会话日志（recorder 按 id 归桶）
         let sink_runtime = Arc::clone(&runtime);
         let sink_recorder = Arc::clone(&self.recorder);
+        let pending_runtime = Arc::clone(&self.pending_fallback_titles);
         let sink_cwd = cwd.clone().unwrap_or_default();
         runtime.set_event_sink(move |event| {
             let id = sink_runtime.session().lock().unwrap().id.clone();
-            let _ = sink_recorder.append(&id, &sink_cwd, &event);
+            let seq = sink_recorder.append(&id, &sink_cwd, &event);
+            // 挂起的 fallback 标题：首条 user 源消息落盘后补写（同主漏斗）
+            if let SessionEvent::UserMessage(message) = &event
+                && matches!(message.source, dsh_llm::MessageSource::User)
+                && let Ok(user_seq) = seq
+                && let Some(title) =
+                    pending_runtime.lock().unwrap().remove(id.as_str())
+            {
+                let _ = sink_recorder.append(
+                    &id,
+                    &sink_cwd,
+                    &SessionEvent::SessionTitle {
+                        title,
+                        message_seqs: vec![user_seq],
+                        source: dsh_session::TitleSource::Fallback,
+                    },
+                );
+            }
         });
         // UI 事件泵（固有会话标签按属主路由）
         let rx = runtime.subscribe();
@@ -12333,10 +12411,30 @@ fn main() {
     // - `turn/end` → 驱动器的轮末分支（max-tokens 解除武装 / aborted 标记）。
     let goal_driver_sink = Arc::clone(&goal_driver);
     let goal_agent_sink = Arc::clone(&agent);
+    let pending_fallback_titles: Arc<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let pending_titles = Arc::clone(&pending_fallback_titles);
     agent.set_event_sink(move |event| {
         let id = goal_agent_sink.session().lock().unwrap().id.clone();
         let cwd = cwd_slot_sink.lock().unwrap().clone();
-        let _ = recorder_sink.append(&id, &cwd, &event);
+        let seq = recorder_sink.append(&id, &cwd, &event);
+        // 挂起的 fallback 标题：首条 user 源消息落盘后补写（引用其 seq）
+        if let SessionEvent::UserMessage(message) = &event
+            && matches!(message.source, dsh_llm::MessageSource::User)
+            && let Ok(user_seq) = seq
+            && let Some(title) = pending_titles.lock().unwrap().remove(id.as_str())
+        {
+            let _ = recorder_sink.append(
+                &id,
+                &cwd,
+                &SessionEvent::SessionTitle {
+                    title,
+                    message_seqs: vec![user_seq],
+                    source: dsh_session::TitleSource::Fallback,
+                },
+            );
+        }
         match &event {
             SessionEvent::UserMessage(message) => {
                 if matches!(&message.source, dsh_llm::MessageSource::Goal { .. }) {
@@ -13108,6 +13206,7 @@ fn main() {
                         Arc::clone(&goal_store),
                         Arc::clone(&schedule_state),
                         edit_name_input.clone(),
+                        Arc::clone(&pending_fallback_titles),
                         cx,
                     )
                 });

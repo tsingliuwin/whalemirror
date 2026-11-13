@@ -284,6 +284,13 @@ pub enum SessionEvent {
     },
     SessionTitle {
         title: String,
+        /// 引用的 user/message seqs（web `messageSeqs`）。官方校验器
+        /// （session-format relationships.ts titleSources）：messageSeqs
+        /// 为空 ⇔ user 源（手动改名）；非 user 源必须非空且指向**更早**的
+        /// user 源 user/message 行——rustdsh 历史写形恒空导致官方 web 拒载
+        /// （SessionFormatError）。
+        #[serde(default, rename = "messageSeqs")]
+        message_seqs: Vec<u64>,
         /// 标题来源（web SessionTitleSource；旧日志缺省 = fallback）。
         #[serde(default)]
         source: TitleSource,

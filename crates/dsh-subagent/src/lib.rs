@@ -313,6 +313,9 @@ prompt as a complete brief. This call waits for the subagent and returns its fin
                 &child_id,
                 &SessionEvent::SessionTitle {
                     title: description.clone(),
+                    // 空 seqs 由宿主子漏斗挂起重写（官方校验器：fallback
+                    // 标题必须引用更早的 user 源消息 seq）
+                    message_seqs: Vec::new(),
                     source: dsh_session::TitleSource::Fallback,
                 },
             );

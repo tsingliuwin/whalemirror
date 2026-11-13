@@ -527,7 +527,10 @@ impl SessionRecorder {
     ///   （`assistant/message`）时压缩嵌入 `data.stream`。
     /// - 重试/轮末等边界事件触发缓冲冲刷：上一次尝试无表面消息 →
     ///   落 `assistant/attempt` 行（上游 agent-loop 的 settle 语义）。
-    pub fn append(&self, id: &SessionId, cwd: &str, event: &SessionEvent) -> io::Result<()> {
+    /// 返回本事件落盘的 seq（chunk 缓冲/不落盘辅助事件返回 0）。官方
+    /// session/title 的 messageSeqs 需引用 user 消息 seq——宿主漏斗在
+    /// user 消息落盘后补写标题时取此值。
+    pub fn append(&self, id: &SessionId, cwd: &str, event: &SessionEvent) -> io::Result<u64> {
         // 规范桶锚定：写入永远落在会话自身的日志上（hint 只在 id 尚无
         // 任何文件时作为新建位置），杜绝 cwd 口径漂移产生跨桶副本
         let mut file = match self.resolve_file(id, Some(cwd)) {
@@ -578,7 +581,7 @@ impl SessionRecorder {
                 .entry(id.as_str().to_string())
                 .or_default()
                 .push((now_ms(), *turn, *step, chunk.clone()));
-            return Ok(());
+            return Ok(0);
         }
         // 边界事件：先冲刷进行中的 attempt（缓冲非空 = 上一次尝试已失败/
         // 中断/结束而无表面消息）
@@ -603,7 +606,7 @@ impl SessionRecorder {
         let mut row = match event_to_web_line(event, seq, now_ms()) {
             Some(row) => row,
             // 不落盘的辅助事件：也不消耗 seq（与整档重写语义一致）
-            None => return Ok(()),
+            None => return Ok(0),
         };
         // settlement 行内嵌本次 attempt 的流（上游 v2：message.stream 必填）
         if let SessionEvent::AssistantMessage { .. } = event {
@@ -613,7 +616,7 @@ impl SessionRecorder {
         }
         self.append_frame(&file, &format!("{}\n", row))?;
         self.mark_seq(id, seq);
-        Ok(())
+        Ok(seq)
     }
 
     /// 冲刷进行中的 attempt 缓冲为 `assistant/attempt` 行（缓冲空 → None）。
@@ -1369,14 +1372,19 @@ pub fn web_line_to_event(v: &serde_json::Value) -> Option<SessionEvent> {
             turn: num(data, "turn"),
             step: num(data, "step"),
         }),
-        // 会话标题（web SessionTitleEventData：title + source，latest-wins；
-        // 旧行缺 source 回 fallback）
+        // 会话标题（web SessionTitleEventData：title + messageSeqs + source，
+        // latest-wins；旧行缺 source 回 fallback；messageSeqs 旧行可缺省空）
         "session/title" => Some(SessionEvent::SessionTitle {
             title: data?
                 .get("title")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            message_seqs: data
+                .and_then(|d| d.get("messageSeqs"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_u64()).collect())
+                .unwrap_or_default(),
             source: dsh_session::TitleSource::from_kind(
                 data.and_then(|d| d.get("source"))
                     .and_then(|s| s.get("kind"))
@@ -2027,9 +2035,9 @@ pub fn event_to_web_line(ev: &SessionEvent, seq: u64, time: u64) -> Option<serde
                 "model": model,
             }),
         )),
-        SessionEvent::SessionTitle { title, source } => Some(row(
+        SessionEvent::SessionTitle { title, message_seqs, source } => Some(row(
             "session/title",
-            serde_json::json!({"title": title, "messageSeqs": [], "source": {"kind": source.kind()}}),
+            serde_json::json!({"title": title, "messageSeqs": message_seqs, "source": {"kind": source.kind()}}),
         )),
         // 权限三旋钮（web 行形：data.{preset|mode|policy}）
         SessionEvent::PermissionPreset { preset } => Some(row(
@@ -2281,15 +2289,20 @@ mod tests {
             (dsh_session::TitleSource::Provider, "provider"),
             (dsh_session::TitleSource::User, "user"),
         ] {
-            let ev = SessionEvent::SessionTitle { title: "随动".into(), source };
+            let ev = SessionEvent::SessionTitle {
+                title: "随动".into(),
+                message_seqs: vec![3, 7],
+                source,
+            };
             let row = event_to_web_line(&ev, 7, 100).unwrap();
             assert_eq!(row["type"], "session/title");
             assert_eq!(row["data"]["title"], "随动");
             assert_eq!(row["data"]["source"]["kind"], kind);
             let parsed = web_line_to_event(&row).unwrap();
             match parsed {
-                SessionEvent::SessionTitle { title, source } => {
+                SessionEvent::SessionTitle { title, message_seqs, source } => {
                     assert_eq!(title, "随动");
+                    assert_eq!(message_seqs, vec![3, 7], "messageSeqs 往返（web 互通校验字段）");
                     assert_eq!(source.kind(), kind);
                 }
                 other => panic!("wrong event {other:?}"),
@@ -2329,6 +2342,7 @@ mod tests {
             "/tmp/ws",
             &SessionEvent::SessionTitle {
                 title: "你好".into(),
+                message_seqs: Vec::new(),
                 source: dsh_session::TitleSource::Fallback,
             },
         )
@@ -2448,7 +2462,7 @@ mod tests {
         // 无 create：直接追加首事件（pin 形）
         rec.append(&id, "/tmp/ws", &SessionEvent::PermissionPreset { preset: "workspace-write".into() })
             .expect("first append materializes");
-        rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback })
+        rec.append(&id, "/tmp/ws", &SessionEvent::SessionTitle { title: "t".into(), message_seqs: Vec::new(), source: dsh_session::TitleSource::Fallback })
             .expect("second append");
         let (loaded, _) = rec.load(&id, Some("/tmp/ws")).expect("materialized session loads");
         let types: Vec<&str> = loaded
@@ -2777,7 +2791,7 @@ mod tests {
         rec.append(
             &id,
             "/tmp/ws",
-            &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback },
+            &SessionEvent::SessionTitle { title: "t".into(), message_seqs: Vec::new(), source: dsh_session::TitleSource::Fallback },
         )
         .unwrap();
         assert!(
@@ -2812,6 +2826,7 @@ mod tests {
             "/tmp/ws",
             &SessionEvent::SessionTitle {
                 title: "旧面".into(),
+                message_seqs: Vec::new(),
                 source: dsh_session::TitleSource::Fallback,
             },
         )
@@ -2841,6 +2856,7 @@ mod tests {
             "/tmp/ws",
             &SessionEvent::SessionTitle {
                 title: "新面".into(),
+                message_seqs: Vec::new(),
                 source: dsh_session::TitleSource::Fallback,
             },
         )
@@ -3146,7 +3162,7 @@ mod tests {
         rec.append(
             &id,
             "/tmp/ws-b",
-            &SessionEvent::SessionTitle { title: "t".into(), source: dsh_session::TitleSource::Fallback },
+            &SessionEvent::SessionTitle { title: "t".into(), message_seqs: Vec::new(), source: dsh_session::TitleSource::Fallback },
         )
         .unwrap();
         rec.append(

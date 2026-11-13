@@ -5,6 +5,8 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::{Disableable, checkbox::Checkbox};
+use gpui_component::switch::Switch;
 use gpui_component::{Icon, IconName, StyledExt, input::{Input, InputState}};
 
 use crate::{AppView, AppearanceMode, AddingMode, EditModelRow, EnterBehavior, FetchTarget, SettingsTab, TranscriptView, PROVIDER_CATALOG, valid_route_id};
@@ -2577,56 +2579,8 @@ fn fetch_modal(app: &AppView, this: &Entity<AppView>, _target: &FetchTarget, cx:
 
 
 /// 行展开「输入类型」复选框（官方 ☑ 样式：14px 方框；文本恒选禁用态）。
-fn check_glyph(checked: bool, disabled: bool, tk: &theme::Tokens) -> Div {
-    let mut box_el = div()
-        .w(px(14.0))
-        .h(px(14.0))
-        .rounded(px(3.0))
-        .flex()
-        .items_center()
-        .justify_center();
-    box_el = if checked {
-        box_el.bg(tk.accent).child(
-            div()
-                .text_size(px(10.0))
-                .line_height(px(14.0))
-                .text_color(gpui::white())
-                .child("✓"),
-        )
-    } else {
-        box_el.border(px(1.0)).border_color(if disabled { tk.border_l3 } else { tk.border_l2 })
-    };
-    box_el
-}
 
 /// 行展开「推理等级」开关（官方 toggle：36×20 胶囊 + 白钮；开 = accent）。
-fn switch_toggle(
-    on: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Stateful<Div> {
-    let tk = crate::theme::t();
-    div()
-        .id("edit-row-reasoning-switch")
-        .w(px(36.0))
-        .h(px(20.0))
-        .rounded_full()
-        .flex()
-        .items_center()
-        .px(px(2.0))
-        .cursor_pointer()
-        .when(on, |d| d.bg(tk.accent))
-        .when(!on, |d| d.bg(tk.layer1).border(px(0.5)).border_color(tk.border_l3))
-        .on_click(on_click)
-        .child(
-            div()
-                .w(px(16.0))
-                .h(px(16.0))
-                .rounded_full()
-                .bg(gpui::white())
-                .when(on, |d| d.ml_auto())
-                .when(!on, |d| d.mr_auto()),
-        )
-}
 
 
 /// 编辑卡行展开体（官方 ModelListEditor 展开区：上下文窗口 | 最大输出
@@ -2650,19 +2604,21 @@ fn edit_row_expanded(
             .text_color(tk.text_2)
             .child(text)
     };
-    let modal_label = |text: &'static str, on: bool, disabled: bool| {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .child(check_glyph(on, disabled, &tk))
-            .child(
-                div()
-                    .text_size(px(theme::FONT_ROW))
-                    .line_height(px(22.0))
-                    .text_color(if disabled { tk.text_3 } else { tk.text })
-                    .child(text),
-            )
+    // gpui-component Checkbox（web 原生复选框等价）：文本恒选禁用态，
+    // 图片可点切换（on_click &bool=点击后的状态）
+    let modal_label = |text: &'static str, on: bool, disabled: bool,
+                       this: &Entity<AppView>, ix: usize| {
+        let mut cb = Checkbox::new(SharedString::from(format!("edit-row-{text}-{ix}")))
+            .checked(on)
+            .label(text)
+            .when(disabled, |c| c.disabled(true));
+        if !disabled {
+            let t = this.clone();
+            cb = cb.on_click(move |_checked, _, cx| {
+                t.update(cx, |v, cx| v.edit_toggle_row_image(ix, cx));
+            });
+        }
+        cb
     };
     div()
         .v_flex()
@@ -2683,20 +2639,8 @@ fn edit_row_expanded(
                 .items_center()
                 .gap(px(10.0))
                 .child(caption("输入类型"))
-                .child(modal_label("文本", true, true))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("edit-row-img-{ix}")))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            let ix = ix;
-                            t_img.update(cx, |v, cx| v.edit_toggle_row_image(ix, cx));
-                        })
-                        .child(modal_label("图片", image_on, false)),
-                ),
+                .child(modal_label("文本", true, true, this, ix))
+                .child(modal_label("图片", image_on, false, this, ix)),
         )
         // 推理等级：开关 + 声明行（开=写入默认档；声明行可写显式值）
         .child(
@@ -2710,12 +2654,17 @@ fn edit_row_expanded(
                         .flex()
                         .items_center()
                         .gap(px(4.0))
-                        .child(switch_toggle(reason_on, move |_, window, cx| {
-                            let ix = ix;
-                            t_reason.update(cx, |v, cx| {
-                                v.edit_toggle_row_reasoning(ix, window, cx)
-                            });
-                        }))
+                        .child({
+                            let t_sw = t_reason.clone();
+                            Switch::new(SharedString::from(format!("edit-row-reason-{ix}")))
+                                .checked(reason_on)
+                                .on_click(move |_, window, cx| {
+                                    let ix = ix;
+                                    t_sw.update(cx, |v, cx| {
+                                        v.edit_toggle_row_reasoning(ix, window, cx)
+                                    });
+                                })
+                        })
                         .child(
                             div()
                                 .text_size(px(theme::FONT_CAPTION))

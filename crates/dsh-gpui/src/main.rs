@@ -2635,12 +2635,18 @@ impl AppView {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| path.clone());
         let id = uuid::Uuid::new_v4().to_string();
-        self.workspaces.push(WorkspaceInfo {
-            id: id.clone(),
-            title,
-            path,
-            session_ids: Vec::new(),
-        });
+        // 上游 workspace registry：新创建的工作区 **prepend** 到耐久顺序
+        // 最前（workspace/workspace/src/index.ts:243 注释原话），侧栏里新
+        // 加的工作区出现在顶部而不是沉底。
+        self.workspaces.insert(
+            0,
+            WorkspaceInfo {
+                id: id.clone(),
+                title,
+                path,
+                session_ids: Vec::new(),
+            },
+        );
         self.current_workspace = Some(id);
         self.sync_fs_sandbox();
         save_workspaces(&self.workspaces);

@@ -7,7 +7,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{Icon, IconName, StyledExt, input::{Input, InputState}};
 
-use crate::{AppView, AppearanceMode, AddingMode, EnterBehavior, FetchTarget, SettingsTab, TranscriptView, PROVIDER_CATALOG, valid_route_id};
+use crate::{AppView, AppearanceMode, AddingMode, EditModelRow, EnterBehavior, FetchTarget, SettingsTab, TranscriptView, PROVIDER_CATALOG, valid_route_id};
 use crate::theme;
 
 /// 设置弹层（挂在根视图最上层）。
@@ -1246,50 +1246,117 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                                             ),
                                     )
                                     .when(id != "deepseek", |d| {
+                                        let t_reset = this.clone();
                                         let target = FetchTarget::Edit(id.to_string());
-                                        d.child(fetch_link(app, this, &target, cx))
+                                        d.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(10.0))
+                                                .child(compact_action_button(
+                                                    "edit-models-reset",
+                                                    "恢复默认模型",
+                                                    false,
+                                                    move |_, window, cx| {
+                                                        t_reset.update(cx, |v, cx| {
+                                                            v.edit_reset_models(window, cx)
+                                                        });
+                                                    },
+                                                ))
+                                                .child(fetch_link(app, this, &target, cx)),
+                                        )
                                     }),
                             )
                             // 行编辑池：每行 [模型 id][显示名称][删除]。官方行
                             // 另有拖拽手柄与展开（容量/上限/推理逐行）——登记
-                            // backlog #42，首行字段由下方「路由默认模型」承担。
+                            // 官方行形态：≡ 手柄 + [模型 id][显示名称] +
+                            // ▾ 展开（上下文/最大输出双列 + 输入类型复选框 +
+                            // 推理等级开关+声明行）+ 🗑 删除。
                             .child({
-                                let mut rows = div().v_flex().gap(px(4.0));
+                                let mut rows = div().v_flex().gap(px(6.0));
                                 if id == "deepseek" {
+                                    // 内置目录：行 = 名称 + 容量 chip（就地编辑，
+                                    // #95 能力；官方内置目录行为只读展示+恢复默认）
                                     for m in &models {
-                                        rows = rows.child(
-                                            div()
-                                                .text_size(px(theme::FONT_ROW))
-                                                .line_height(px(22.0))
-                                                .text_color(tk.text)
-                                                .child(m.clone()),
-                                        );
+                                        rows = rows.child(model_capacity_row(
+                                            app, this, id, m, &String::new(), cx,
+                                        ));
                                     }
                                 } else {
-                                    for (ix, (id_in, name_in)) in app.edit_model_rows.iter().enumerate() {
-                                        let t_del = this.clone();
+                                    for (ix, row) in app.edit_model_rows.iter().enumerate() {
+                                        let t_row = this.clone();
                                         let i = ix;
-                                        rows = rows.child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .child(Input::new(id_in).w_full())
-                                                .child(Input::new(name_in).w_full())
-                                                .child(
-                                                    div().flex().child(compact_action_button(
-                                                        SharedString::from(format!("edit-row-del-{i}")),
-                                                        "删除",
-                                                        true,
-                                                        move |_, _, cx| {
-                                                            let ix = i;
-                                                            t_del.update(cx, |v, cx| {
-                                                                v.edit_remove_model_row(ix, cx)
-                                                            });
-                                                        },
-                                                    )),
-                                                ),
-                                        );
+                                        let open = app.edit_row_open.contains(&ix);
+                                        let reason_on = !app
+                                            .edit_model_rows
+                                            .get(ix)
+                                            .is_some_and(|r| {
+                                                r.reason_in
+                                                    .read_with(cx, |s, _| s.value().trim().is_empty())
+                                            });
+                                        let image_on = row.modalities.iter().any(|m| m == "image");
+                                        let mut body = div()
+                                            .v_flex()
+                                            .gap(px(6.0))
+                                            .rounded(px(8.0))
+                                            .border(px(0.5))
+                                            .border_color(tk.border_l4)
+                                            .px(px(8.0))
+                                            .py(px(6.0))
+                                            // 行头
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(6.0))
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(theme::FONT_ROW))
+                                                            .text_color(tk.text_3)
+                                                            .child("≡"),
+                                                    )
+                                                    .child(Input::new(&row.id_in).w_full())
+                                                    .child(Input::new(&row.name_in).w_full())
+                                                    .child({
+                                                        let t_chev = t_row.clone();
+                                                        compact_action_button(
+                                                            SharedString::from(format!("edit-row-chev-{i}")),
+                                                            if open { "▴" } else { "▾" },
+                                                            false,
+                                                            move |_, _, cx| {
+                                                                let i = i;
+                                                                t_chev.update(cx, |v, cx| {
+                                                                    if v.edit_row_open.contains(&i) {
+                                                                        v.edit_row_open.remove(&i);
+                                                                    } else {
+                                                                        v.edit_row_open.insert(i);
+                                                                    }
+                                                                    cx.notify();
+                                                                });
+                                                            },
+                                                        )
+                                                    })
+                                                    .child({
+                                                        let t_del = t_row.clone();
+                                                        compact_action_button(
+                                                            SharedString::from(format!("edit-row-del-{i}")),
+                                                            "删除",
+                                                            true,
+                                                            move |_, _, cx| {
+                                                                let i = i;
+                                                                t_del.update(cx, |v, cx| {
+                                                                    v.edit_remove_model_row(i, cx)
+                                                                });
+                                                            },
+                                                        )
+                                                    }),
+                                            );
+                                        if open {
+                                            body = body.child(edit_row_expanded(
+                                                app, this, i, row, reason_on, image_on,
+                                            ));
+                                        }
+                                        rows = rows.child(body);
                                     }
                                 }
                                 rows
@@ -2416,10 +2483,166 @@ fn fetch_modal(app: &AppView, this: &Entity<AppView>, _target: &FetchTarget, cx:
                             let t = this.clone();
                             action_button("fetch-adopt", "添加所选", false, move |_, window, cx| {
                                 let query = t.read_with(cx, |v, _| v.fetch_query.clone());
-                                t.update(cx, |v, cx| v.fetch_adopt(cx));
+                                t.update(cx, |v, cx| v.fetch_adopt(window, cx));
                                 query.update(cx, |s: &mut InputState, cx| s.set_value("", window, cx));
                             })
                         }),
                 ),
         )
+}
+
+
+/// 行展开「输入类型」复选框（官方 ☑ 样式：14px 方框；文本恒选禁用态）。
+fn check_glyph(checked: bool, disabled: bool, tk: &theme::Tokens) -> Div {
+    let mut box_el = div()
+        .w(px(14.0))
+        .h(px(14.0))
+        .rounded(px(3.0))
+        .flex()
+        .items_center()
+        .justify_center();
+    box_el = if checked {
+        box_el.bg(tk.accent).child(
+            div()
+                .text_size(px(10.0))
+                .line_height(px(14.0))
+                .text_color(gpui::white())
+                .child("✓"),
+        )
+    } else {
+        box_el.border(px(1.0)).border_color(if disabled { tk.border_l3 } else { tk.border_l2 })
+    };
+    box_el
+}
+
+/// 行展开「推理等级」开关（官方 toggle：36×20 胶囊 + 白钮；开 = accent）。
+fn switch_toggle(
+    on: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let tk = crate::theme::t();
+    div()
+        .id("edit-row-reasoning-switch")
+        .w(px(36.0))
+        .h(px(20.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .px(px(2.0))
+        .cursor_pointer()
+        .when(on, |d| d.bg(tk.accent))
+        .when(!on, |d| d.bg(tk.layer1).border(px(0.5)).border_color(tk.border_l3))
+        .on_click(on_click)
+        .child(
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded_full()
+                .bg(gpui::white())
+                .when(on, |d| d.ml_auto())
+                .when(!on, |d| d.mr_auto()),
+        )
+}
+
+
+/// 编辑卡行展开体（官方 ModelListEditor 展开区：上下文窗口 | 最大输出
+/// token 数 双列 + 输入类型复选框（文本恒选）+ 推理等级开关 + 声明行）。
+#[allow(clippy::too_many_arguments)]
+fn edit_row_expanded(
+    _app: &AppView,
+    this: &Entity<AppView>,
+    ix: usize,
+    row: &EditModelRow,
+    reason_on: bool,
+    image_on: bool,
+) -> Div {
+    let tk = theme::t();
+    let t_reason = this.clone();
+    let t_img = this.clone();
+    let caption = |text: &'static str| {
+        div()
+            .text_size(px(theme::FONT_CAPTION))
+            .line_height(px(theme::FONT_CAPTION_LEADING))
+            .text_color(tk.text_2)
+            .child(text)
+    };
+    let modal_label = |text: &'static str, on: bool, disabled: bool| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(check_glyph(on, disabled, &tk))
+            .child(
+                div()
+                    .text_size(px(theme::FONT_ROW))
+                    .line_height(px(22.0))
+                    .text_color(if disabled { tk.text_3 } else { tk.text })
+                    .child(text),
+            )
+    };
+    div()
+        .v_flex()
+        .gap(px(8.0))
+        .pt_1()
+        // 双列：上下文窗口 | 最大输出 token 数
+        .child(
+            div()
+                .flex()
+                .gap(px(10.0))
+                .child(field("上下文窗口", Input::new(&row.ctx_in).w_full()))
+                .child(field("最大输出 token 数", Input::new(&row.max_in).w_full())),
+        )
+        // 输入类型：文本恒选（禁用态），图片勾选切换
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(caption("输入类型"))
+                .child(modal_label("文本", true, true))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("edit-row-img-{ix}")))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            let ix = ix;
+                            t_img.update(cx, |v, cx| v.edit_toggle_row_image(ix, cx));
+                        })
+                        .child(modal_label("图片", image_on, false)),
+                ),
+        )
+        // 推理等级：开关 + 声明行（开=写入默认档；声明行可写显式值）
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(caption("推理等级"))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(switch_toggle(reason_on, move |_, window, cx| {
+                            let ix = ix;
+                            t_reason.update(cx, |v, cx| {
+                                v.edit_toggle_row_reasoning(ix, window, cx)
+                            });
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(theme::FONT_CAPTION))
+                                .text_color(tk.text_3)
+                                .child("(?)"),
+                        ),
+                ),
+        )
+        .when(reason_on, |d| {
+            d.child(Input::new(&row.reason_in).w_full()).child(hint(
+                "档位声明：off,low,medium,high；自定义发送值写作 low=low_v2。",
+            ))
+        })
 }

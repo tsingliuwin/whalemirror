@@ -553,6 +553,10 @@ pub(crate) struct CustomModel {
     /// 目录能力）；`Some(vec)` = 显式列出档位，`None` 值只在 `off` 上合法。
     #[serde(default)]
     pub(crate) reasoning_efforts: Option<Vec<dsh_gpui::reasoning_efforts::ReasoningEffort>>,
+    /// 输入模态（web `modalities`；"text"/"image"）。空 = 未声明（文本恒
+    /// 可用，图片按未声明处理——与官方行展开「输入类型」复选框对应）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) modalities: Vec<String>,
 }
 
 /// 从 settings.yaml 的 `reasoningEfforts` 读档位声明。
@@ -1022,6 +1026,15 @@ fn load_user_config() -> (AppSettings, String, String, bool, String) {
                                 context_window: m.get("contextWindow").and_then(|n| n.as_u64()).map(|n| n.to_string()).unwrap_or_default(),
                                 max_tokens: m.get("maxTokens").and_then(|n| n.as_u64()).map(|n| n.to_string()).unwrap_or_default(),
                                 reasoning_efforts: parse_reasoning_efforts(m.get("reasoningEfforts")),
+                                modalities: m
+                                    .get("modalities")
+                                    .and_then(|v| v.as_sequence())
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
                             })
                         })
                         .collect()
@@ -1131,6 +1144,14 @@ fn persist_user_config(
                     .and_then(reasoning_efforts_to_yaml)
                 {
                     row.insert("reasoningEfforts".into(), efforts);
+                }
+                if !m.modalities.is_empty() {
+                    row.insert(
+                        "modalities".into(),
+                        serde_yaml::Value::Sequence(
+                            m.modalities.iter().map(|v| serde_yaml::Value::String(v.clone())).collect(),
+                        ),
+                    );
                 }
                 serde_yaml::Value::Mapping(row)
             })
@@ -1301,6 +1322,7 @@ fn migrate_legacy() {
                                     context_window: m.get("context_window").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
                                     max_tokens: m.get("max_tokens").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
                                     reasoning_efforts: None,
+                                    modalities: Vec::new(),
                                 })
                             })
                             .collect()
@@ -1938,6 +1960,35 @@ pub(crate) struct DockState {
     pub files_stale: bool,
 }
 
+/// 编辑卡模型行草稿（官方 ProviderEditor ModelListEditor 的行态）：
+/// 行内四个可编辑框（id/名称/上下文/最大输出）+ 推理档声明草稿 +
+/// 输入模态草稿。官方行展开即编辑这些；rustdsh 以展开体承载。
+/// 行输入池的实体构造（InputState::new 需 window + 预填值；池只在点击
+/// 处理器里重建，window 可用）。
+fn text_row_input(
+    seed: String,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> Entity<InputState> {
+    cx.new(|cx| {
+        let mut st = InputState::new(window, cx);
+        st.set_value(seed, window, cx);
+        st
+    })
+}
+
+pub(crate) struct EditModelRow {
+    pub(crate) id_in: Entity<InputState>,
+    pub(crate) name_in: Entity<InputState>,
+    pub(crate) ctx_in: Entity<InputState>,
+    pub(crate) max_in: Entity<InputState>,
+    /// 推理档声明（空 = 未声明/开关关；非空 = 声明串，如
+    /// `off,low,medium,high` 或 `low=low_v2` 显式值形）
+    pub(crate) reason_in: Entity<InputState>,
+    /// 输入模态草稿（"text"/"image"；文本恒在——官方文本框禁用勾选）
+    pub(crate) modalities: Vec<String>,
+}
+
 pub(crate) struct AppView {
     agent: Arc<ReactLoopAgent>,
     recorder: Arc<SessionRecorder>,
@@ -2146,10 +2197,12 @@ pub(crate) struct AppView {
     /// 编辑卡「显示名称」输入（web ProviderEditor displayName；回写
     /// CustomProvider.name，落盘 displayName 字段）。
     edit_name_input: Entity<InputState>,
-    /// 编辑卡模型行的 (id, 显示名称) 输入池——**开卡时**在点击处理器里
-    /// 按当前模型行重建（InputState::new 需要 window，渲染期不能建实体；
-    /// 官方蓝本：每行两个可编辑框，非只读文本）。保存时逐行写回。
-    edit_model_rows: Vec<(Entity<InputState>, Entity<InputState>)>,
+    /// 编辑卡模型行草稿池——**开卡时**在点击处理器里按当前模型行重建
+    /// （InputState::new 需要 window，渲染期不能建实体）。官方蓝本：每行
+    /// 两个可编辑框 + 展开体（上下文/最大输出/输入类型/推理等级）。
+    edit_model_rows: Vec<EditModelRow>,
+    /// 展开中的行下标（官方 chevron 逐行展开；开卡清空）
+    edit_row_open: std::collections::HashSet<usize>,
     // 获取可用模型（web ModelListEditor 的 fetch 流程；rc.1 master 语义）。
     // target 同时是弹层开关；pending/error 记归属卡（web 两卡各有本地状态，
     // rustdsh 共享一份）；picked 初始 = 全部候选减已配置行。
@@ -2473,6 +2526,7 @@ impl AppView {
         fs_observation,
         edit_name_input,
         edit_model_rows: Vec::new(),
+        edit_row_open: std::collections::HashSet::new(),
         todos: Vec::new(),
         goal_store: Arc::clone(&goal_store),
         schedule: Arc::clone(&schedule),
@@ -6222,6 +6276,7 @@ impl AppView {
                 context_window: String::new(),
                 max_tokens: String::new(),
                 reasoning_efforts: None,
+                modalities: Vec::new(),
             }],
         };
         self.register_custom(&provider);
@@ -6266,6 +6321,7 @@ impl AppView {
                     context_window: String::new(),
                     max_tokens: String::new(),
                     reasoning_efforts: None,
+                    modalities: Vec::new(),
                 })
                 .collect(),
         };
@@ -6361,13 +6417,27 @@ impl AppView {
                         // 用户已调过的容量），其余候选默认全勾。
                         let known: Vec<String> = match &target {
                             FetchTarget::Declare => v.dc_models.clone(),
-                            FetchTarget::Edit(id) => v
-                                .settings
-                                .providers
-                                .iter()
-                                .find(|p| p.id == *id)
-                                .map(|p| p.models.iter().map(|m| m.id.clone()).collect())
-                                .unwrap_or_default(),
+                            FetchTarget::Edit(id) => {
+                                // 编辑态以行池草稿为准（采纳写池不直写盘）
+                                if v.editing_provider.as_deref() == Some(id.as_str()) {
+                                    v.edit_model_rows
+                                        .iter()
+                                        .filter_map(|r| {
+                                            r.id_in.read_with(cx, |s, _| {
+                                                let t = s.value().trim().to_string();
+                                                (!t.is_empty()).then_some(t)
+                                            })
+                                        })
+                                        .collect()
+                                } else {
+                                    v.settings
+                                        .providers
+                                        .iter()
+                                        .find(|p| p.id == *id)
+                                        .map(|p| p.models.iter().map(|m| m.id.clone()).collect())
+                                        .unwrap_or_default()
+                                }
+                            }
                         };
                         v.fetch_picked = models
                             .iter()
@@ -6437,7 +6507,7 @@ impl AppView {
 
     /// 采纳勾选（web adoptPicked）：已调过的行以 id 胜出；勾选的候选各自
     /// 成行，端点披露的容量随行保留。
-    fn fetch_adopt(&mut self, cx: &mut Context<Self>) {
+    fn fetch_adopt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.fetch_target.clone() else { return };
         let picked: Vec<dsh_llm_deepseek::DiscoveredModel> = self
             .fetch_candidates
@@ -6454,34 +6524,67 @@ impl AppView {
                 }
             }
             FetchTarget::Edit(id) => {
-                if let Some(p) = self.settings.providers.iter_mut().find(|p| p.id == id) {
+                // 编辑态：采纳写行池草稿（保存时随卡统一落盘）。同 id 行只补
+                // 空字段——用户手调过的容量不被探测悄悄改写（官方「勾选采纳
+                // 不会改写已调过的容量」）。
+                if self.editing_provider.as_deref() == Some(id.as_str()) {
                     for m in picked {
-                        match p.models.iter_mut().find(|row| row.id == m.id) {
-                            // 已有行：只补空白字段——用户手调过的容量不被
-                            // 探测结果悄悄改写（web「勾选采纳不会改写已调过的
-                            // 容量」），但缺失的容量/上限要补上，否则占用表
-                            // 与模型页容量列永远是空的。
+                        let existing = self.edit_model_rows.iter_mut().find(|r| {
+                            r.id_in.read_with(cx, |s, _| s.value().trim() == m.id)
+                        });
+                        match existing {
                             Some(row) => {
-                                if row.display_name.is_empty() {
-                                    row.display_name = m.name.clone();
+                                let ctx_empty =
+                                    row.ctx_in.read_with(cx, |s, _| s.value().trim().is_empty());
+                                if ctx_empty {
+                                    let v = m.context_window.map(fmt_capacity).unwrap_or_default();
+                                    row.ctx_in.update(cx, |s, cx| s.set_value(v, window, cx));
                                 }
-                                if row.context_window.trim().is_empty() {
-                                    row.context_window =
-                                        m.context_window.map(fmt_capacity).unwrap_or_default();
+                                let max_empty =
+                                    row.max_in.read_with(cx, |s, _| s.value().trim().is_empty());
+                                if max_empty {
+                                    let v = m.max_tokens.map(fmt_capacity).unwrap_or_default();
+                                    row.max_in.update(cx, |s, cx| s.set_value(v, window, cx));
                                 }
-                                if row.max_tokens.trim().is_empty() {
-                                    row.max_tokens =
-                                        m.max_tokens.map(fmt_capacity).unwrap_or_default();
+                                let name_empty =
+                                    row.name_in.read_with(cx, |s, _| s.value().trim().is_empty());
+                                if name_empty && !m.name.is_empty() {
+                                    let v = m.name.clone();
+                                    row.name_in.update(cx, |s, cx| s.set_value(v, window, cx));
                                 }
                             }
-                            None => p.models.push(CustomModel {
-                                id: m.id.clone(),
-                                display_name: m.name,
-                                context_window: m.context_window.map(fmt_capacity).unwrap_or_default(),
-                                max_tokens: m.max_tokens.map(fmt_capacity).unwrap_or_default(),
-                                reasoning_efforts: None,
+                            None => self.edit_model_rows.push(EditModelRow {
+                                id_in: text_row_input(m.id.clone(), window, cx),
+                                name_in: text_row_input(m.name.clone(), window, cx),
+                                ctx_in: text_row_input(
+                                    m.context_window.map(fmt_capacity).unwrap_or_default(),
+                                    window,
+                                    cx,
+                                ),
+                                max_in: text_row_input(
+                                    m.max_tokens.map(fmt_capacity).unwrap_or_default(),
+                                    window,
+                                    cx,
+                                ),
+                                reason_in: text_row_input(String::new(), window, cx),
+                                modalities: vec!["text".to_string()],
                             }),
                         }
+                    }
+                    cx.notify();
+                    return;
+                }
+                // 非编辑态兜底（编辑卡外不应出现）：直写提供方
+                if let Some(p) = self.settings.providers.iter_mut().find(|p| p.id == id) {
+                    for m in picked {
+                        p.models.push(CustomModel {
+                            id: m.id.clone(),
+                            display_name: m.name,
+                            context_window: m.context_window.map(fmt_capacity).unwrap_or_default(),
+                            max_tokens: m.max_tokens.map(fmt_capacity).unwrap_or_default(),
+                            reasoning_efforts: None,
+                            modalities: vec!["text".to_string()],
+                        });
                     }
                 }
                 self.persist_settings();
@@ -6535,47 +6638,88 @@ impl AppView {
             .update(cx, |s, cx| s.set_value(p.name.clone(), window, cx));
         self.edit_base
             .update(cx, |s, cx| s.set_value(p.base_url.clone(), window, cx));
-        let seed = p
-            .models
-            .first()
-            .map(|m| m.context_window.clone())
-            .unwrap_or_default();
-        self.model_capacity_input
-            .update(cx, |s, cx| s.set_value(seed, window, cx));
-        let declared = p
-            .models
-            .first()
-            .and_then(|m| m.reasoning_efforts.clone())
-            .map(|e| dsh_gpui::reasoning_efforts::format_declaration(&e))
-            .unwrap_or_default();
-        self.reasoning_wire_input
-            .update(cx, |s, cx| s.set_value(declared, window, cx));
         self.edit_model_rows = p
             .models
             .iter()
-            .map(|m| {
-                let id_in = cx.new(|cx| {
-                    let mut st = InputState::new(window, cx);
-                    st.set_value(m.id.clone(), window, cx);
-                    st
-                });
-                let name_in = cx.new(|cx| {
-                    let mut st = InputState::new(window, cx);
-                    st.set_value(m.display_name.clone(), window, cx);
-                    st
-                });
-                (id_in, name_in)
+            .map(|m| EditModelRow {
+                id_in: text_row_input(m.id.clone(), window, cx),
+                name_in: text_row_input(m.display_name.clone(), window, cx),
+                ctx_in: text_row_input(m.context_window.clone(), window, cx),
+                max_in: text_row_input(m.max_tokens.clone(), window, cx),
+                reason_in: text_row_input(
+                    m.reasoning_efforts
+                        .as_ref()
+                        .map(|e| dsh_gpui::reasoning_efforts::format_declaration(e))
+                        .unwrap_or_default(),
+                    window,
+                    cx,
+                ),
+                modalities: if m.modalities.is_empty() {
+                    vec!["text".to_string()]
+                } else {
+                    m.modalities.clone()
+                },
             })
             .collect();
+        self.edit_row_open.clear();
+        cx.notify();
+    }
+
+    /// 编辑卡「恢复默认模型」：目录内置提供方回单行目录默认；无目录的
+    /// 自定义提供方如实提示（官方行为=恢复 pi-ai 内建目录）。
+    fn edit_reset_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.editing_provider.clone() else { return };
+        let entry = PROVIDER_CATALOG.iter().find(|e| e.id == id);
+        let Some(entry) = entry else {
+            self.pending_toasts.push("该提供方没有内置默认模型目录".into());
+            cx.notify();
+            return;
+        };
+        self.edit_model_rows = vec![EditModelRow {
+            id_in: text_row_input(entry.model.to_string(), window, cx),
+            name_in: text_row_input(String::new(), window, cx),
+            ctx_in: text_row_input(String::new(), window, cx),
+            max_in: text_row_input(String::new(), window, cx),
+            reason_in: text_row_input(String::new(), window, cx),
+            modalities: vec!["text".to_string()],
+        }];
+        self.edit_row_open.clear();
+        cx.notify();
+    }
+
+    /// 编辑卡行展开「推理等级」开关：开 = 写入默认档声明（上游同语义：
+    /// 开关打开写入 `off,low,medium,high`）；关 = 清空（未声明）。
+    fn edit_toggle_row_reasoning(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.edit_model_rows.get_mut(ix) else { return };
+        let on = row.reason_in.read_with(cx, |s, _| s.value().trim().is_empty());
+        let seed = if on { "off,low,medium,high".to_string() } else { String::new() };
+        row.reason_in.update(cx, |s, cx| s.set_value(seed, window, cx));
+        cx.notify();
+    }
+
+    /// 编辑卡行展开「输入类型」复选框：文本恒选（文本框禁用态）；图片
+    /// 勾选切换 modalities 草稿里的 "image"。
+    fn edit_toggle_row_image(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.edit_model_rows.get_mut(ix) else { return };
+        if let Some(pos) = row.modalities.iter().position(|m| m == "image") {
+            row.modalities.remove(pos);
+        } else {
+            row.modalities.push("image".to_string());
+        }
         cx.notify();
     }
 
     /// 编辑卡「＋添加模型」：追加一行空白可编辑行（官方蓝本：行即草稿，
     /// 保存时统一写回——不是即时落盘）。
     fn edit_add_model_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id_in = cx.new(|cx| InputState::new(window, cx));
-        let name_in = cx.new(|cx| InputState::new(window, cx));
-        self.edit_model_rows.push((id_in, name_in));
+        self.edit_model_rows.push(EditModelRow {
+            id_in: text_row_input(String::new(), window, cx),
+            name_in: text_row_input(String::new(), window, cx),
+            ctx_in: text_row_input(String::new(), window, cx),
+            max_in: text_row_input(String::new(), window, cx),
+            reason_in: text_row_input(String::new(), window, cx),
+            modalities: vec!["text".to_string()],
+        });
         cx.notify();
     }
 
@@ -6600,22 +6744,37 @@ impl AppView {
         let Some(p) = self.settings.providers.iter_mut().find(|p| p.id == id) else {
             return;
         };
-        let old = p.models.clone();
         let mut seen = std::collections::HashSet::new();
         let mut next = Vec::new();
-        for (id_in, name_in) in &self.edit_model_rows {
-            let mid = id_in.read_with(cx, |s, _| s.value().trim().to_string());
+        for row in &self.edit_model_rows {
+            let mid = row.id_in.read_with(cx, |s, _| s.value().trim().to_string());
             if mid.is_empty() || !seen.insert(mid.clone()) {
                 continue;
             }
-            let name = name_in.read_with(cx, |s, _| s.value().trim().to_string());
-            let prev = old.iter().find(|m| m.id == mid);
+            let name = row.name_in.read_with(cx, |s, _| s.value().trim().to_string());
+            let ctx = row.ctx_in.read_with(cx, |s, _| s.value().trim().to_string());
+            let max = row.max_in.read_with(cx, |s, _| s.value().trim().to_string());
+            let reason = row.reason_in.read_with(cx, |s, _| s.value().trim().to_string());
+            let declared = if reason.is_empty() {
+                None
+            } else if dsh_gpui::reasoning_efforts::validate(
+                &dsh_gpui::reasoning_efforts::parse_declaration(&reason),
+            )
+            .is_none()
+            {
+                Some(dsh_gpui::reasoning_efforts::parse_declaration(&reason))
+            } else {
+                None // 非法声明不写盘（同卡级路径语义）
+            };
             next.push(CustomModel {
                 id: mid,
                 display_name: name,
-                context_window: prev.map(|m| m.context_window.clone()).unwrap_or_default(),
-                max_tokens: prev.map(|m| m.max_tokens.clone()).unwrap_or_default(),
-                reasoning_efforts: prev.and_then(|m| m.reasoning_efforts.clone()),
+                context_window: dsh_gpui::capacity::normalize_capacity(&ctx)
+                    .unwrap_or_else(|| ctx.clone()),
+                max_tokens: dsh_gpui::capacity::normalize_capacity(&max)
+                    .unwrap_or_else(|| max.clone()),
+                reasoning_efforts: declared,
+                modalities: row.modalities.clone(),
             });
         }
         if !next.is_empty() {
@@ -6656,38 +6815,6 @@ impl AppView {
             if !base.is_empty() {
                 p.base_url = base;
                 changed = true;
-            }
-            // 上下文容量（#96）：写回路由默认模型（模型目录首行）；空值 =
-            // 清除声明（回落到目录兜底），不可解析的值也按清除处理。
-            if let Some(first) = p.models.first_mut() {
-                // reasoning 档位声明（空 = 撤销声明）；非法只是提示，不写盘
-                let declaration = self
-                    .reasoning_wire_input
-                    .read_with(cx, |s, _| s.value().trim().to_string());
-                let parsed = dsh_gpui::reasoning_efforts::parse_declaration(&declaration);
-                let next_efforts = if parsed.is_empty() {
-                    None
-                } else if dsh_gpui::reasoning_efforts::validate(&parsed).is_none() {
-                    Some(parsed)
-                } else {
-                    // 非法：保持原值，避免把上游会拒的声明写进磁盘
-                    first.reasoning_efforts.clone()
-                };
-                if next_efforts != first.reasoning_efforts {
-                    first.reasoning_efforts = next_efforts;
-                    changed = true;
-                }
-                let entered = self
-                    .model_capacity_input
-                    .read_with(cx, |s, _| s.value().trim().to_string());
-                let normalized =
-                    dsh_gpui::capacity::normalize_capacity(&entered).unwrap_or_default();
-                let current = dsh_gpui::capacity::normalize_capacity(&first.context_window)
-                    .unwrap_or_default();
-                if normalized != current {
-                    first.context_window = normalized;
-                    changed = true;
-                }
             }
             if changed {
                 let snapshot = p.clone();

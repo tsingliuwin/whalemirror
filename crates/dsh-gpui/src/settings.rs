@@ -1052,37 +1052,12 @@ fn provider_row(
                 let id = edit_id.clone();
                 t_edit.update(cx, |v, cx| {
                     let focus = dsh_gpui::provider_cards::focus_after_edit(&form_focus(v), &id);
-                    let opening = focus.editing.is_some();
-                    v.editing_provider = focus.editing;
-                    // 上游「一次只开一张卡」：行编辑展开时收添加卡
-                    v.adding = AddingMode::None;
-                    // 展开时把「路由默认模型」的容量填进输入框（#96 的编辑
-                    // 入口在自定义设置里，与 API 地址同一套控件形态）
-                    if opening {
-                        let seed = v
-                            .settings
-                            .providers
-                            .iter()
-                            .find(|p| p.id == id)
-                            .and_then(|p| p.models.first())
-                            .map(|m| m.context_window.clone())
-                            .unwrap_or_default();
-                        v.model_capacity_input.update(cx, |state, cx| {
-                            state.set_value(seed, window, cx);
-                        });
-                        // reasoning 档位：预填当前声明（空 = 未声明）
-                        let declared = v
-                            .settings
-                            .providers
-                            .iter()
-                            .find(|p| p.id == id)
-                            .and_then(|p| p.models.first())
-                            .and_then(|m| m.reasoning_efforts.clone())
-                            .map(|e| dsh_gpui::reasoning_efforts::format_declaration(&e))
-                            .unwrap_or_default();
-                        v.reasoning_wire_input.update(cx, |state, cx| {
-                            state.set_value(declared, window, cx);
-                        });
+                    if focus.editing.is_some() {
+                        // 统一开卡入口：置目标 + 全部预填（密钥留空/名称/地址/
+                        // 首行容量/推理档）+ 按当前模型行重建行输入池
+                        v.edit_begin(&id, window, cx);
+                    } else {
+                        v.editing_provider = None;
                     }
                     cx.notify();
                 });
@@ -1187,7 +1162,6 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                             .items_center()
                             .px(px(10.0))
                             .rounded(px(8.0))
-                            // web Input 原语（alpha.4）：0.5px，色阶 l2→l4
                             .border(px(0.5))
                             .border_color(tk.border_l4)
                             .bg(tk.layer1)
@@ -1201,144 +1175,10 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                     d.child(Input::new(&app.edit_key).w_full())
                 }),
         ))
-        .child(if id == "deepseek" {
-            hint(if app.env_key_locked {
-                "DeepSeek 密钥来自 DEEPSEEK_API_KEY 环境变量，此处不可编辑。"
-            } else {
-                "编辑卡默认 API 地址 https://api.deepseek.com；自定义提供方的 API 地址在折叠区内。"
-            })
-        } else {
-            hint("选择模型目录中的首行作为路由默认模型。")
-        })
-        // 上下文容量（#96）：常显在折叠区之前——设置面板在本环境无法用
-        // 合成滚轮滚动，放到折叠区里会让页脚「保存」永远移出视口。形态
-        // 与 API 密钥同款 `field()`+`Input`（同卡内实测可点）。
-        .when(id != "deepseek" || !app.env_key_locked, |d| {
-            d.child(field(
-                "上下文窗口",
-                Input::new(&app.model_capacity_input).w_full(),
-            ))
-            .child(hint(
-                "作用于路由默认模型（模型目录首行）；接受 128K / 131072，留空按目录兜底。",
-            ))
-        })
-        // reasoning 档位（上游 ModelReasoningEfforts）：首屏可见。
-        //
-        // 卡内的开关/增删按钮在本环境点击不可达（与容量 chip 同类），故用
-        // **一行声明**代替点选区：`off,low,medium,high` 或
-        // `off=,low=low_v2` 这种显式值写法；打开编辑卡时预填当前声明。
-        .when(id != "deepseek", |d| {
-            let current = app
-                .settings
-                .providers
-                .iter()
-                .find(|p| p.id == id)
-                .and_then(|p| p.models.first())
-                .and_then(|m| m.reasoning_efforts.clone());
-            let invalid = current
-                .as_deref()
-                .is_some_and(|entries| dsh_gpui::reasoning_efforts::validate(entries).is_some());
-            let mut col = d.child(field(
-                "推理档位",
-                Input::new(&app.reasoning_wire_input).w_full(),
-            ))
-            .child(hint(
-                "逗号分隔档位：off,low,medium,high；自定义发送值写作 low=low_v2。留空 = 沿用目录能力。",
-            ));
-            if invalid {
-                col = col.child(err_hint("至少一个思考档，且非 off 档都要有发送值。"));
-            }
-            col
-        })
-        // 模型行管理（web ProviderEditor ModelListEditor 的增删面；rustdsh
-        // 此前编辑卡无此面——端点不支持 /models 列举时添加无路、删除无门）。
-        // 交互按本环境已验证模式：行内删除钮 + 首屏输入行回车添加。
-        .when(id != "deepseek", |d| {
-            let t = this.clone();
-            let Some(provider) = app.settings.providers.iter().find(|p| p.id == id) else {
-                return d;
-            };
-            let mut col = d.child(
-                div()
-                    .text_size(px(theme::FONT_ROW))
-                    .line_height(px(22.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(tk.text)
-                    .child("模型"),
-            );
-            for (i, m) in provider.models.iter().enumerate() {
-                let mid = m.id.clone();
-                let model_id = mid.clone();
-                let t_row = t.clone();
-                col = col.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(dsh_gpui::ui_metrics::PROVIDER_ROW_ACTIONS_GAP_PX))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(theme::FONT_ROW))
-                                .line_height(px(22.0))
-                                .text_color(tk.text)
-                                .child(mid.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(theme::FONT_CAPTION))
-                                .line_height(px(theme::FONT_CAPTION_LEADING))
-                                .text_color(if m.context_window.is_empty() {
-                                    tk.text_3
-                                } else {
-                                    tk.text_2
-                                })
-                                .child(if m.context_window.is_empty() {
-                                    "容量按目录兜底".to_string()
-                                } else {
-                                    format!("上下文 {}", m.context_window)
-                                }),
-                        )
-                        .when(provider.models.len() > 1, |row| {
-                            let t_del = t_row.clone();
-                            row.child(compact_action_button(
-                                SharedString::from(format!("edit-model-del-{i}")),
-                                "删除",
-                                true,
-                                move |_, _, cx| {
-                                    let model_id = model_id.clone();
-                                    t_del.update(cx, |v, cx| v.edit_remove_model(&model_id, cx));
-                                },
-                            ))
-                        }),
-                );
-            }
-            col.child(field(
-                "添加模型",
-                Input::new(&app.edit_model_input).w_full(),
-            ))
-            .child(hint("输入模型 id 后回车（或点添加）；首行即路由默认模型。"))
-            .child(
-                // compact_action_button 是行内 chip（h28/px10）——v_flex 里会
-                // 被拉伸成全宽横条，套 flex 行约束回行内宽度
-                div().flex().child({
-                    let t_add = t.clone();
-                    compact_action_button(
-                        "edit-model-add",
-                        "添加",
-                        false,
-                        move |_, _, cx| {
-                            t_add.update(cx, |v, cx| v.edit_add_model(cx));
-                        },
-                    )
-                }),
-            )
-        })
+        .child(hint("留空使用已保存凭据；输入新值可替换。"))
+        // 自定义设置折叠（官方 ProviderEditor 蓝本：显示名称 / API 地址 /
+        // API 协议 / 模型目录+行编辑全在折叠区内，密钥在顶）
         .child(
-            // 自定义设置折叠（web details.customized：12/18 wt500 secondary + 旋转 chevron）
             disclosure(
                 "edit-customized",
                 "自定义设置",
@@ -1347,68 +1187,181 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                     .v_flex()
                     .gap(px(12.0))
                     .pt_3()
+                    .when(id != "deepseek", |d| {
+                        d.child(field("显示名称", Input::new(&app.edit_name_input).w_full()))
+                    })
                     .child(field("API 地址", Input::new(&app.edit_base).w_full()))
+                    // API 协议（官方下拉三协议；rustdsh 当前仅支持 OpenAI
+                    // 兼容端点——如实呈现当前值，选择面登记 backlog #125）
+                    .child(field(
+                        "API 协议",
+                        div()
+                            .w_full()
+                            .h(px(32.0))
+                            .flex()
+                            .items_center()
+                            .px(px(10.0))
+                            .rounded(px(8.0))
+                            .border(px(0.5))
+                            .border_color(tk.border_l4)
+                            .bg(tk.layer1)
+                            .text_size(px(theme::FONT_ROW))
+                            .line_height(px(22.0))
+                            .text_color(tk.text)
+                            .child("OpenAI Chat Completions"),
+                    ))
+                    // 模型目录：头行（状态 + 获取可用模型）+ 行编辑池 + 添加钮
                     .child(
                         div()
                             .v_flex()
-                            .gap_1()
+                            .gap(px(6.0))
                             .child(
-                                // web ModelListEditor 的 modelListHead：标题 +
-                                // 获取按钮（pi-ai 家族才有端点探测；DeepSeek
-                                // 用内置目录编辑器，无此动作）
                                 div()
                                     .flex()
                                     .items_center()
                                     .justify_between()
                                     .child(
                                         div()
-                                            .text_size(px(theme::FONT_CAPTION))
-                                            .line_height(px(theme::FONT_CAPTION_LEADING))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(tk.text_2)
-                                            .child("模型目录"),
+                                            .flex()
+                                            .items_baseline()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_size(px(theme::FONT_CAPTION))
+                                                    .line_height(px(theme::FONT_CAPTION_LEADING))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(tk.text_2)
+                                                    .child("模型目录"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(theme::FONT_CAPTION))
+                                                    .line_height(px(theme::FONT_CAPTION_LEADING))
+                                                    .text_color(tk.text_3)
+                                                    .child(if id == "deepseek" {
+                                                        "内置模型目录"
+                                                    } else {
+                                                        "已自定义模型目录"
+                                                    }),
+                                            ),
                                     )
                                     .when(id != "deepseek", |d| {
                                         let target = FetchTarget::Edit(id.to_string());
                                         d.child(fetch_link(app, this, &target, cx))
                                     }),
                             )
-                            // 模型行：名称 + 容量读数（点击就地改容量）。
-                            // 上游把 contextWindow 当 provider 元数据展示；
-                            // rustdsh 的探测可能拿不到，故给手填入口。
+                            // 行编辑池：每行 [模型 id][显示名称][删除]。官方行
+                            // 另有拖拽手柄与展开（容量/上限/推理逐行）——登记
+                            // backlog #42，首行字段由下方「路由默认模型」承担。
                             .child({
-                                let mut rows = div().v_flex().gap(px(2.0));
-                                // 自定义路由读已存模型行；内置 DeepSeek 读目录
-                                // 列表（同样允许就地改容量）。
-                                let list: Vec<(String, String)> = app
-                                    .settings
-                                    .providers
-                                    .iter()
-                                    .find(|p| p.id == id)
-                                    .map(|p| {
-                                        p.models
-                                            .iter()
-                                            .map(|m| (m.id.clone(), m.context_window.clone()))
-                                            .collect()
-                                    })
-                                    .unwrap_or_else(|| {
-                                        models.iter().map(|m| (m.clone(), String::new())).collect()
-                                    });
-                                for (model_id, capacity) in list {
-                                    rows = rows.child(model_capacity_row(
-                                        app, this, id, &model_id, &capacity, cx,
-                                    ));
+                                let mut rows = div().v_flex().gap(px(4.0));
+                                if id == "deepseek" {
+                                    for m in &models {
+                                        rows = rows.child(
+                                            div()
+                                                .text_size(px(theme::FONT_ROW))
+                                                .line_height(px(22.0))
+                                                .text_color(tk.text)
+                                                .child(m.clone()),
+                                        );
+                                    }
+                                } else {
+                                    for (ix, (id_in, name_in)) in app.edit_model_rows.iter().enumerate() {
+                                        let t_del = this.clone();
+                                        let i = ix;
+                                        rows = rows.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(6.0))
+                                                .child(Input::new(id_in).w_full())
+                                                .child(Input::new(name_in).w_full())
+                                                .child(
+                                                    div().flex().child(compact_action_button(
+                                                        SharedString::from(format!("edit-row-del-{i}")),
+                                                        "删除",
+                                                        true,
+                                                        move |_, _, cx| {
+                                                            let ix = i;
+                                                            t_del.update(cx, |v, cx| {
+                                                                v.edit_remove_model_row(ix, cx)
+                                                            });
+                                                        },
+                                                    )),
+                                                ),
+                                        );
+                                    }
                                 }
                                 rows
+                            })
+                            .when(id != "deepseek", |d| {
+                                let t_add = this.clone();
+                                d.child(
+                                    div().flex().child(compact_action_button(
+                                        "edit-row-add",
+                                        "+ 添加模型",
+                                        false,
+                                        move |_, window, cx| {
+                                            t_add.update(cx, |v, cx| {
+                                                v.edit_add_model_row(window, cx)
+                                            });
+                                        },
+                                    )),
+                                )
                             }),
                     )
+                    // 路由默认模型（首行）字段：官方在行展开里逐行编辑
+                    // （#42 登记），rustdsh 首行字段放目录下方并明确标注
+                    .when(id != "deepseek", |d| {
+                        let current = app
+                            .settings
+                            .providers
+                            .iter()
+                            .find(|p| p.id == id)
+                            .and_then(|p| p.models.first())
+                            .and_then(|m| m.reasoning_efforts.clone());
+                        let invalid = current
+                            .as_deref()
+                            .is_some_and(|entries| {
+                                dsh_gpui::reasoning_efforts::validate(entries).is_some()
+                            });
+                        let mut col = d.child(
+                            div()
+                                .v_flex()
+                                .gap(px(12.0))
+                                .mt_2()
+                                .child(
+                                    div()
+                                        .text_size(px(theme::FONT_CAPTION))
+                                        .line_height(px(theme::FONT_CAPTION_LEADING))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(tk.text_2)
+                                        .child("路由默认模型（模型目录首行）"),
+                                )
+                                .child(field(
+                                    "上下文窗口",
+                                    Input::new(&app.model_capacity_input).w_full(),
+                                ))
+                                .child(hint("接受 128K / 131072，留空按目录兜底。")),
+                        );
+                        col = col.child(field(
+                            "推理档位",
+                            Input::new(&app.reasoning_wire_input).w_full(),
+                        ))
+                        .child(hint(
+                            "逗号分隔档位：off,low,medium,high；自定义发送值写作 low=low_v2。留空 = 沿用目录能力。",
+                        ));
+                        if invalid {
+                            col = col.child(err_hint("至少一个思考档，且非 off 档都要有发送值。"));
+                        }
+                        col
+                    })
                     .when_some(
                         app.fetch_error.clone().filter(|(t, _)| {
                             matches!(t, FetchTarget::Edit(owner) if owner == id)
                         }),
                         |d, (_, message)| d.child(fetch_error_line(&message)),
-                    )
-                    .child(hint("其余字段在 settings.json 中，请直接编辑对应段。")),
+                    ),
                 {
                     let t = this.clone();
                     move |cx: &mut App| {

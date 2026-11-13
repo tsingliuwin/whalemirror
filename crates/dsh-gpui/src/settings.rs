@@ -1228,6 +1228,13 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                                     .text_color(tk.text_3)
                                     .child(if menu_open { "▴" } else { "▾" }),
                             );
+                        let mut proto_menu = div()
+                            .v_flex()
+                            .p(px(4.0))
+                            .rounded(px(12.0))
+                            .border(px(0.5))
+                            .border_color(tk.border_l3)
+                            .bg(tk.menu);
                         let proto_menu = if menu_open {
                             let entries: &[(&'static str, &'static str, bool)] = &[
                                 ("openai-completions", "OpenAI Chat Completions", true),
@@ -1236,16 +1243,12 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                                 ("google-generative-ai", "Google Gemini（适配器在建）", false),
                             ];
                             let mut menu = div()
-                                .absolute()
-                                .top(px(36.0))
-                                .left_0()
-                                .w_full()
                                 .v_flex()
                                 .p(px(4.0))
                                 .rounded(px(12.0))
-                                .bg(tk.menu)
-                                .shadow(theme::elevation_prominent())
-                                .occlude();
+                                .border(px(0.5))
+                                .border_color(tk.border_l3)
+                                .bg(tk.menu);
                             for (wire, label, supported) in entries {
                                 let t_item = this.clone();
                                 let wire = *wire;
@@ -1284,16 +1287,12 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
                                         }),
                                 );
                             }
-                            Some(menu)
+                            menu
                         } else {
-                            None
+                            div()
                         };
-                        // relative 挂在控件上：菜单锚定输入行正下方
-                        // （field() 的标签在上方，外壳锚定会被标签顶偏）
-                        d.child(field(
-                            "API 协议",
-                            div().relative().child(proto_field).children(proto_menu),
-                        ))
+                        d.child(field("API 协议", proto_field))
+                          .when(menu_open, |d| d.child(proto_menu))
                     })
                     // 模型目录：头行（状态 + 获取可用模型）+ 行编辑池 + 添加钮
                     .child(

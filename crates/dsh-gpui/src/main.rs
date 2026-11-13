@@ -2008,6 +2008,8 @@ pub(crate) struct AppView {
     automation_form_error: Option<String>,
     /// 表单三输入的渲染期清空旗标（set_value 需 window）
     automation_form_clear: bool,
+    /// 规则输入 Enter → 提交表单（键盘流）
+    _automation_rule_enter: Subscription,
     /// 隐藏卡草稿（callId → 完整卡态；X 隐藏时暂存、工具行重开时恢复——
     /// 上游 editor-store `task:${id}` 的单进程等价）
     question_card_drafts: std::collections::HashMap<String, dsh_gpui::question_card::QuestionCardState>,
@@ -2287,6 +2289,12 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.entity();
+        // 自动化表单规则输入 Enter → 提交表单（键盘流）
+        let automation_rule_enter = cx.subscribe(&automation_rule_input, |v: &mut Self, _, event, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                v.automation_create(cx);
+            }
+        });
         let subscription = cx.subscribe(&input, |chat, input, event, cx| {
             // plain Enter 按偏好投递；Ctrl+Enter（vendor secondary-enter）为
             // 加速手势：运行中按次取偏好反相（上游 resolveSubmitMode 表）
@@ -2425,6 +2433,7 @@ impl AppView {
         automation_rule_preset: AutomationRulePreset::Daily,
         automation_form_error: None,
         automation_form_clear: false,
+        _automation_rule_enter: automation_rule_enter,
         job_owner: job_owner.clone(),
         fs_observation,
         todos: Vec::new(),

@@ -399,6 +399,13 @@ pub(crate) struct AppSettings {
     /// `servers` 表：provider id → 本地语言服务器）。
     #[serde(default)]
     pub(crate) lsp: LspSettings,
+    /// 本会话显式删除的提供方路由（remove_provider 登记，persist 时按墓碑
+    /// 删除）。不序列化：持久化合并语义=「磁盘有而内存无」的条目一律保留，
+    /// 只有显式墓碑才删——防止陈旧内存形态的全量替换静默抹掉配置（曾把
+    /// zai-coding-cn 整个提供方从 settings.yaml 里抹掉，凭据完好却无模型
+    /// 可路由）。
+    #[serde(default, skip)]
+    pub(crate) removed_providers: Vec<String>,
 }
 
 /// LSP 设置（上游 `lsp-stdio` 的 Config：一组本地语言服务器）。
@@ -505,6 +512,7 @@ impl Default for AppSettings {
             agent_preset: dsh_gpui::agent_presets::DEFAULT_PRESET.to_string(),
             mcp: McpSettings::default(),
             lsp: LspSettings::default(),
+            removed_providers: Vec::new(),
         }
     }
 }
@@ -1077,8 +1085,14 @@ fn persist_user_config(
     // 以现有文档的 mapping 为基底（保留 ui-onboarding/locale 等其它段）
     let mapping = doc.as_mapping().cloned().unwrap_or_default();
 
-    // providers：全量替换 llm-pi-ai.providers
-    let mut providers = serde_yaml::Mapping::new();
+    // providers：合并而非全量替换。磁盘既有条目为基底（本会话内存形态
+    // 可能缺旧版字段或未加载的路由——全量替换曾把 zai-coding-cn 整个提供
+    // 方静默抹掉）；内存已知路由逐项 upsert；只有显式墓碑才删。
+    let existing_providers = doc
+        .get("llm-pi-ai")
+        .and_then(|v| v.get("providers"))
+        .and_then(|v| v.as_mapping().cloned());
+    let mut defs: Vec<(String, serde_yaml::Mapping)> = Vec::new();
     for p in &settings.providers {
         let mut def = serde_yaml::Mapping::new();
         if !p.api_key.is_empty() {
@@ -1122,10 +1136,19 @@ fn persist_user_config(
             })
             .collect();
         def.insert("models".into(), serde_yaml::Value::Sequence(models));
-        providers.insert(serde_yaml::Value::String(p.id.clone()), serde_yaml::Value::Mapping(def));
+        defs.push((p.id.clone(), def));
     }
+    let mut providers = dsh_gpui::settings_merge::merge_provider_defs(
+        existing_providers,
+        defs,
+        &settings.removed_providers,
+    );
     let pi_block = {
-        let mut pi = serde_yaml::Mapping::new();
+        // llm-pi-ai 块同样以磁盘既有为基底（保留未知键），只覆写 providers。
+        let mut pi = doc
+            .get("llm-pi-ai")
+            .and_then(|v| v.as_mapping().cloned())
+            .unwrap_or_default();
         pi.insert("providers".into(), serde_yaml::Value::Mapping(providers));
         serde_yaml::Value::Mapping(pi)
     };
@@ -6742,6 +6765,11 @@ impl AppView {
     /// 删除自定义提供方（若激活中则回退 deepseek）。
     fn remove_provider(&mut self, id: &str) {
         self.settings.providers.retain(|p| p.id != id);
+        // 墓碑登记：persist 是合并语义（磁盘有而内存无的条目保留），显式
+        // 删除必须显式记账，否则下次保存会把刚删的提供方从磁盘复活。
+        if !self.settings.removed_providers.iter().any(|r| r == id) {
+            self.settings.removed_providers.push(id.to_string());
+        }
         if self.active_provider == id {
             self.active_provider = "deepseek".into();
             self.set_route("deepseek", &self.desired_model.clone());
@@ -12237,6 +12265,17 @@ fn main() {
                 preset_gate("create_worktree"),
             )
             .unwrap();
+    }
+
+    // 启动回灌已加载会话：ReactLoopAgent::new 只收 id、内部另建空会话，
+    // 磁盘日志重建出的 initial_session 必须显式 set_session 折叠回去——
+    // 否则 agent 内存态为空：skill-catalog 查重恒不命中（每次启动向续跑
+    // 会话重复注入一条，真实日志 11-09 起累积了 28 条）、启动转录空白
+    // （ChatView 回放读 agent.session()）、续跑首轮请求丢全部历史与折叠态
+    // （system head/plan/权限旋钮）。语义与 switch_session 的 set_session
+    // 相同（收据重置 + head 重定基），放在事件 sink 之后、任何 append 之前。
+    if !initial_session.entries().is_empty() {
+        agent.set_session(initial_session);
     }
 
     // 会话技能目录（上游：首次请求之前落一条 durable user 消息；本会话已有

@@ -13,6 +13,7 @@ pub mod provider_cards;
 pub mod question_card;
 pub mod question_reply;
 pub mod session_query_host;
+pub mod settings_merge;
 pub mod worktree_host;
 pub mod reasoning_efforts;
 pub mod shell_exit;

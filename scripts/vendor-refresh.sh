@@ -16,12 +16,13 @@ NEW_VER="${2:?usage: vendor-refresh.sh <crate> <new-version>}"
 REGISTRY="${REGISTRY:-$HOME/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f}"
 CRATE_FILE="$HOME/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/$CRATE-$NEW_VER.crate"
 
-# 选最新一版已有补丁作重放源
+# 选最新一版已有补丁作重放源（绝对路径：patch -d 先切工作目录，相对 -i 会失效）
 PATCH_SRC=$(ls -1 .vendor/"$CRATE"-*.patch 2>/dev/null | sort -V | tail -1)
 if [ -z "$PATCH_SRC" ]; then
   echo "no patch for $CRATE in .vendor/; run scripts/vendor-diff.sh first" >&2
   exit 1
 fi
+PATCH_SRC="$(cd "$(dirname "$PATCH_SRC")" && pwd)/$(basename "$PATCH_SRC")"
 echo "replay source: $PATCH_SRC"
 
 WORK=$(mktemp -d)

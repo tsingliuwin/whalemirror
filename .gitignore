@@ -2,3 +2,4 @@
 **/*.rs.bk
 .sessions/
 ui_capture.png
+.vendor/attic/

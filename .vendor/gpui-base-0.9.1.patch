@@ -1,0 +1,605 @@
+--- a/src/input/base/state.rs
++++ b/src/input/base/state.rs
+@@ -2,6 +2,21 @@
+ //!
+ //! Based on the `Input` example from the `gpui` crate.
+ //! https://github.com/zed-industries/zed/blob/main/crates/gpui/examples/input.rs
++// [dsh] composer 图片粘贴捕获：粘贴事件里剪贴板含图片时分流到宿主回调
++//（附件流），文本粘贴照常走。回调返回 true = 已消费（不插入文本）。
++static IMAGE_PASTE_HANDLER: std::sync::RwLock<
++    Option<std::sync::Arc<dyn Fn(gpui::Image, &mut gpui::App) -> bool + Send + Sync>>,
++> = std::sync::RwLock::new(None);
++
++/// [dsh] 注入/移除图片粘贴回调（桌面壳附件流）。
++pub fn set_image_paste_handler(
++    handler: Option<
++        std::sync::Arc<dyn Fn(gpui::Image, &mut gpui::App) -> bool + Send + Sync>,
++    >,
++) {
++    *IMAGE_PASTE_HANDLER.write().unwrap() = handler;
++}
++
+ use gpui::TextAlign;
+ use gpui::{
+     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
+@@ -3273,6 +3288,24 @@
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        // [dsh] 剪贴板含图片且宿主已注入回调：分流附件流；回调消费则不落文本
++        let has_image = clipboard
++            .entries()
++            .iter()
++            .any(|e| matches!(e, gpui::ClipboardEntry::Image(_)));
++        if has_image && let Some(handler) = IMAGE_PASTE_HANDLER.read().unwrap().as_ref() {
++            let mut consumed = false;
++            for entry in clipboard.entries() {
++                if let gpui::ClipboardEntry::Image(img) = entry {
++                    if handler(img.clone(), cx) {
++                        consumed = true;
++                    }
++                }
++            }
++            if consumed {
++                return;
++            }
++        }
+         let Some(mut new_text) = clipboard.text().filter(|text| !text.is_empty()) else {
+             return;
+         };
+--- a/src/text/mod.rs
++++ b/src/text/mod.rs
+@@ -24,13 +24,55 @@
+ use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
+ pub use inline_element::*;
+ pub use markdown_ext::*;
+-pub use node::{CodeBlock, TableData};
++pub use node::{
++    CodeBlock, TableData, TABLE_CELL_MIN_WIDTH_PX, TABLE_CELL_PAD_X_PX, TABLE_CELL_PAD_Y_PX,
++    TABLE_FONT_SIZE_PX, TABLE_FONT_WEIGHT_BODY, TABLE_FONT_WEIGHT_HEAD, TABLE_LINE_HEIGHT_PX,
++    TABLE_ROW_HAIRLINE_PX, table_cell_font_weight, table_cell_pad_left, table_cell_pad_right,
++    table_cell_pad_x,
++};
+ pub use range_highlight::{RangeHighlight, RangeHighlightError, RenderedText};
+ pub use state::*;
+ pub use stream_fade::TextViewMotion;
+ pub use style::*;
+ pub use text_view::*;
+ 
++// [dsh] 相对/绝对文件路径的打开钩子：宿主（桌面壳）注入，把聊天流里指向
++// 真实文件的路径路由进侧栏文件预览，而非系统默认程序。仅对无 scheme 的
++// 路径生效；http(s)/mailto 等仍走系统打开。None = 回落系统打开。
++static RELATIVE_FILE_OPENER: std::sync::RwLock<
++    Option<std::sync::Arc<dyn Fn(&str, &mut gpui::App) + Send + Sync>>,
++> = std::sync::RwLock::new(None);
++
++/// [dsh] 注入/移除文件路径打开回调。
++pub fn set_relative_file_opener(
++    opener: Option<std::sync::Arc<dyn Fn(&str, &mut gpui::App) + Send + Sync>>,
++) {
++    *RELATIVE_FILE_OPENER.write().unwrap() = opener;
++}
++
++/// [dsh] 无 scheme 的路径经钩子打开（宿主侧解析会话工作区并判存在，
++/// 不存在的文件显示预览失败行——上游 documentpreview 同语义）。返回
++/// true = 已消费。
++pub fn try_relative_file_opener(url: &str, cx: &mut gpui::App) -> bool {
++    let is_path = !url.is_empty() && !url.contains("://") && !url.starts_with("mailto:");
++    if is_path {
++        if let Some(opener) = RELATIVE_FILE_OPENER.read().unwrap().as_ref() {
++            opener(url, cx);
++            return true;
++        }
++    }
++    false
++}
++
++/// [dsh] 空 href 不交给系统打开（LLM 常输出引用式链接 [text][1] 无定义
++/// → url 为空——Windows ShellExecute 会弹「找不到文件」错误框）。有
++/// scheme 的 URL 放行系统打开；无 scheme 的路径交宿主预览（存在性由
++/// 宿主相对会话工作区判定，不以进程 CWD 误判）。
++pub fn dsh_openable(url: &str) -> bool {
++    let u = url.trim();
++    !u.is_empty()
++}
++
+ pub(crate) fn init(cx: &mut App) {
+     inline::init(cx);
+     state::init(cx);
+--- a/src/text/node.rs
++++ b/src/text/node.rs
+@@ -2848,7 +2848,9 @@
+ fn mark_highlight(mark: &TextMark, node_cx: &NodeContext, cx: &App) -> InlineHighlight {
+     let mut highlight = HighlightStyle::default();
+     if mark.bold {
+-        highlight.font_weight = Some(FontWeight::BOLD);
++        // [dsh] web .markdown strong { font-weight: 600 }：Segoe UI 有真实
++        // Semibold 面，700 明显更黑。
++        highlight.font_weight = Some(FontWeight::SEMIBOLD);
+     }
+     if mark.italic {
+         highlight.font_style = Some(FontStyle::Italic);
+@@ -3416,20 +3418,27 @@
+ /// the body text and the gap above it relative to the heading itself.
+ /// Hierarchy comes from weight rather than size: every level is semibold and
+ /// the sizes step down gently from the body.
+-fn heading_metrics(level: u8) -> (f32, f32, f32) {
++///
++/// [dsh] 数值对齐 web `--dsw-font-markdown-h*`（body 14 基准）：size
++/// 28/21/17.5/15.75/14/12.13px，行高 30/28/26/24（倍率相对 size），段前
++/// 32px（h1-h3）或 16px（h4-h6）；第 4 元为段后 16px 的倍率（相对 size，
++/// 替代上游单一 HEADING_BOTTOM_GAP）。
++fn heading_metrics(level: u8) -> (f32, f32, f32, f32) {
+     match level {
+-        1 => (1.8, 1.25, 1.1),
+-        2 => (4. / 3., 1.35, 1.6),
+-        3 => (17. / 15., 1.35, 1.4),
+-        4 => (1., 1.35, 1.4),
+-        5 => (14. / 15., 1.35, 1.4),
+-        _ => (13. / 15., 1.35, 1.4),
++        1 => (2.0, 30.0 / 28.0, 32.0 / 28.0, 16.0 / 28.0),
++        2 => (1.5, 28.0 / 21.0, 32.0 / 21.0, 16.0 / 21.0),
++        3 => (1.25, 26.0 / 17.5, 32.0 / 17.5, 16.0 / 17.5),
++        4 => (1.125, 24.0 / 15.75, 16.0 / 15.75, 16.0 / 15.75),
++        5 => (1.0, 24.0 / 14.0, 16.0 / 14.0, 16.0 / 14.0),
++        _ => (
++            13.0 / 15.0,
++            24.0 / (13.0 / 15.0),
++            16.0 / (13.0 / 15.0),
++            16.0 / (13.0 / 15.0),
++        ),
+     }
+ }
+ 
+-/// The gap below a heading, relative to the heading's size.
+-const HEADING_BOTTOM_GAP: f32 = 0.35;
+-
+ /// The size a heading renders at, including one a caller's heading
+ /// refinement pins, which its gaps follow.
+ fn heading_size(level: u8, node_cx: &NodeContext, window: &Window) -> Pixels {
+@@ -3440,8 +3449,10 @@
+ }
+ 
+ /// The room above and below a horizontal rule.
++///
++/// [dsh] web `.markdown hr { margin: 32px 0 }`（body 14 基准 → 32/14）。
+ fn rule_space(body_font_size: Pixels) -> Pixels {
+-    body_font_size * 1.6
++    body_font_size * (32.0 / 14.0)
+ }
+ 
+ /// The gap below a block: a paragraph gap, unless nothing follows it.
+@@ -3502,9 +3513,109 @@
+     side(padding.left) + side(padding.right)
+ }
+ 
+-const CELL_PAD_PX: f32 = 24.0; // px_3 horizontal padding
++// [dsh] 表格几何对齐 DSH web（ui-primitives markdown/MarkdownText.module.css
++// `.tableScroll th/td`）：`padding: 10px 16px`，首列去左内距、末列去右内距
++// （`th:first-child` / `td:last-child`），让表格与正文左右缘对齐；字号
++// 13/22（`--dsw-font-markdown-table`），表头 500 字重（`...-table-head`）。
++// web 表格只有行底 0.5px 发丝，**无竖分隔线、无外框、无表头底色**。
++// `CELL_PAD_PX` 从 24 抬到 32（2×16）：它同时是 `table_cell_padding_x` 的
++// 单边兜底（/2 = 16）与列宽测量的总内距基准。
++pub const TABLE_CELL_PAD_X_PX: f32 = 16.0;
++pub const TABLE_CELL_PAD_Y_PX: f32 = 10.0;
++pub const TABLE_FONT_SIZE_PX: f32 = 13.0;
++pub const TABLE_LINE_HEIGHT_PX: f32 = 22.0;
++pub const TABLE_FONT_WEIGHT_BODY: u16 = 400;
++pub const TABLE_FONT_WEIGHT_HEAD: u16 = 500;
++pub const TABLE_ROW_HAIRLINE_PX: f32 = 0.5;
++/// web `th/td { min-width: 100px }`：列再窄也保留 100，避免两三个汉字就折行。
++pub const TABLE_CELL_MIN_WIDTH_PX: f32 = 100.0;
++
++// 上游列模型常量（保留；CELL_BORDER_PX 归零 = web 无竖分隔线）。
++const CELL_PAD_PX: f32 = 32.0; // 2 × 16 横向内距（[dsh] 10×16 表格内距）
+ const CELL_MIN_PX: f32 = 48.0;
+-const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the last
++const CELL_BORDER_PX: f32 = 0.0; // [dsh] web 表格无竖线
++
++/// 单元格左内距：首列贴边（`th:first-child` / `td:first-child`）。
++pub fn table_cell_pad_left(ix: usize, _col_count: usize) -> f32 {
++    if ix == 0 { 0. } else { TABLE_CELL_PAD_X_PX }
++}
++
++/// 单元格右内距：末列贴边（`th:last-child` / `td:last-child`）。
++pub fn table_cell_pad_right(ix: usize, col_count: usize) -> f32 {
++    if ix + 1 == col_count {
++        0.
++    } else {
++        TABLE_CELL_PAD_X_PX
++    }
++}
++
++/// 单元格左右内距之和：首列左 0、末列右 0（单列表格因此零内距）。
++pub fn table_cell_pad_x(ix: usize, col_count: usize) -> f32 {
++    table_cell_pad_left(ix, col_count) + table_cell_pad_right(ix, col_count)
++}
++
++/// 单元格字重：表头 500（`--dsw-font-markdown-table-head`），正文 400。
++pub fn table_cell_font_weight(header: bool) -> u16 {
++    if header {
++        TABLE_FONT_WEIGHT_HEAD
++    } else {
++        TABLE_FONT_WEIGHT_BODY
++    }
++}
++
++/// 单元格公共装饰（内距/字号/字重/对齐）。web 侧没有竖分隔线，故不画边框；
++/// 表头只加 500 字重，不铺底色。
++fn decorate_table_cell(
++    div: Div,
++    style: &TextViewStyle,
++    align: ColumnumnAlign,
++    ix: usize,
++    col_count: usize,
++    header: bool,
++) -> Div {
++    div.overflow_hidden()
++        // [dsh+up 0.9.1] 对齐内容盒而非文本：GPUI 的 text_align 绘制偏移
++        // 不被 TextLayout 命中测试覆盖——flex 列对齐让选中热区与视觉一致。
++        .when(align == ColumnumnAlign::Center, |this| {
++            this.flex().flex_col().items_center()
++        })
++        .when(align == ColumnumnAlign::Right, |this| {
++            this.flex().flex_col().items_end()
++        })
++        .when(ix != 0, |this| this.pl(px(TABLE_CELL_PAD_X_PX)))
++        .when(ix + 1 != col_count, |this| this.pr(px(TABLE_CELL_PAD_X_PX)))
++        .pt(px(TABLE_CELL_PAD_Y_PX))
++        .pb(px(TABLE_CELL_PAD_Y_PX))
++        .text_size(px(TABLE_FONT_SIZE_PX))
++        .line_height(px(TABLE_LINE_HEIGHT_PX))
++        .font_weight(if header {
++            FontWeight::MEDIUM
++        } else {
++            FontWeight::NORMAL
++        })
++        .refine_style(&style.table_cell())
++}
++
++/// 表格行：整行底 0.5px 发丝（web `th`/`td` 的 `border-bottom`；表头 l3、
++/// 正文 l2——TextViewStyle 只暴露单一 border 色，这里取同一档），表头不铺底色。
++fn decorate_table_row(div: Div, style: &TextViewStyle, header: bool) -> Div {
++    div.w_full()
++        .border_b(px(TABLE_ROW_HAIRLINE_PX))
++        .border_color(style.border())
++        .flex()
++        .flex_row()
++        .when(header, |this| {
++            this.text_color(style.foreground())
++                .refine_style(&style.table_head())
++        })
++        // [up 0.9.1] 表体行悬停底色（web 行 hover；表头不悬停）。上游
++        // `when_some(table_row_hover, …)` 同语义，此处并入行装饰器。
++        .when(!header, |this| {
++            this.when_some(style.table_row_hover(), |this, color| {
++                this.hover(|this| this.bg(color))
++            })
++        })
++}
+ 
+ /// The max-content width of every table column: the widest cell line,
+ /// shaped with the runs the cell renders with, plus the cell's padding and
+@@ -3563,12 +3674,7 @@
+         let width = window.with_text_style(Some(style), |window| {
+             super::inline_flow::intrinsic_width(&items, window, cx)
+         });
+-        let border = if ix + 1 < col_count {
+-            CELL_BORDER_PX
+-        } else {
+-            0.
+-        };
+-        col_w[ix] = col_w[ix].max(f32::from(width) + CELL_PAD_PX + border);
++        col_w[ix] = col_w[ix].max(f32::from(width) + table_cell_pad_x(ix, col_count));
+     }
+     col_w
+ }
+@@ -3646,14 +3752,9 @@
+                 }
+                 w = w.max(f32::from(line_w));
+             }
+-            // Border-box widths, so the padding and border the cell draws
+-            // must leave the measured text its full width.
+-            let border = if ix + 1 < col_count {
+-                CELL_BORDER_PX
+-            } else {
+-                0.
+-            };
+-            *slot = slot.max(w + CELL_PAD_PX + border);
++            // Border-box widths, so the padding the cell draws must leave the
++            // measured text its full width.
++            *slot = slot.max(w + table_cell_pad_x(ix, col_count));
+         }
+     }
+     (col_w, custom_cells)
+@@ -4161,7 +4262,9 @@
+         let scroll = matches!(style.table().overflow.x, Some(Overflow::Scroll));
+         let nowrap = style.table_cell().text.white_space == Some(WhiteSpace::Nowrap);
+         let rem_size = window.rem_size();
+-        let wrap_min_px = f32::from(rems(4.).to_pixels(rem_size));
++        // [dsh] web `.tableFill`：≤3 列的表填满列宽并折行，不做 64px 硬地板；
++        // 列最小宽由 `TABLE_CELL_MIN_WIDTH_PX`（web `min-width: 100px`）承担。
++        let wrap_min_px = f32::from(rems(0.).to_pixels(rem_size));
+         // Widths were measured with the default cell padding.
+         let padding_delta = table_cell_padding_x(style, rem_size) - CELL_PAD_PX;
+         // Lengths are rounded to device pixels for layout. Round the content
+@@ -4183,6 +4286,8 @@
+                 } else {
+                     w.min(wrap_min_px)
+                 };
++                // [dsh] web 表格无竖分隔线：divider 恒 0（CELL_BORDER_PX=0），
++                // 列宽即内容宽。
+                 let divider = if ix + 1 < col_count {
+                     CELL_BORDER_PX
+                 } else {
+@@ -4198,14 +4303,14 @@
+             .collect();
+ 
+         let rows = Self::render_table_rows(table, &columns, node_cx, window, cx);
+-        let frame = StyleRefinement::default()
+-            .text_size(text_size)
+-            .bg(style
+-                .table_background()
+-                .unwrap_or(cx.theme().tokens.colors.surface))
+-            .border_1()
+-            .border_color(style.border())
+-            .refine_style(style.table());
++        // [dsh] web 表格无外框、无底色（`.tableScroll` 只声明 overflow）：
++        // 不画 border_1，也不做 surface 兜底；调用方显式给 table_background
++        // 时才铺。行底发丝由 `decorate_table_row` 提供。
++        let mut frame = StyleRefinement::default().text_size(text_size);
++        if let Some(bg) = style.table_background() {
++            frame = frame.bg(bg);
++        }
++        let frame = frame.refine_style(style.table());
+         let body = if scroll {
+             let scroll_handle = window
+                 .use_keyed_state(
+@@ -4350,7 +4455,7 @@
+         for (row_ix, row) in table.children.iter().enumerate() {
+             let mut cells = Vec::with_capacity(col_count * 2);
+             for (ix, column) in columns.iter().enumerate() {
+-                let is_last_col = ix + 1 == col_count;
++                // [dsh] web 无竖分隔线，列是否末列不再影响 slack。
+                 let align = table.column_align(ix);
+                 let content = row.children.get(ix).map(|cell| {
+                     let fade_key = table
+@@ -4370,69 +4475,47 @@
+                     cells.push(slack(lead).into_any_element());
+                 }
+                 cells.push(
++                    // [dsh] 单元格装饰走 `decorate_table_cell`（10×16 内距、
++                    // 13/22 排印、表头 500、首末列贴边）；列由 cell + slack
++                    // 组成，cell 从 0 长到内容宽。
+                     TableCellElement(
+-                        div()
+-                            .flex_basis(px(0.))
+-                            .flex_grow(CELL_GROW)
+-                            .min_w(px(column.min))
+-                            .max_w(px(column.max))
+-                            .overflow_hidden()
+-                            // Align the content box, not its text: GPUI
+-                            // paints `text_align` with an offset that
+-                            // `TextLayout` hit-testing leaves out, so
+-                            // aligned text could not be selected where it
+-                            // shows.
+-                            .when(align == ColumnumnAlign::Center, |this| {
+-                                this.flex().flex_col().items_center()
+-                            })
+-                            .when(align == ColumnumnAlign::Right, |this| {
+-                                this.flex().flex_col().items_end()
+-                            })
+-                            .px_3()
+-                            .py(px(7.))
+-                            .refine_style(&style.table_cell())
+-                            .children(content)
+-                            .into_any_element(),
++                        decorate_table_cell(
++                            div()
++                                .flex_basis(px(0.))
++                                .flex_grow(CELL_GROW)
++                                .min_w(px(column.min))
++                                .max_w(px(column.max)),
++                            style,
++                            align,
++                            ix,
++                            col_count,
++                            row_ix == 0,
++                        )
++                        .children(content)
++                        .into_any_element(),
+                     )
+                     .into_any_element(),
+                 );
+-                if trail > 0. || !is_last_col {
+-                    cells.push(
+-                        slack(trail)
+-                            .when(!is_last_col, |this| this.border_r_1())
+-                            .into_any_element(),
+-                    );
++                if trail > 0. {
++                    // [dsh] web 无竖分隔线：slack 只做对齐占位，不再 border_r_1。
++                    cells.push(slack(trail).into_any_element());
+                 }
+             }
+             rows.push(
+-                div()
+-                    // GPUI keys hover state by element id, so each row needs
+-                    // its own for its hover highlight to follow the pointer.
++                // [dsh] 每行底 0.5px 发丝（web 每格都有 border-bottom，末行
++                // 不缺线）；表头只加 500 字重，不铺底色。
++                // [up 0.9.1] 行独立元素 id：GPUI hover 状态按元素 id 键控，
++                // 无 id 时各行悬停高亮互串。
++                decorate_table_row(div(), style, row_ix == 0)
+                     .id(("row", row_ix))
+-                    .w_full()
+-                    .when(row_ix < row_count - 1, |this| this.border_b_1())
+-                    .border_color(style.border())
+-                    .flex()
+-                    .flex_row()
+-                    // The first row is the header, as everywhere else that
+-                    // reads a table (`table_data`, `to_markdown`). The
+-                    // refinement comes last so it can override the defaults.
+                     .when(row_ix == 0, |this| {
+-                        this.bg(style.code_background())
+-                            .text_color(style.foreground())
+-                            .when_some(top_left, |this, radius| this.rounded_tl(radius))
+-                            .when_some(top_right, |this, radius| this.rounded_tr(radius))
+-                            .refine_style(&style.table_head())
++                        this.rounded_tl(top_left.unwrap_or(px(0.)))
++                            .rounded_tr(top_right.unwrap_or(px(0.)))
+                     })
+                     .when(row_ix + 1 == row_count, |this| {
+-                        this.when_some(bottom_left, |this, radius| this.rounded_bl(radius))
+-                            .when_some(bottom_right, |this, radius| this.rounded_br(radius))
++                        this.rounded_bl(bottom_left.unwrap_or(px(0.)))
++                            .rounded_br(bottom_right.unwrap_or(px(0.)))
+                     })
+-                    // Body rows only: the header keeps its own fill.
+-                    .when_some(
+-                        style.table_row_hover().filter(|_| row_ix > 0),
+-                        |this, color| this.hover(|this| this.bg(color)),
+-                    )
+                     .children(cells)
+                     .into_any_element(),
+             );
+@@ -4487,7 +4570,9 @@
+                 children,
+                 span,
+             } => {
+-                let (_, line_height, section_gap) = heading_metrics(*level);
++                // [dsh] 元组第 4 元 = 段后 16px 倍率（web h1-h3 下 16、
++                // h4-h6 下 16，相对各自 size）。
++                let (_, line_height, section_gap, bottom_gap) = heading_metrics(*level);
+                 let refinement = node_cx.style.heading(*level);
+                 let text_size = heading_size(*level, node_cx, window);
+                 // The previous block already leaves a gap below itself, so
+@@ -4511,7 +4596,7 @@
+                 let bottom = if options.is_last {
+                     px(0.)
+                 } else {
+-                    text_size * HEADING_BOTTOM_GAP
++                    text_size * bottom_gap
+                 };
+ 
+                 div()
+@@ -4519,10 +4604,19 @@
+                     .pb(bottom)
+                     .whitespace_normal()
+                     .text_size(text_size)
+-                    .line_height(relative(line_height))
+-                    .font_weight(FontWeight::SEMIBOLD)
+-                    .when(*level >= 6, |this| {
+-                        this.text_color(node_cx.style.muted_foreground())
++                    // [dsh] 行高优先走 `heading_line_height` 闭包（web 绝对
++                    // 标尺 30/28/26/24），否则退回相对倍率。
++                    .line_height(match node_cx.style.heading_line_height.as_ref() {
++                        Some(f) => f(*level, text_size).into(),
++                        None => relative(line_height),
++                    })
++                    // [dsh] web `.markdown h1-h3` 700、`h4-h6` 600（上游统一
++                    // semibold，层级感不足）；h5/h6 颜色仍是 label-primary
++                    //（上游把 h6 压成 muted，与 web 不符）。
++                    .font_weight(if *level <= 3 {
++                        FontWeight::BOLD
++                    } else {
++                        FontWeight::SEMIBOLD
+                     })
+                     .refine_style(&refinement)
+                     .child(children.render(
+@@ -4534,12 +4628,14 @@
+                     .into_any_element()
+             }
+             BlockNode::Blockquote { children, .. } => gapped(
++                // [dsh] 对齐 web .markdown blockquote：2px caption 左边线
++                // + padding-left 14px，正文不再压暗（web 保持 label-primary）。
+                 div()
+                     .w_full()
+-                    .text_color(node_cx.style.muted_foreground())
++                    .text_color(node_cx.style.foreground())
+                     .border_l_2()
+-                    .border_color(node_cx.style.border())
+-                    .pl(body_font_size(node_cx, window) * 0.9)
++                    .border_color(node_cx.style.muted_foreground())
++                    .pl(px(14.))
+                     .refine_style(node_cx.style.blockquote_style())
+                     // Nested tables measure while rendering, before this div applies its text style.
+                     .children({
+@@ -4620,6 +4716,9 @@
+                 .w_full()
+                 .min_w_0()
+                 .pb(mb)
++                // [dsh] 对齐 web .markdown li:not(:first-child) { margin-top:
++                // 6px }（嵌套列表 web 为 4px，此处统一 6px）。
++                .gap(px(6.))
+                 .children({
+                     let mut items = Vec::with_capacity(children.len());
+                     let mut item_index = 0;
+@@ -4695,7 +4794,8 @@
+                     let above = match options.prev {
+                         PrevBlock::Rule => space,
+                         PrevBlock::Heading(level) => {
+-                            heading_size(level, node_cx, window) * HEADING_BOTTOM_GAP
++                            // [dsh] 段后 16px：取 web 段后倍率（16/该级 size）。
++                            heading_size(level, node_cx, window) * heading_metrics(level).3
+                         }
+                         PrevBlock::Other => {
+                             node_cx.style.paragraph_gap().to_pixels(window.rem_size())
+@@ -4706,7 +4806,8 @@
+                 div()
+                     .pt(top)
+                     .when(!options.is_last, |this| this.pb(space))
+-                    .child(div().bg(node_cx.style.border()).h(px(1.)))
++                    // [dsh] alpha.4：hr 高度 hairline 化 0.5px（web 0.5px）。
++                    .child(div().bg(node_cx.style.border()).h(px(0.5)))
+                     .into_any_element()
+             }
+             BlockNode::Break { .. } => div().into_any_element(),
+--- a/src/text/style.rs
++++ b/src/text/style.rs
+@@ -1,5 +1,8 @@
+ use std::sync::Arc;
+ 
++// [dsh] heading_line_height 闭包用 Pixels。
++use gpui::Pixels;
++
+ use gpui::{HighlightStyle, Hsla, Rems, StyleRefinement, rems};
+ 
+ use crate::ColorTokens;
+@@ -39,6 +42,11 @@
+     /// when `None`.
+     table_row_hover: Option<Hsla>,
+     is_dark: bool,
++    /// [dsh] 按标题级（1-6）算行高（基于该级 text_size）；None 继承。镜像
++    /// web `--dsw-font-markdown-h*` 行高标尺（30/28/26/24px）。
++    pub(crate) heading_line_height: Option<
++        Arc<dyn Fn(u8, Pixels) -> Pixels + Send + Sync + 'static>,
++    >,
+ }
+ 
+ impl PartialEq for TextViewStyle {
+@@ -110,6 +118,7 @@
+             table_background: None,
+             table_row_hover: None,
+             is_dark,
++            heading_line_height: None,
+         }
+     }
+ 
+@@ -274,6 +283,15 @@
+         self
+     }
+ 
++    /// [dsh] Set per-level heading line height (see `heading_line_height`).
++    pub fn with_heading_line_height<F>(mut self, f: F) -> Self
++    where
++        F: Fn(u8, Pixels) -> Pixels + Send + Sync + 'static,
++    {
++        self.heading_line_height = Some(Arc::new(f));
++        self
++    }
++
+     /// The default body-text color.
+     pub fn foreground(&self) -> Hsla {
+         self.foreground

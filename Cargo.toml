@@ -70,3 +70,14 @@ gpui-base = "0.9.0"
 gpui-kit-assets = "0.9.0"
 encoding_rs = "0.8"
 codepage = "0.1"
+# dev 构建的依赖定向优化：会话日志解析（serde_json Value 树 / zstd 解压）与
+# GPUI 文本栈是宿主热路径的大头——整包 opt=0 时 8MB 会话档首次加载 3.5s、
+# 依赖开 opt=2 后接近 release（实测 ~0.4s）。只动依赖，本仓 crate 保持可调试。
+[profile.dev.package.serde_json]
+opt-level = 2
+[profile.dev.package.serde]
+opt-level = 2
+[profile.dev.package.serde_yaml]
+opt-level = 2
+[profile.dev.package.zstd-safe]
+opt-level = 2

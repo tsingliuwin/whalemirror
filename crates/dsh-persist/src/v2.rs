@@ -60,11 +60,10 @@ pub fn latest_generation(dir: &Path) -> Option<PathBuf> {
     generation_files(dir).pop().map(|(_, p)| p)
 }
 
-/// 读取日志 header（首个信封行）。
+/// 读取日志 header（首个信封行；前缀解压——header 只需第一行）。
 pub fn read_header(file: &Path) -> Option<serde_json::Value> {
-    let bytes = crate::read_decompressed(file).ok()?;
-    let first = bytes.split(|&b| b == b'\n').next()?;
-    serde_json::from_slice(first).ok()
+    let first = crate::read_first_line(file)?;
+    serde_json::from_slice(&first).ok()
 }
 
 /// header 的格式版本（无 header / 非 session 行按 0 处理——legacy 兼容）。

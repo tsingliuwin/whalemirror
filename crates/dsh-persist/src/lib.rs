@@ -176,6 +176,21 @@ pub struct SessionRecorder {
     /// 懒物化新会话头写入的 agentPreset（宿主按用户默认预设设置；上游
     /// registry 的 selectedDefault 在新会话解析时落头）。
     default_agent_preset: std::sync::Mutex<String>,
+    /// 已解析事件缓存（2 槽 LRU；键 = 路径 + mtime(ns)+size）。切会话的
+    /// 重复 load 免全量重解析——大日志曾是秒级卡顿主因。
+    parsed: std::sync::Mutex<Vec<(PathBuf, (i128, u64), std::sync::Arc<Vec<SessionEvent>>)>>,
+}
+
+/// 文件内容戳（mtime ns + size）：缓存有效性键。读不到（文件被删）返回 None。
+fn file_content_stamp(file: &Path) -> Option<(i128, u64)> {
+    let meta = std::fs::metadata(file).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as i128;
+    Some((mtime, meta.len()))
 }
 
 impl SessionRecorder {
@@ -186,6 +201,7 @@ impl SessionRecorder {
             seqs: std::sync::Mutex::new(Default::default()),
             streams: std::sync::Mutex::new(Default::default()),
             default_agent_preset: std::sync::Mutex::new("standard".to_string()),
+            parsed: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -810,11 +826,21 @@ impl SessionRecorder {
 
     /// 读取并分类一整个日志（ignorable 契约的执行点）：
     /// 未知类型 + 非 ignorable → 拒绝（Err）；其余未知/未映射类型按分类跳过。
+    /// 带解析缓存（mtime+size 键控）：切换会话的重复 load 免去「整档解压 +
+    /// 每行 JSON 解析」的全量重跑（曾是大日志切会话秒级卡顿的主因——40MB
+    /// 档被全量解压 3 次、每行双重解析，且每次切换都重来）。
     fn read_events(&self, file: &Path) -> io::Result<Vec<SessionEvent>> {
-        let (lines, _) = self.read_lines(file);
+        if let Some(events) = self.parsed_cache_hit(file) {
+            return Ok(events);
+        }
+        let bytes = read_decompressed(file)?;
+        let text = String::from_utf8_lossy(&bytes);
         let mut events = Vec::new();
-        for line in lines {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
                 continue;
             };
             // 日志首行的 SessionHeader 记录（type:"session"）不是事件，
@@ -839,7 +865,32 @@ impl SessionRecorder {
                 },
             }
         }
+        self.parsed_cache_store(file, events.clone());
         Ok(events)
+    }
+
+    /// 解析缓存命中（键 = 文件 mtime(ns)+size；追加写改变 mtime 自动失效）。
+    /// 命中返回深拷贝（事件含大量 String，直接 Arc 共享需要改 Session 存储
+    /// 形——拷贝约百毫秒级，仍远低于全量重解析的秒级）。
+    fn parsed_cache_hit(&self, file: &Path) -> Option<Vec<SessionEvent>> {
+        let stamp = file_content_stamp(file)?;
+        let cache = self.parsed.lock().unwrap();
+        for (path, (mtime, len), events) in cache.iter() {
+            if path == file && (*mtime, *len) == stamp {
+                return Some(events.as_ref().clone());
+            }
+        }
+        None
+    }
+
+    fn parsed_cache_store(&self, file: &Path, events: Vec<SessionEvent>) {
+        let Some(stamp) = file_content_stamp(file) else { return };
+        let mut cache = self.parsed.lock().unwrap();
+        // 2 槽 LRU：容量与内存换算约=两个大会话的事件树；挤掉最旧的。
+        if cache.len() >= 2 {
+            cache.remove(0);
+        }
+        cache.push((file.to_path_buf(), stamp, std::sync::Arc::new(events)));
     }
 
     fn read_lines(&self, file: &Path) -> (Vec<String>, u64) {
@@ -872,18 +923,48 @@ fn read_decompressed(file: &Path) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// 只解压前至多 `max` 字节——header 类读取（版本/头行 cwd/agentPreset）只
+/// 需要第一行，整档解压是纯浪费（40MB 档解压 3 次/次加载曾是切换卡顿
+/// 组成部分）。前缀内没有换行（病态首行超长）则回退全量解压。
+fn read_decompressed_prefix(file: &Path, max: usize) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let f = File::open(file)?;
+    let mut dec = zstd::stream::Decoder::new(f)?;
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 16384];
+    loop {
+        let n = dec.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&chunk[..n]);
+        if out.len() >= max {
+            break;
+        }
+    }
+    if out.iter().any(|&b| b == b'\n') {
+        Ok(out)
+    } else {
+        read_decompressed(file)
+    }
+}
+
+/// 读日志第一行（前缀解压版，见 `read_decompressed_prefix`）。
+fn read_first_line(file: &Path) -> Option<Vec<u8>> {
+    let bytes = read_decompressed_prefix(file, 512 * 1024).ok()?;
+    bytes.split(|&b| b == b'\n').next().map(|l| l.to_vec())
+}
+
 fn read_header_cwd(file: &Path) -> Option<String> {
-    let bytes = read_decompressed(file).ok()?;
-    let first = bytes.split(|&b| b == b'\n').next()?;
-    let v: serde_json::Value = serde_json::from_slice(first).ok()?;
+    let first = read_first_line(file)?;
+    let v: serde_json::Value = serde_json::from_slice(&first).ok()?;
     v.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string())
 }
 
 /// 会话头的 `agentPreset`（v2+ 起随头落盘；缺省 = 上游部署默认 standard）。
 pub fn read_header_agent_preset(file: &Path) -> Option<String> {
-    let bytes = read_decompressed(file).ok()?;
-    let first = bytes.split(|&b| b == b'\n').next()?;
-    let v: serde_json::Value = serde_json::from_slice(first).ok()?;
+    let first = read_first_line(file)?;
+    let v: serde_json::Value = serde_json::from_slice(&first).ok()?;
     v.get("agentPreset")
         .and_then(|c| c.as_str())
         .map(|s| s.to_string())

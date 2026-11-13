@@ -702,12 +702,14 @@ impl Render for SidebarView {
                             {
                                 let t_m = sb.clone();
                                 let id_m = meta.id.as_str().to_string();
+                                let t_rc = t_m.clone();
+                                let id_rc = id_m.clone();
                                 let key = format!("sbrow-{row_index}");
                                 let kb = key.clone();
                                 let slot = row_bounds.clone();
                                 all_rows.push(anchored_row(
                                     key,
-                                    session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_ids.contains(&meta.id), move |_, _, cx| {
+                                        session_row(row_index, meta.title.clone(), meta.time_label.clone(), active, meta.blank, self.running_ids.contains(&meta.id), move |_, _, cx| {
                                         let id = id.clone();
                                         t_sw.update(cx, |v, cx| { v.switch_session(id, cx); });
                                     }, move |click, _, cx| {
@@ -716,6 +718,14 @@ impl Render for SidebarView {
                                             .map(|b| f32::from(b.origin.y + b.size.height))
                                             .unwrap_or_else(|| crate::click_anchor_y(click));
                                         t_m.update(cx, |v, cx| {
+                                            v.sidebar_menu = Some(("session".into(), id, y));
+                                            cx.notify();
+                                        });
+                                    })
+                                    .on_mouse_down(gpui::MouseButton::Right, move |event, _, cx| {
+                                        let id = id_rc.clone();
+                                        let y = f32::from(event.position.y) + 12.0;
+                                        t_rc.update(cx, |v, cx| {
                                             v.sidebar_menu = Some(("session".into(), id, y));
                                             cx.notify();
                                         });
@@ -746,6 +756,8 @@ impl Render for SidebarView {
                 let active = meta.id == current_id;
                 let t_m = sb.clone();
                 let id_m = meta.id.as_str().to_string();
+                let t_rc = t_m.clone();
+                let id_rc = id_m.clone();
                 {
                     let key = format!("sbrow-{row_index}");
                     let kb = key.clone();
@@ -761,6 +773,14 @@ impl Render for SidebarView {
                                 .map(|b| f32::from(b.origin.y + b.size.height))
                                 .unwrap_or_else(|| crate::click_anchor_y(click));
                             t_m.update(cx, |v, cx| {
+                                v.sidebar_menu = Some(("session".into(), id, y));
+                                cx.notify();
+                            });
+                        })
+                        .on_mouse_down(gpui::MouseButton::Right, move |event, _, cx| {
+                            let id = id_rc.clone();
+                            let y = f32::from(event.position.y) + 12.0;
+                            t_rc.update(cx, |v, cx| {
                                 v.sidebar_menu = Some(("session".into(), id, y));
                                 cx.notify();
                             });

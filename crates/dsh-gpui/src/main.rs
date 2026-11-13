@@ -2031,8 +2031,11 @@ pub(crate) struct AppView {
     automation_form_error: Option<String>,
     /// 表单三输入的渲染期清空旗标（set_value 需 window）
     automation_form_clear: bool,
+    /// 编辑卡「添加模型」输入的渲染期清空旗标（set_value 需 window）
+    edit_model_clear: bool,
     /// 规则输入 Enter → 提交表单（键盘流）
     _automation_rule_enter: Subscription,
+    _edit_model_enter: Subscription,
     /// 隐藏卡草稿（callId → 完整卡态；X 隐藏时暂存、工具行重开时恢复——
     /// 上游 editor-store `task:${id}` 的单进程等价）
     question_card_drafts: std::collections::HashMap<String, dsh_gpui::question_card::QuestionCardState>,
@@ -2139,6 +2142,11 @@ pub(crate) struct AppView {
     // 编辑卡输入
     edit_key: Entity<InputState>,
     edit_base: Entity<InputState>,
+    /// 编辑卡「添加模型」输入（回车/按钮追加到正在编辑的提供方；web
+    /// ProviderEditor 的 ModelListEditor 增行——rustdsh 此前编辑卡无模型行
+    /// 管理面，端点不支持 /models 列举时（火山 ark 实测 404）添加无路、
+    /// 删除无门。
+    edit_model_input: Entity<InputState>,
     // 获取可用模型（web ModelListEditor 的 fetch 流程；rc.1 master 语义）。
     // target 同时是弹层开关；pending/error 记归属卡（web 两卡各有本地状态，
     // rustdsh 共享一份）；picked 初始 = 全部候选减已配置行。
@@ -2300,6 +2308,7 @@ impl AppView {
         model_capacity_input: Entity<InputState>,
         reasoning_wire_input: Entity<InputState>,
         edit_base: Entity<InputState>,
+        edit_model_input: Entity<InputState>,
         fetch_query: Entity<InputState>,
         web_search_key_input: Entity<InputState>,
         web_search_base_url_input: Entity<InputState>,
@@ -2316,6 +2325,13 @@ impl AppView {
         let automation_rule_enter = cx.subscribe(&automation_rule_input, |v: &mut Self, _, event, cx| {
             if let InputEvent::PressEnter { .. } = event {
                 v.automation_create(cx);
+            }
+        });
+        // 编辑卡「添加模型」输入 Enter → 追加模型行（卡内按钮点击可达性
+        // 在本环境不可靠（#96 族），回车是已验证交互——同自动化规则输入）
+        let edit_model_enter = cx.subscribe(&edit_model_input, |v: &mut Self, _, event, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                v.edit_add_model(cx);
             }
         });
         let subscription = cx.subscribe(&input, |chat, input, event, cx| {
@@ -2456,7 +2472,9 @@ impl AppView {
         automation_rule_preset: AutomationRulePreset::Daily,
         automation_form_error: None,
         automation_form_clear: false,
+        edit_model_clear: false,
         _automation_rule_enter: automation_rule_enter,
+        _edit_model_enter: edit_model_enter,
         job_owner: job_owner.clone(),
         fs_observation,
         todos: Vec::new(),
@@ -2504,6 +2522,7 @@ impl AppView {
             dc_new_model,
             edit_key,
             edit_base,
+            edit_model_input,
             fetch_target: None,
             fetch_pending: None,
             fetch_error: None,
@@ -6507,6 +6526,59 @@ impl AppView {
         self.persist_settings();
     }
 
+    /// 编辑卡「添加模型」：把输入的模型 id 追加到正在编辑的提供方
+    /// （web ProviderEditor ModelListEditor 增行；查重、即时落盘——与
+    /// fetch_adopt 同先例）。回车或按钮两路进入。
+    fn edit_add_model(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.editing_provider.clone() else { return };
+        let new_id = self
+            .edit_model_input
+            .read_with(cx, |s, _| s.value().trim().to_string());
+        if new_id.is_empty() {
+            return;
+        }
+        let Some(p) = self.settings.providers.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
+        if p.models.iter().any(|m| m.id == new_id) {
+            return; // 查重：已存在静默忽略（declare 卡 dc_push_model 同语义）
+        }
+        p.models.push(CustomModel {
+            id: new_id,
+            display_name: String::new(),
+            context_window: String::new(),
+            max_tokens: String::new(),
+            reasoning_efforts: None,
+        });
+        // 清输入（set_value 需 window——渲染期清空旗标，同 automation_form_clear）
+        self.edit_model_clear = true;
+        self.persist_settings();
+        cx.notify();
+    }
+
+    /// 编辑卡「删除模型」：至少保留一行（pi-ai 拒绝零模型提供方；web
+    /// CustomProviderCard create 同门槛），删除即时落盘。
+    fn edit_remove_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
+        let Some(id) = self.editing_provider.clone() else { return };
+        let Some(p) = self.settings.providers.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
+        if p.models.len() <= 1 {
+            self.pending_toasts.push("至少保留一个模型".into());
+            cx.notify();
+            return;
+        }
+        p.models.retain(|m| m.id != model_id);
+        // 路由默认模型（首行）被删时次行顶上（activate/save 均取 first）；
+        // 当前选中模型恰好是它则回退到新首行。
+        if self.desired_model == model_id && self.active_provider == id {
+            let next = p.models.first().map(|m| m.id.clone()).unwrap_or_default();
+            self.desired_model = next;
+        }
+        self.persist_settings();
+        cx.notify();
+    }
+
     /// 编辑卡保存（web ProviderEditor apply：换 key / 改 API 地址）。
     fn save_edit(&mut self, cx: &App) {
         let Some(id) = self.editing_provider.clone() else { return };
@@ -6872,6 +6944,10 @@ impl Render for AppView {
             ] {
                 input.update(cx, |state, cx| state.set_value("", window, cx));
             }
+        }
+        if self.edit_model_clear {
+            self.edit_model_clear = false;
+            self.edit_model_input.update(cx, |state, cx| state.set_value("", window, cx));
         }
         if self.pending_clear {
             self.pending_clear = false;
@@ -12741,6 +12817,9 @@ fn main() {
                 let model_capacity_input = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("如 128K 或 131072")
                 });
+                let edit_model_input = cx.new(|cx: &mut Context<InputState>| {
+                    InputState::new(window, cx).placeholder("输入模型 id，回车添加")
+                });
                 let edit_base = cx.new(|cx: &mut Context<InputState>| {
                     InputState::new(window, cx).placeholder("提供方默认")
                 });
@@ -12791,6 +12870,7 @@ fn main() {
                         dc_key.clone(),
                         dc_new_model.clone(),
                         edit_key.clone(),
+                        edit_model_input.clone(),
                         model_capacity_input.clone(),
                         reasoning_wire_input.clone(),
                         edit_base.clone(),

@@ -1250,6 +1250,89 @@ fn edit_card(app: &AppView, this: &Entity<AppView>, id: &str, name: &str, cx: &A
             }
             col
         })
+        // 模型行管理（web ProviderEditor ModelListEditor 的增删面；rustdsh
+        // 此前编辑卡无此面——端点不支持 /models 列举时添加无路、删除无门）。
+        // 交互按本环境已验证模式：行内删除钮 + 首屏输入行回车添加。
+        .when(id != "deepseek", |d| {
+            let t = this.clone();
+            let Some(provider) = app.settings.providers.iter().find(|p| p.id == id) else {
+                return d;
+            };
+            let mut col = d.child(
+                div()
+                    .text_size(px(theme::FONT_ROW))
+                    .line_height(px(22.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(tk.text)
+                    .child("模型"),
+            );
+            for (i, m) in provider.models.iter().enumerate() {
+                let mid = m.id.clone();
+                let model_id = mid.clone();
+                let t_row = t.clone();
+                col = col.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(dsh_gpui::ui_metrics::PROVIDER_ROW_ACTIONS_GAP_PX))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(theme::FONT_ROW))
+                                .line_height(px(22.0))
+                                .text_color(tk.text)
+                                .child(mid.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::FONT_CAPTION))
+                                .line_height(px(theme::FONT_CAPTION_LEADING))
+                                .text_color(if m.context_window.is_empty() {
+                                    tk.text_3
+                                } else {
+                                    tk.text_2
+                                })
+                                .child(if m.context_window.is_empty() {
+                                    "容量按目录兜底".to_string()
+                                } else {
+                                    format!("上下文 {}", m.context_window)
+                                }),
+                        )
+                        .when(provider.models.len() > 1, |row| {
+                            let t_del = t_row.clone();
+                            row.child(compact_action_button(
+                                SharedString::from(format!("edit-model-del-{i}")),
+                                "删除",
+                                true,
+                                move |_, _, cx| {
+                                    let model_id = model_id.clone();
+                                    t_del.update(cx, |v, cx| v.edit_remove_model(&model_id, cx));
+                                },
+                            ))
+                        }),
+                );
+            }
+            col.child(field(
+                "添加模型",
+                Input::new(&app.edit_model_input).w_full(),
+            ))
+            .child(hint("输入模型 id 后回车（或点添加）；首行即路由默认模型。"))
+            .child({
+                let t_add = t.clone();
+                compact_action_button(
+                    "edit-model-add",
+                    "添加",
+                    false,
+                    move |_, _, cx| {
+                        t_add.update(cx, |v, cx| v.edit_add_model(cx));
+                    },
+                )
+            })
+        })
         .child(
             // 自定义设置折叠（web details.customized：12/18 wt500 secondary + 旋转 chevron）
             disclosure(
